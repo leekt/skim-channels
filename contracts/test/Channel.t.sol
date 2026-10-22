@@ -25,6 +25,15 @@ contract WritingModule {
     }
 }
 
+/// Approved, but pays out more than the escrow: only settlement's conservation check stops it.
+contract GreedyModule {
+    function compute(bytes calldata, WitnessLib.Read[] calldata, uint256) external pure returns (bytes memory) {
+        uint256[] memory p = new uint256[](2);
+        p[0] = 3 ether;
+        return abi.encode(p);
+    }
+}
+
 /// Never approved.
 contract RogueModule {
     function compute(bytes calldata, WitnessLib.Read[] calldata, uint256) external pure returns (bytes memory) {
@@ -64,6 +73,7 @@ contract ChannelTest is Test {
     SplitModule split;
     WritingModule writer;
     RogueModule rogue;
+    GreedyModule greedy;
 
     bytes32 profileHash;
     ChannelTypes.ChannelPolicy policy;
@@ -94,6 +104,7 @@ contract ChannelTest is Test {
         split = new SplitModule();
         writer = new WritingModule();
         rogue = new RogueModule();
+        greedy = new GreedyModule();
         profileHash = ChannelTypes.profileHash(
             ChannelTypes.ExecutionProfile({
                 rollupId: ROLLUP,
@@ -105,9 +116,10 @@ contract ChannelTest is Test {
                 executorCodeHash: keccak256("executor")
             })
         );
-        address[] memory mods = new address[](2);
+        address[] memory mods = new address[](3);
         mods[0] = address(split);
         mods[1] = address(writer);
+        mods[2] = address(greedy);
         executor = new ChannelExecutor(profileHash, L1, inbox, mods);
         settlement =
             new ChannelSettlement(ROLLUP, profileHash, ChannelTypes.PROFILE_MOCK_LOCAL, registry, anchors);
@@ -219,6 +231,17 @@ contract ChannelTest is Test {
         internal
         returns (bytes memory)
     {
+        return _prove(logs, request, outcome, anchorId, accept, 1);
+    }
+
+    function _prove(
+        Vm.Log[] memory logs,
+        bytes memory request,
+        bytes memory outcome,
+        bytes32 anchorId,
+        bool accept,
+        uint256 status
+    ) internal returns (bytes memory) {
         bytes[] memory encLogs = new bytes[](logs.length);
         for (uint256 i; i < logs.length; ++i) {
             bytes[] memory topics = new bytes[](logs[i].topics.length);
@@ -230,7 +253,7 @@ contract ChannelTest is Test {
             encLogs[i] = RLPEncode.list(f);
         }
         bytes[] memory rf = new bytes[](4);
-        rf[0] = RLPEncode.num(1);
+        rf[0] = RLPEncode.num(status);
         rf[1] = RLPEncode.num(100_000);
         rf[2] = RLPEncode.str(new bytes(256));
         rf[3] = RLPEncode.list(encLogs);
@@ -496,6 +519,25 @@ contract ChannelTest is Test {
         vm.expectRevert(abi.encodeWithSelector(ChannelSettlement.Invalid.selector, "header"));
         settlement.settle(t.channelId, abi.encode(bad));
         // The honest evidence still settles.
+        settlement.settle(t.channelId, evidence);
+    }
+
+    function test_nonConservingOutcomeRejected() public {
+        ChannelTypes.ChannelTerms memory t = _openAndFund("g", address(greedy));
+        (ChannelExecutor.Call memory c, ChannelTypes.FinalRequest memory r) = _call(t, ".h1", _input());
+        bytes memory evidence = _executeAndProve(c, r, true);
+        vm.expectRevert(abi.encodeWithSelector(ChannelSettlement.Invalid.selector, "conservation"));
+        settlement.settle(t.channelId, evidence);
+    }
+
+    function test_failedReceiptRejected() public {
+        // An accepted block whose receipt carries the outcome log but status 0.
+        ChannelTypes.ChannelTerms memory t = _openAndFund("fr", address(split));
+        (ChannelExecutor.Call memory c, ChannelTypes.FinalRequest memory r) = _call(t, ".h1", _input());
+        vm.recordLogs();
+        bytes memory outcome = executor.execute(c);
+        bytes memory evidence = _prove(vm.getRecordedLogs(), c.request, outcome, r.anchorId, true, 0);
+        vm.expectRevert(abi.encodeWithSelector(ChannelSettlement.Invalid.selector, "receipt status"));
         settlement.settle(t.channelId, evidence);
     }
 
