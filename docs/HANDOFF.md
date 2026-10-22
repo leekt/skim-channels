@@ -126,18 +126,19 @@ Read first: [PROJECT](PROJECT.md) (spec v0.1) and [STAGE2](STAGE2.md) (the desig
 | | gas / bytes |
 |---|---|
 | L2 `execute` (2 signatures, 1-slot witness, split) | 282,670 gas |
-| L1 `settle` (receipt proof in a 1-tx L2 block) | 306,323 gas |
+| L1 `settle`, receipt is tx 15 of a 31-tx L2 block (3-node proof) | 375,460 gas |
+| L1 `settle`, 1-tx L2 block (earlier run, same build otherwise) | 306,323 gas |
 | L1 `finalizeExit` (L1 re-execution, same witness) | 295,172 gas |
 | L1 `startExit` | 102,881 gas |
 | L1 anchor `record` | 111,062 gas |
 | L1 `open` / `fund` / `refund` / `withdraw` | 301,793 / 45,947 / 72,199 / 28,501 gas |
 | witness package (1 account with code, 1 slot) | 1,920 bytes |
-| settlement evidence | 2,528 bytes |
+| settlement evidence (31-tx block / 1-tx block) | 3,296 / 2,528 bytes |
 
-Settlement in a busier L2 block costs more: receipt proofs grow with block size, and log
-decoding grows with the receipt. That is unmeasured. For this tiny module, L1 re-execution
-costs about the same as receipt settlement. That observation is from one data point and is
-not a general claim.
+Settlement cost grows with the L2 block, because the receipt proof grows with it: +69k gas
+and +768 bytes from 1 to 31 transactions. Larger blocks are unmeasured. For this tiny module,
+L1 re-execution (`finalizeExit`, 295k) costs about the same as receipt settlement. That
+observation is from one module and not a general claim.
 
 ## Known limitations
 - **Native verification (M3) is external and missing.** No compatible network or verifier
@@ -154,8 +155,6 @@ not a general claim.
     await owner review (STAGE2).
 - **Untested:**
   - the live skim path (no skim instance was running; the ignored test exists);
-  - receipt evidence in multi-transaction L2 blocks on a real chain (covered by the 130-receipt
-    fixtures, but not end to end);
   - blob DA end to end (forge `vm.blobhashes` only).
 - **Single-slot reads only in the demo.** Bounds: 256 accounts and 1,024 slots per package,
   64 proof nodes, 600 bytes per node, 256 logs per receipt.
@@ -167,5 +166,5 @@ not a general claim.
    submissions.
 3. Live skim run: finalized-anchor witness availability and latency (`--ignored` test, then
    the e2e against skim as L1).
-4. M4: multi-transaction L2 blocks in the e2e (evidence size and gas vs. block size), witness
-   prefetching, batching several channels' receipts.
+4. M4: settlement gas vs. L2 block size beyond 31 transactions, witness prefetching, batching
+   several channels' receipts.

@@ -182,10 +182,20 @@ async function run() {
   const pB = payouts(await pub2.readContract({ address: executor.address, abi: executor.abi, functionName: "preview", args: [b.call] }) as Hex);
   check(pB[0] === parseEther("1.4") && pB[1] === parseEther("0.6"), "preview at H1 (shareBps 7000): 1.4 / 0.6, no reopen");
 
-  // ---- Final: real L2 transaction ----
+  // ---- Final: real L2 transaction, mid-block among 30 other transactions ----
   const { request: execReq } = await pub2.simulateContract({ account: ops, address: executor.address, abi: executor.abi, functionName: "execute", args: [b.call] });
+  await pub2.request({ method: "evm_setAutomine" as any, params: [false] as any });
+  const filler = async (n: number) => {
+    for (let i = 0; i < n; i++) await w2(carol).sendTransaction({ to: aliceAcct.address, value: 1n, data: toHex(`filler-${i}`) });
+  };
+  await filler(15);
   const txHash = await w2().writeContract(execReq);
+  await filler(15);
+  await pub2.request({ method: "evm_mine" as any, params: [] as any });
+  await pub2.request({ method: "evm_setAutomine" as any, params: [true] as any });
   const execRcpt = await pub2.waitForTransactionReceipt({ hash: txHash });
+  const l2Txs = (await pub2.getBlock({ blockHash: execRcpt.blockHash })).transactions.length;
+  check(l2Txs === 31 && execRcpt.transactionIndex > 0, `execute is tx ${execRcpt.transactionIndex} of ${l2Txs} in its L2 block`);
   gas["L2 execute"] = execRcpt.gasUsed;
   const ev = cli("evidence", "--rpc", L2_URL, "--tx", txHash);
   check(ev.receiptsRoot === (await pub2.getBlock({ blockHash: ev.l2BlockHash })).receiptsRoot, "L2 receipt trie rebuilt to the block's receiptsRoot");
@@ -195,7 +205,8 @@ async function run() {
     l2BlockHash: ev.l2BlockHash, l2Header: ev.l2Header, txIndex: BigInt(ev.txIndex), receipt: ev.receipt,
     receiptProof: ev.receiptProof, logIndex: BigInt(logIndex), request: b.call.request, outcome: outcomeHex,
   }]);
-  gas["evidence bytes"] = BigInt((evidence.length - 2) / 2);
+  gas["evidence bytes (31-tx L2 block)"] = BigInt((evidence.length - 2) / 2);
+  gas["receipt proof nodes"] = BigInt(ev.receiptProof.length);
 
   // BLOCKHASH(n) is only available from block n+1: an anchor is recorded after it.
   await pub1.request({ method: "evm_mine" as any, params: [] as any });
@@ -210,7 +221,7 @@ async function run() {
     l1AnchorId: b.request.anchorId, executionProfileHash: profileHash, blockNumber: l2Block.number, accepted: true,
   }], "L1 mockAccept");
 
-  await send(w1(carol), pub1, settlement, "settle", [terms.channelId, evidence], "L1 settle");
+  await send(w1(carol), pub1, settlement, "settle", [terms.channelId, evidence], "L1 settle (31-tx L2 block)");
   const [wa, wb] = await Promise.all([alice, bob].map((p) => pub1.readContract({ address: settlement.address, abi: settlement.abi, functionName: "withdrawable", args: [p.address] }) as Promise<bigint>));
   check(wa === parseEther("1.4") && wb === parseEther("0.6"), "settled on L1: 1.4 / 0.6 credited");
   await expectRevert(pub1.simulateContract({ account: carol, address: settlement.address, abi: settlement.abi, functionName: "settle", args: [terms.channelId, evidence] }), "second settlement");
