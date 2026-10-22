@@ -19,6 +19,8 @@
 
 A channel holds its participants' funds in an L1 escrow. It reads any L1 contract at an authenticated block through [skim](https://github.com/leekt/skim)'s verified proofs, computes on L2 without keeping application state of its own, and settles its outcome back on L1 exactly once. L1 checks the L2 execution by re-executing the block itself (the EIP-8079-style `EXECUTE` precompile). If the operator disappears, L1 re-runs the channel's computation directly.
 
+> **Cost reality:** verifying by re-execution (EXECUTE) costs L1 at least as much as running the computation on L1, ~16M gas per L2 block. It's here for its security properties. For apps that must be cheaper than L1, the direction is [app channels](docs/guide/app-channels.md): proven checkpoints with recoverable state on L1.
+
 ```console
 $ scripts/check.sh                  # fmt, clippy, Rust, fixtures, forge, viem, anvil e2e
 $ ETHREX=../ethrex scripts/check.sh # + the native e2e on ethrex's EXECUTE prototype
@@ -58,7 +60,7 @@ Three pieces arrived at once:
 | **Live L1 reads via skim** | Sepolia anchors promoted only by skim's light-client `finalized`/`safe` heads. Witnesses (WETH, 2 slots plus code) collected at those exact roots in **~1 s**, 13 KB each ([log](docs/experiments/m1-live-skim.md)) |
 | **Fast confirmation** | Lighthouse v8.3.0 `fast_confirmation`: anchors confirmed at the chain head, **69–77 blocks ahead of finality** ([log](docs/experiments/m4-fcr.md)) |
 | **Settlement cost** | L1 `settle` 320k gas (1-tx L2 block) → ~396k (127 or 255 txs); `settleFromBlock` 281k vs. 315k per channel (forge, two in one block); evidence 2.5–3.5 KB ([log](docs/experiments/m4-settlement-cost.md)) |
-| **Native verification cost** | ~16M gas per L2 block, about the L2 gas limit: one L2 block per L1 transaction |
+| **Native verification cost** | ~16M gas per L2 block (the gas limit is charged even for empty blocks): **not cheaper than L1**, see [app channels](docs/guide/app-channels.md) |
 | **Correctness** | 50 Rust and 88 Solidity tests; every security check mutation-checked (removing it makes a named test fail) |
 
 ## Architecture

@@ -84,6 +84,25 @@ What's implemented ([Stage 2](stage-2.md)):
 - **Operator-free exit:** L1 re-runs the channel module on an L1-recorded anchor, with a challenge window in which a newer signed request replaces a stale one.
 - **Governance:** upgrades wait 30 days, and the council acts only after a fault is proven on chain.
 
+## Does an L2 verified by re-execution save cost?
+
+**No.** ethrex's EXECUTE charges the L2 block's **gas limit** plus 16 gas per input byte. It charges the limit, not gas used, because `gas_used` is producer-claimed and unverified until re-execution finishes. Measured: ~15.5–16M gas per L2 block, **even for empty blocks**.
+
+Re-execution means L1 pays at least the L2's full computation, so this path costs **more** than running the app on L1. It buys security properties (L1-verified execution, L1 DA, separate state), not cheaper execution.
+
+An L2 only saves cost when L1 does less work than the L2 did: L1 verifies a **succinct proof** of the computation and receives the **net state diff**, and never re-runs anything. That's the [app channels](app-channels.md) design: proven checkpoints with recoverable state. A rough illustration (an estimate, not a benchmark) gives ~2.6k L1 gas per interaction, against ~100k on L1.
+
+## What's the plan for apps (users join, lock assets on L1, use the app, withdraw any time)?
+
+**App channels** ([design](app-channels.md)):
+- The app's channel runs many interactions off-chain.
+- A validity proof per **checkpoint** shows the transition from the last accepted checkpoint, and the complete net state diff goes on L1 as calldata.
+- Users withdraw against accepted checkpoints.
+- If the operator vanishes, a forced request that isn't served within one day **freezes** the channel. Everyone then exits from the last accepted checkpoint, reconstructed from L1 data alone, with no new proof.
+- Apps read L1 state through skim witnesses and can never modify it.
+
+The vault and checkpoint accounting are built behind a labeled mock verifier. A real proof system is the open decision.
+
 ## Why do we need the EIP-8288/8357 profile?
 
 We don't. The spec names three verification profiles. `native-proof-dependencies` is the newer direction, where L1 checks a *proof* instead of re-executing, which would mainly make verification cheaper than ~16M gas per block.

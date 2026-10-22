@@ -166,6 +166,8 @@ header. It is tested with labeled stubs only. Why no real instance exists, check
 
 Wiring a stub source in would be a mock under a native name, which the spec forbids.
 
+**Update (2026-10-22):** the [app channels](app-channels.md) design reopens the non-native verifier question below, because re-execution doesn't save cost. Decision 1 there is open.
+
 **Owner decision (2026-10-22): accepted as blocked.** Keep the adapter ready behind
 governance, and revisit when EIP-8288 defines `get_deps_hash` for STARKs and a network carries
 it. Rejected alternatives: a non-native zkVM verifier profile, and a client patched to an

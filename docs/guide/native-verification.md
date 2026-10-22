@@ -27,7 +27,9 @@ ethrex's L1 has an EIP-8079-style precompile at `0x0101`. It takes an SSZ `State
 - the payload's `parent_beacon_block_root` (ethrex's L1-messages root) equals the registry's root for the messages consumed;
 - the DA commitment is the input itself.
 
-**Cost:** about 16M gas per L2 block, about the L2 block gas limit. One L2 block per L1 transaction is the ceiling under EIP-7825.
+**Cost:** about 16M gas per L2 block, about the L2 block gas limit, **even when the block is empty**. EXECUTE charges the gas limit, not gas used, because gas used is unverified until re-execution. One L2 block per L1 transaction is the ceiling under EIP-7825.
+
+> **Re-execution does not save cost.** L1 pays at least the L2's full computation, plus a per-block charge. This path buys security properties, not cheaper execution. For apps that need to be cheaper than L1, see [app channels](app-channels.md): proven checkpoints plus net state-diff DA, with no re-execution.
 
 ## Block registries
 
