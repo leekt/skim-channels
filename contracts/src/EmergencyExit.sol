@@ -8,7 +8,7 @@ import {IChannelModule} from "./interfaces/IChannelModule.sol";
 import {AnchorRegistry} from "./AnchorRegistry.sol";
 import {ChannelSettlement} from "./ChannelSettlement.sol";
 
-/// @notice L1: the operator-free exit (docs/STAGE2.md), for when the sequencer or prover is
+/// @notice L1: the operator-free exit (docs/guide/stage-2.md), for when the sequencer or prover is
 ///         unavailable.
 ///         - startExit posts an all-signed request for an Open channel (before its deadline).
 ///         - During the channel's challenge window (its ChannelPolicy, clamped to

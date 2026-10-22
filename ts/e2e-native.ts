@@ -292,9 +292,9 @@ async function main() {
   check(wa === parseEther("1.4") && wb === parseEther("0.6"), "settled under native-reexecution-devnet: 1.4 / 0.6");
   await expectRevert(pub1.simulateContract({ account: l1Ops, address: settlement.address, abi: settlement.abi, functionName: "settle", args: [channelId, evidence] }), "second settlement");
 
-  mkdirSync(`${ROOT}experiments`, { recursive: true });
+  mkdirSync(`${ROOT}docs/experiments/data`, { recursive: true });
   const out = Object.fromEntries(Object.entries(gas).map(([k, v]) => [k, Number(v)]));
-  writeFileSync(`${ROOT}experiments/e2e-native-ethrex.json`, JSON.stringify({
+  writeFileSync(`${ROOT}docs/experiments/data/e2e-native-ethrex.json`, JSON.stringify({
     note: "ethrex L1 (EXECUTE 0x0101) + ethrex native L2 (PR #6418 PoC). CanonicalBlockRegistry + ExecuteVerifier (permissionless submission, calldata DA, governance), anchors via proven L1 messages. No mocks.",
     measurements: out }, null, 2) + "\n");
   console.table(out);

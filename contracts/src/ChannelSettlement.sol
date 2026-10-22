@@ -26,7 +26,7 @@ interface IEmergencyExit {
 /// request; the request binds this channel's terms, policy and profile and an L1-recorded
 /// anchor; the outcome hashes to the logged value and conserves the escrow.
 ///
-/// Emergency exit (docs/STAGE2.md) lives in `EmergencyExit`, bound once at deployment. It may
+/// Emergency exit (docs/guide/stage-2.md) lives in `EmergencyExit`, bound once at deployment. It may
 /// only move an Open channel to Exiting (before the deadline) and pay out an Exiting channel,
 /// through `beginExit` / `payoutExit`; conservation is still enforced here. While Exiting,
 /// `settle` accepts only the exit's pending request, and `refund` waits until the exit

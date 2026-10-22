@@ -1,14 +1,14 @@
 # Handoff: skim-channels
 
 Status as of 2026-10-22: M0–M3 done, M4 FCR done, and the Stage 2 prototype done (emergency exit,
-governance, forced inclusion). Read first: [PROJECT](PROJECT.md) (spec v0.1), [STAGE2](STAGE2.md).
+governance, forced inclusion). Read first: [PROJECT](../PROJECT.md) (spec v0.1), the [guides](README.md), and [Stage 2](guide/stage-2.md).
 
 | Milestone | State |
 |---|---|
 | M0 shared types | Rust, Solidity and viem agree; strict decoding everywhere |
 | M1 witnesses | Exact-root packages, `AnchorBook`; **live against skim on Sepolia** (finalized and safe anchors) |
 | M2 channels | Read-and-Split e2e on two anvil chains (mock acceptance), plus the full forge suite |
-| M3 native verification | **`native-reexecution-devnet` on ethrex, no mocks anywhere in the e2e.** `ExecuteVerifier` (EXECUTE) behind the permissionless, governed `CanonicalBlockRegistry`; L1 messages, forced inclusion and calldata DA; anchors fed trustlessly via proven L1 messages. `native-proof-dependencies` (EIP-8288/8357) is not implementable yet (see STAGE2) |
+| M3 native verification | **`native-reexecution-devnet` on ethrex, no mocks anywhere in the e2e.** `ExecuteVerifier` (EXECUTE) behind the permissionless, governed `CanonicalBlockRegistry`; L1 messages, forced inclusion and calldata DA; anchors fed trustlessly via proven L1 messages. `native-proof-dependencies` (EIP-8288/8357) is not implementable yet (see [Stage 2](guide/stage-2.md)) |
 | M4 | **FCR from Lighthouse v8.3.0's `fast_confirmation` event, live.** Measurements below |
 | Stage 2 | Operator-free exit (L1 re-execution); 30-day upgrade timelock; fault-gated Security Council; forced inclusion; permissionless block submission (in `CanonicalBlockRegistry`) |
 
@@ -28,11 +28,11 @@ governance, forced inclusion). Read first: [PROJECT](PROJECT.md) (spec v0.1), [S
 | | |
 |---|---|
 | everything | `scripts/check.sh`, plus `ETHREX=<checkout>` for the native e2e |
-| Rust | `cargo test --workspace`: 48 tests. anvil tests skip without anvil; live tests skip without their env vars |
-| Solidity | `cd contracts && forge test`: 83 tests |
+| Rust | `cargo test --workspace`: 50 tests. anvil tests skip without anvil; live tests skip without their env vars |
+| Solidity | `cd contracts && forge test`: 88 tests |
 | TypeScript | `cd ts && npm run check-encodings`: 9 |
 | anvil e2e | `cargo build -p channel-runner && cd ts && npm run e2e` |
-| native e2e | `ETHREX=… npm run e2e-native`. Starts ethrex L1 and L2 itself; writes `experiments/e2e-native-ethrex.json` |
+| native e2e | `ETHREX=… npm run e2e-native`. Starts ethrex L1 and L2 itself; writes `docs/experiments/data/e2e-native-ethrex.json` |
 | live skim | `skim run --rpc 127.0.0.1:18545 --ephemeral`, then `SKIM_RPC=http://127.0.0.1:18545 cargo test -p channel-runner --test live_skim -- --nocapture` |
 | live FCR | `kurtosis run --enclave fcr github.com/ethpandaops/ethereum-package --args-file <yaml>`, with `cl_image: sigp/lighthouse:v8.3.0` and `cl_extra_params: ["--enable-fast-confirmation"]`. Then `BEACON_URL=… EL_URL=… cargo test -p channel-runner --test live_fcr -- --nocapture` |
 
@@ -70,7 +70,7 @@ transition. New:
   event, then the beacon block, then a hash-checked EL header. This trusts the configured full
   beacon node, because FCR needs the full vote view. `safe`/`finalized` are never FCR evidence,
   even on a Lighthouse node that feeds FCR into `safe`.
-- **Governance and exits:** see STAGE2. A verifier fault proven on chain freezes receipt
+- **Governance and exits:** see [Stage 2](guide/stage-2.md). A verifier fault proven on chain freezes receipt
   settlement, while the L1 re-execution exit keeps working.
 
 ## Security tests (spec §12 and Stage 2), where
@@ -97,29 +97,22 @@ Added since:
   history window).
 
 ## Measurements
+The logs in [docs/experiments](experiments) are the source. Headline numbers:
+
 | Setting | What | Value |
 |---|---|---|
-| skim, Sepolia, live | witness (WETH: account and code, 2 slots) at a **finalized** anchor about 19 min old | 13,376 B, collected in 1.2 s |
-| | same at a **safe** anchor | 13,376 B, 0.97 s |
-| Lighthouse v8.3.0 FCR devnet (2 nodes, 6 s slots) | FCR-confirmed block vs. latest / finalized | block 14: at latest, event after 5.5 s; block 93 (~9 min in): at latest, event after 2.6 s. `finalized` was still at genesis on this devnet in both samples, so FCR gave confirmation where finality gave none |
-| ethrex native (EXECUTE) | L1 `CanonicalBlockRegistry.submit` (EXECUTE re-execution), mean per L2 block | ~16.0M gas, about the L2 gas limit |
-| | L1 `AnchorSender.send` (record and L1 message) / L2 `postFromL1` (proof) | 829,633 / 295,909 gas |
-| | L2 `execute`; L1 `settle` (canonical registry) | 317,050; 501,125 gas |
-| | L1 `NativeRollupRegistry.acceptHistorical` (earlier run) | 892,971 gas |
-| anvil (Prague) | L1 `settle` vs. L2 block size (receipt mid-block): 1 / 31 / 127 / 255 txs | 314,895 / 375,460 / 389,695 / 389,683 gas; evidence 2,528 / 3,296 / 3,520 / 3,520 B; proof 1 / 3 / 3 / 3 nodes. Cost follows trie depth (base 16), so it flattens (`experiments/e2e-mock-local-fill*.json`) |
-| forge | `BatchSettler.settleAll`, 4 channels, 2 failing on purpose | 248,884 gas per attempted channel |
-| forge | `settle` (1 receipt) vs. `settleFromBlock` (2 channels in one L2 block, shared acceptance and header check) | 315,124 vs. 280,975 gas per channel |
-| anvil (Prague) | L2 `execute`; `finalizeExit`; `startExit` | see `experiments/e2e-mock-local.json` |
-
-Gas on the ethrex chains is higher across the board, because Amsterdam reprices state access
-and creation; compare `record`, 285k vs. 111k on anvil. FCR with finality running (second devnet, finalized
-epoch 2): three samples confirmed blocks 133/137/141 at 1/0/0 behind latest while `finalized` was
-block 64, so FCR was 69–77 blocks (~7–8 min at 6 s slots) ahead of finality.
+| skim, Sepolia, live | witness at a finalized anchor (~19 min old) / a safe anchor | 13,376 B in 1.2 s / 0.97 s ([M1](experiments/m1-live-skim.md)) |
+| Lighthouse v8.3.0 FCR | FCR vs. finality | at the head; 69–77 blocks ahead of finality ([M4 FCR](experiments/m4-fcr.md)) |
+| ethrex native (EXECUTE) | `CanonicalBlockRegistry.submit`, mean per L2 block | ~16.0M gas ([M3](experiments/m3-native-ethrex.md)) |
+| ethrex native | L1 `settle` (canonical registry) | 506,777 gas |
+| anvil | `settle` for 1 / 31 / 127 / 255-tx L2 blocks | 320,486 / 392,090 / 396,307 / 396,343 gas ([M4 cost](experiments/m4-settlement-cost.md)) |
+| forge | `settle` vs. `settleFromBlock` (2 in one block) | 315,124 vs. 280,975 gas per channel |
+| anvil | `startExit` / `finalizeExit` | 130,364 / 317,643 gas ([M2](experiments/m2-anvil-e2e.md)) |
 
 ## Known limitations
 - **`native-proof-dependencies`:** `ProofDependencyVerifier` exists, but no network can carry a
   STARK dependency (EIP-8288 reserves the scheme), and no real EIP-8357 key exists. Evidence is
-  in STAGE2.
+  in [Stage 2](guide/stage-2.md).
 - **ethrex PoC specifics:**
   - its own `advance()` has a single advancer (our registry doesn't);
   - forced-inclusion deadlines start at `poke`, because ethrex records no message times;
@@ -131,7 +124,7 @@ block 64, so FCR was 69–77 blocks (~7–8 min at 6 s slots) ahead of finality.
 - **The emergency exit needs a witness at the request's anchor**, and skim serves only recent
   roots. Older anchors may need an archive node; the refund fallback covers that.
 - **The anvil e2e still uses the labeled mock feed and registry.** The native e2e uses none.
-- **Owner decisions, 2026-10-22** (STAGE2):
+- **Owner decisions, 2026-10-22** ([Stage 2](guide/stage-2.md)):
   - per-channel exit window (`ChannelPolicy.challengeWindow`, clamped to [1 hour, 30 days]);
   - nonce as checkpoint, no window extension;
   - `FORCE_DELAY` = 1 day;

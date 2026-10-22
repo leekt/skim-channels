@@ -7,7 +7,7 @@ import {IL1MessageQueue} from "./interfaces/IL1MessageQueue.sol";
 import {AnchorRegistry} from "./AnchorRegistry.sol";
 import {EthTypes} from "./libraries/EthTypes.sol";
 
-/// @notice L1: canonical L2 block acceptance (PROJECT.md §6.4), permissionless (docs/STAGE2.md).
+/// @notice L1: canonical L2 block acceptance (PROJECT.md §6.4), permissionless (docs/guide/stage-2.md).
 ///
 /// A block is accepted only if, together:
 /// - it extends the canonical tip (parent hash and number) from a fixed genesis: one chain;

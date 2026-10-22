@@ -16,7 +16,7 @@ interface IDependencySource {
 ///         proof dependency with the EVM verification key from the EIP-8357 registry attests
 ///         to exactly this transition's public input.
 ///
-///         NOT DEPLOYABLE TODAY, and not a security claim (docs/STAGE2.md, evidence there):
+///         NOT DEPLOYABLE TODAY, and not a security claim (docs/guide/stage-2.md, evidence there):
 ///         EIP-8288 is a draft whose reference implementation is "TBD", its STARK scheme is
 ///         reserved ("a frame that uses it is invalid until get_deps_hash is defined"), the
 ///         only devnet (L2BEAT's) registers a placeholder key for mock proofs, and the public

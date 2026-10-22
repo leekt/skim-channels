@@ -261,9 +261,9 @@ async function run() {
   check(balAfter - balBefore === parseEther("1.4"), "emergency exit finalized on L1 alone: 1.4 credited (L1 re-executed the split)");
 
   // ---- Measurements ----
-  mkdirSync(`${ROOT}experiments`, { recursive: true });
+  mkdirSync(`${ROOT}docs/experiments/data`, { recursive: true });
   const out = Object.fromEntries(Object.entries(gas).map(([k, v]) => [k, Number(v)]));
-  writeFileSync(`${ROOT}experiments/e2e-mock-local${process.env.FILLER ? `-fill${FILL}` : ""}.json`, JSON.stringify({
+  writeFileSync(`${ROOT}docs/experiments/data/e2e-mock-local${process.env.FILLER ? `-fill${FILL}` : ""}.json`, JSON.stringify({
     note: "anvil prague L1+L2, MOCK block acceptance, Latest anchors (optimistic). Gas = receipt gasUsed; bytes = encoded length.",
     measurements: out,
   }, null, 2) + "\n");

@@ -79,7 +79,7 @@ sol! {
         bytes32 genesisHash;
         bytes32 programHash;
         bytes32 forkSchemaHash;
-        /// The data-availability scheme blocks are accepted under (docs/STAGE2.md: L1 DA).
+        /// The data-availability scheme blocks are accepted under (docs/guide/stage-2.md: L1 DA).
         bytes32 daSchemaHash;
         bytes32 executorCodeHash;
     }

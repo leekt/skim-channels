@@ -144,7 +144,7 @@ re-executing them with the EXECUTE precompile. It reads ethrex's `NativeRollup.s
   - On L2, anyone calls `L2AnchorInbox.postFromL1` with a Merkle proof of that message
     against the L2 block's L1-messages root, read from EIP-4788's beacon-roots contract.
   - The mock system key is disabled (`system = 0`).
-- **Measured** (`experiments/e2e-native-ethrex.json`): `submit` with EXECUTE costs about
+- **Measured** (`../experiments/data/e2e-native-ethrex.json`): `submit` with EXECUTE costs about
   16.0M gas per L2 block, which is the L2 gas limit. One block per L1 transaction is the
   ceiling under EIP-7825.
 

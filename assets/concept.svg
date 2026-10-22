@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="560" viewBox="0 0 1280 560" role="img" aria-label="skim-channels in one picture: L1 holds state and escrow; skim proves L1 reads; the channel executes on L2; L1 re-executes the L2 block and settles">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#111939"/><stop offset="1" stop-color="#070A16"/></linearGradient>
+    <radialGradient id="halo" cx="0.72" cy="0.6" r="0.5"><stop offset="0" stop-color="#3FA8FF" stop-opacity="0.13"/><stop offset="1" stop-color="#3FA8FF" stop-opacity="0"/></radialGradient>
+    <linearGradient id="word" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#FFFFFF"/><stop offset="1" stop-color="#C3D4FF"/></linearGradient>
+    <linearGradient id="arc" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#7C5CFF"/><stop offset="0.55" stop-color="#3FA8FF"/><stop offset="1" stop-color="#2EE6C5"/>
+    </linearGradient>
+    <radialGradient id="pick"><stop offset="0" stop-color="#FFFFFF"/><stop offset="0.5" stop-color="#8FF7E4"/><stop offset="1" stop-color="#2EE6C5"/></radialGradient>
+    <filter id="glow" x="-10%" y="-80%" width="120%" height="260%"><feGaussianBlur stdDeviation="7"/></filter>
+    <marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#2EE6C5"/></marker>
+  </defs>
+  <rect width="1280" height="560" fill="url(#bg)"/>
+  <rect width="1280" height="560" fill="url(#halo)"/>
+  <g font-family="Inter, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+    <text x="60" y="58" font-size="28" font-weight="800" fill="url(#word)">skim-channels in one picture</text>
+    <text x="60" y="88" font-size="16" fill="#9AA7C7">Funds and state never leave L1. A channel only borrows computation, and L1 checks it.</text>
+  </g>
+  <rect x="60" y="130" width="330" height="170" rx="14" fill="#0D1430" stroke="#7C5CFF" stroke-opacity="0.55" stroke-width="1.5"/>
+  <g font-family="Inter, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+    <text x="78" y="162" font-size="19" font-weight="700" fill="#FFFFFF">Ethereum L1</text>
+    <text x="78" y="188" font-size="15" fill="#9AA7C7">escrow (ChannelSettlement)</text>
+    <text x="78" y="210" font-size="15" fill="#9AA7C7">app state (any contract)</text>
+    <text x="78" y="232" font-size="15" fill="#9AA7C7">anchors: BLOCKHASH / EIP-2935</text>
+    <text x="78" y="254" font-size="15" fill="#9AA7C7">settlement + emergency exit</text>
+  </g>
+  <rect x="475" y="130" width="330" height="170" rx="14" fill="#0D1430" stroke="#3FA8FF" stroke-opacity="0.55" stroke-width="1.5"/>
+  <g font-family="Inter, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+    <text x="493" y="162" font-size="19" font-weight="700" fill="#FFFFFF">skim</text>
+    <text x="493" y="188" font-size="15" fill="#9AA7C7">follows L1 over P2P</text>
+    <text x="493" y="210" font-size="15" fill="#9AA7C7">light-client safe / finalized</text>
+    <text x="493" y="232" font-size="15" fill="#9AA7C7">eth_getProof at the anchor</text>
+    <text x="493" y="254" font-size="15" fill="#9AA7C7">→ witness, re-verified locally</text>
+  </g>
+  <rect x="890" y="130" width="330" height="170" rx="14" fill="#0D1430" stroke="#2EE6C5" stroke-opacity="0.55" stroke-width="1.5"/>
+  <g font-family="Inter, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+    <text x="908" y="162" font-size="19" font-weight="700" fill="#FFFFFF">Channel on L2</text>
+    <text x="908" y="188" font-size="15" fill="#9AA7C7">ChannelExecutor (stateless)</text>
+    <text x="908" y="210" font-size="15" fill="#9AA7C7">verifies witness + signatures</text>
+    <text x="908" y="232" font-size="15" fill="#9AA7C7">module via STATICCALL</text>
+    <text x="908" y="254" font-size="15" fill="#9AA7C7">emits ChannelOutcome</text>
+  </g>
+  <rect x="890" y="360" width="330" height="150" rx="14" fill="#0D1430" stroke="#3FA8FF" stroke-opacity="0.55" stroke-width="1.5"/>
+  <g font-family="Inter, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+    <text x="908" y="392" font-size="19" font-weight="700" fill="#FFFFFF">Native verification</text>
+    <text x="908" y="418" font-size="15" fill="#9AA7C7">L1 re-executes the L2 block</text>
+    <text x="908" y="440" font-size="15" fill="#9AA7C7">(EXECUTE precompile)</text>
+    <text x="908" y="462" font-size="15" fill="#9AA7C7">CanonicalBlockRegistry</text>
+  </g>
+  <rect x="475" y="360" width="330" height="150" rx="14" fill="#0D1430" stroke="#7C5CFF" stroke-opacity="0.55" stroke-width="1.5"/>
+  <g font-family="Inter, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+    <text x="493" y="392" font-size="19" font-weight="700" fill="#FFFFFF">Receipt proof</text>
+    <text x="493" y="418" font-size="15" fill="#9AA7C7">header → receiptsRoot</text>
+    <text x="493" y="440" font-size="15" fill="#9AA7C7">MPT proof of the receipt</text>
+    <text x="493" y="462" font-size="15" fill="#9AA7C7">the ChannelOutcome log</text>
+  </g>
+  <line x1="390" y1="200" x2="470" y2="200" stroke="#3FA8FF" stroke-width="2.5" marker-end="url(#head)"/>
+  <text x="430.0" y="190.0" font-size="13" fill="#C3D4FF" text-anchor="middle" font-family="Inter, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">state roots</text>
+  <line x1="805" y1="200" x2="885" y2="200" stroke="#3FA8FF" stroke-width="2.5" marker-end="url(#head)"/>
+  <text x="845.0" y="190.0" font-size="13" fill="#C3D4FF" text-anchor="middle" font-family="Inter, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">witness</text>
+  <line x1="1055" y1="300" x2="1055" y2="355" stroke="#3FA8FF" stroke-width="2.5" marker-end="url(#head)"/>
+  
+  <line x1="885" y1="435" x2="810" y2="435" stroke="#3FA8FF" stroke-width="2.5" marker-end="url(#head)"/>
+  
+  <text x="848" y="470" font-size="13" fill="#C3D4FF" text-anchor="middle" font-family="Inter, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">accepted</text>
+  <text x="848" y="487" font-size="13" fill="#C3D4FF" text-anchor="middle" font-family="Inter, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">block</text>
+  <line x1="475" y1="435" x2="230" y2="305" stroke="#3FA8FF" stroke-width="2.5" marker-end="url(#head)"/>
+  <text x="352.5" y="354.0" font-size="13" fill="#C3D4FF" text-anchor="middle" font-family="Inter, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">settle once</text>
+  <line x1="225" y1="300" x2="225" y2="470" stroke="#3FA8FF" stroke-width="2.5" stroke-dasharray="6 6" marker-end="url(#head)"/>
+  
+  <g font-family="Inter, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+    <text x="60" y="495" font-size="14" fill="#9AA7C7">operator gone? emergency exit:</text>
+    <text x="60" y="515" font-size="14" fill="#9AA7C7">L1 re-runs the module on the same witness</text>
+  </g>
+</svg>

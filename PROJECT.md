@@ -2,7 +2,7 @@
 
 Version 0.1, 2026-10-22. Base: `leekt/skim` at `df686b70cd567210860582097e25a3f8b3fe6616`.
 Section numbers are referenced from code and other docs. Since 2026-10-22 the design target
-is Stage 2 ([STAGE2](STAGE2.md)).
+is Stage 2 ([STAGE2](docs/guide/stage-2.md)).
 
 ## 1. Overview
 Ethereum L1 is the canonical persistent state layer. Ephemeral **execution channels** on a

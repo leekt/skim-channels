@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {CanonicalBlockRegistry} from "./CanonicalBlockRegistry.sol";
 import {IStateTransitionVerifier} from "./interfaces/IStateTransitionVerifier.sol";
 
-/// @notice The only upgrade path in the system (docs/STAGE2.md):
+/// @notice The only upgrade path in the system (docs/guide/stage-2.md):
 ///         - `owner` may schedule a verifier replacement that takes effect no earlier than
 ///           EXIT_WINDOW (30 days) later, so users who disagree can leave first (settle, or the
 ///           operator-free emergency exit);

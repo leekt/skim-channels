@@ -847,7 +847,7 @@ contract ChannelTest is Test {
         settlement.fund{value: 2 ether}(t.channelId);
     }
 
-    // ---- emergency exit (docs/STAGE2.md) ------------------------------------------------
+    // ---- emergency exit (docs/guide/stage-2.md) ------------------------------------------------
 
     function _signed(ChannelTypes.ChannelTerms memory t, string memory h, uint64 nonce)
         internal
