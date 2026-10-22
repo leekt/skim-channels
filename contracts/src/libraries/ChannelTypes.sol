@@ -163,12 +163,12 @@ library ChannelTypes {
 
     /// @notice Strict decoding: exact length (no trailing bytes); the ABI decoder rejects
     ///         dirty padding of narrow types.
-    function decodeFinalRequest(bytes calldata data) internal pure returns (FinalRequest memory r) {
+    function decodeFinalRequest(bytes memory data) internal pure returns (FinalRequest memory r) {
         if (data.length != 7 * 32) revert NonCanonicalEncoding();
         r = abi.decode(data, (FinalRequest));
     }
 
-    function decodeTerms(bytes calldata data) internal pure returns (ChannelTerms memory t) {
+    function decodeTerms(bytes memory data) internal pure returns (ChannelTerms memory t) {
         if (data.length != 8 * 32) revert NonCanonicalEncoding();
         t = abi.decode(data, (ChannelTerms));
     }

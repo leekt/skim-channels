@@ -4,6 +4,9 @@ test = "test"
 libs = ["lib"]
 solc_version = "0.8.28"
 evm_version = "prague"
+optimizer = true
+optimizer_runs = 200
+via_ir = true
 fs_permissions = [{ access = "read", path = "../fixtures" }]
 remappings = ["forge-std/=lib/forge-std/src/"]
 
