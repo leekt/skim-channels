@@ -15,11 +15,11 @@ App channels accept a checkpoint when an `IAppCheckpointVerifier` accepts its pr
 
 ## zkEVM proofs of app logic
 
-If apps stay in Solidity (decision 6), a checkpoint proof is a proof of **EVM execution** of the app's transactions, which is a zkEVM. See [the zkEVM section below](#zkevm-landscape). The alternative is to write app logic as native zkVM programs, which are much cheaper to prove, but then apps aren't Solidity.
+Apps stay in Solidity (the owner's decision: apps are their own contracts). A zkEVM is needed **only if** the settlement rule is chosen to be a validity proof of the app's EVM execution. Running Solidity apps off-chain doesn't require one by itself. Rewriting apps as zkVM programs would change the app development model, not just the prover, and claims about its cost need measurement on a real workload.
 
 ## Native proof verification (EIP-8288 / EIP-8357)
 
-This is the "native" version of the same idea: L1 validators verify proof dependencies outside the EVM, so rollups pay almost nothing per block. It would also make the existing EXECUTE path cheap. It's blocked today: EIP-8288 reserves its STARK scheme, and only mock-proof devnets exist. `ProofDependencyVerifier` is ready behind governance ([native verification](native-verification.md)).
+This is the "native" version of the same idea: L1 validators verify proof dependencies outside the EVM. That would lower the cost of **verification**. Proving, DA and settlement costs remain, and it is a different mechanism from EXECUTE's full re-execution, which doesn't become cheap by itself. It's blocked today: EIP-8288 reserves its STARK scheme, and only mock-proof devnets exist. `ProofDependencyVerifier` is ready behind governance ([native verification](native-verification.md)).
 
 ## zkEVM landscape
 

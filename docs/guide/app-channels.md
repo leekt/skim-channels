@@ -308,9 +308,7 @@ Never fall back automatically from validity proofs to weaker settlement within t
 3. **Finality budget:** checkpoint cadence, and acceptance that unproven interactions can disappear.
 4. **Window semantics:** keep the window as a frozen-root payout delay, or retire it for proven roots. Keep the one-day forced service either way.
 5. **Upgrade scope:** existing channels stay immutable.
-6. **App logic form** *(added in review; deferred together with 1)*:
-   - **EVM contracts, proven in a zkEVM** (RSP-style on SP1, for example). Apps stay Solidity, but this is the dominant proving cost and latency, and it's unmeasured.
-   - **Native zkVM programs** (Rust). Far cheaper to prove, but apps aren't Solidity.
+6. **App logic form:** apps stay **Solidity contracts** (owner). How their results are enforced on L1 is decided per app first; a zkEVM proof is one possible answer, not a given.
 
 ### Highest-risk experiments
 
@@ -327,9 +325,24 @@ Never fall back automatically from validity proofs to weaker settlement within t
 
 **Build gate:** demonstrate recoverable exit and exact asset accounting first, then measure a real proof's cost.
 
+## Correction (owner review, 2026-10-22)
+
+The validity-rollup shape above was a **design choice**, not something the requirements forced:
+- **"Cheaper than L1"** means L1 must not repeat all computation on the **normal path**. L1 may still execute what a **dispute** needs. Optimistic settlement remains a valid option.
+- **"Many users"** doesn't mean "everyone signs one shared state." If an app's interactions and their collateral can be separated (ledger or virtual channels, as in Nitro), channel-style settlement among the involved parties may suffice. The first question is whether the app is one shared ledger.
+- **The vault is validity-shaped:** a verifier's `true` finalizes roots immediately. An optimistic profile needs a **different settlement protocol**, with pending roots, challenges, finalization and replayable inputs in DA, not just a different verifier. The accounting code is reusable; the protocol isn't the same.
+
+**Next:** pick one app and specify how its results are enforced on L1:
+- what users sign;
+- who detects a wrong result, and with what evidence;
+- what L1 checks, whether conditions on the result or part of the execution;
+- which state withdrawals use if data is withheld or the operator disappears.
+
+Choose the proof or dispute mechanism after that.
+
 ## Implementation status
 
-The checkpoint accounting is built and tested behind `MockAppCheckpointVerifier`, a **labeled mock** that binds proofs to the public inputs but doesn't check execution:
+The checkpoint accounting is built and tested behind `MockAppCheckpointVerifier`, a **labeled mock** that binds proofs to the public inputs but doesn't check execution. What this demonstrates: **given correct checkpoints**, accounting, the deadline fence and recovery work. It does not show that a checkpoint's balances are legitimate.
 - `AppChannelVault`: multi-asset deposits, forced requests with L1 timestamps, checkpoint acceptance with the deadline fence, freeze, credit / exit / refund claims, per-token solvency.
 - `AppLeaves`: the bounded binary tree for exit and credit leaves.
 - The `channel-app` crate: the reference ledger (the mock prover), the net-diff codec and reconstruction.
