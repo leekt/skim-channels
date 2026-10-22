@@ -8,7 +8,7 @@ import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import {
   createPublicClient, createWalletClient, http, encodeAbiParameters, keccak256, defineChain, toHex,
-  type Hex, type Address, type Abi, parseEther, decodeAbiParameters, hashStruct,
+  type Hex, type Address, type Abi, parseEther, decodeAbiParameters, hashStruct, encodePacked, concat, decodeFunctionData, getContractAddress,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
@@ -22,8 +22,11 @@ const L1_KEY = "0x385c546456b6a603a1cfcaa9ec9494ba4832da08dd6bcf4de9a71e4a01b749
 const L2_KEY = "0xbcdf20249abf0ed6d944c0288fad489e33f66b3960d9e6229c1cd214ed3bbe31";
 const RELAYER = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 const HISTORY = "0x0000F90827F1C53a10cb7A02335B175320002935" as Address;
-const l1Ops = privateKeyToAccount(L1_KEY), l2Ops = privateKeyToAccount(L2_KEY);
-const alice0 = privateKeyToAccount("0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6");
+// L1_KEY is ethrex's own deployer/advancer key: our L1 transactions use a different funded key
+// so they never race the advancer for nonces.
+const l1Ops = privateKeyToAccount(L2_KEY), l2Ops = privateKeyToAccount(L2_KEY);
+const carol = privateKeyToAccount("0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6");
+const alice0 = privateKeyToAccount("0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba");
 const bob0 = privateKeyToAccount("0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a");
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -76,8 +79,16 @@ async function main() {
   const wait2 = (h: Hex) => pub2.waitForTransactionReceipt({ hash: h, timeout: 120_000 });
   async function deploy(w: any, p: any, file: string, name: string, args: unknown[] = []) {
     const a = artifact(file, name);
-    const r = await p.waitForTransactionReceipt({ hash: await w.deployContract({ abi: a.abi, bytecode: a.bytecode, args }), timeout: 120_000 });
-    if (r.status !== "success") throw new Error(`deploy ${name} failed`);
+    // Explicit limit (under EIP-7825's 2^24 cap): estimates for large deployments under
+    // Amsterdam pricing came out too tight on ethrex (a "success" receipt with no contract).
+    const hash = await w.deployContract({ abi: a.abi, bytecode: a.bytecode, args, gas: p === pub1 ? 16_000_000n : undefined });
+    const r = await p.waitForTransactionReceipt({ hash, timeout: 120_000 });
+    if (r.status !== "success" || !r.contractAddress) {
+      const tx = await p.getTransaction({ hash });
+      const addr = getContractAddress({ from: tx.from, nonce: BigInt(tx.nonce) });
+      const code = await p.getCode({ address: addr });
+      throw new Error(`deploy ${name} failed: ${r.status}, gas ${r.gasUsed}/${tx.gas}, address ${r.contractAddress}, code at ${addr}: ${code ? (code.length - 2) / 2 : 0} B`);
+    }
     return { address: r.contractAddress as Address, abi: a.abi };
   }
   async function send(w: any, p: any, c: { address: Address; abi: Abi }, fn: string, args: unknown[], label?: string, value?: bigint) {
@@ -89,7 +100,7 @@ async function main() {
   }
 
   const [alice, bob] = [alice0, bob0].sort((a, b) => (BigInt(a.address) < BigInt(b.address) ? -1 : 1));
-  for (const p of [alice, bob]) await wait1(await w1().sendTransaction({ to: p.address, value: parseEther("5") }));
+  for (const p of [alice, bob, carol]) await wait1(await w1().sendTransaction({ to: p.address, value: parseEther("5") }));
   const participants = [alice.address, bob.address] as Address[];
   const ROLLUP = keccak256(toHex("ethrex-native-l2"));
   const types = {
@@ -126,10 +137,21 @@ async function main() {
   const fixture = await deploy(w1(), pub1, "AllocationFixture.sol", "AllocationFixture", [6000n]);
   const anchors = await deploy(w1(), pub1, "AnchorRegistry.sol", "AnchorRegistry");
   const registry = await deploy(w1(), pub1, "NativeRollupRegistry.sol", "NativeRollupRegistry", [ROLLUP, profileHash, nativeAddr]);
+  // The permissionless, governed registry, verified by EXECUTE itself.
+  const anchorSender = await deploy(w1(), pub1, "AnchorSender.sol", "AnchorSender", [nativeAddr, anchors.address]);
+  const msgQueue = await deploy(w1(), pub1, "NativeRollupMessageQueue.sol", "NativeRollupMessageQueue", [nativeAddr]);
+  const execV = await deploy(w1(), pub1, "ExecuteVerifier.sol", "ExecuteVerifier", [BigInt(L2_ID), 15_000_000n]);
+  const gov = await deploy(w1(), pub1, "RollupGovernance.sol", "RollupGovernance", [l1Ops.address, "0x000000000000000000000000000000000000c0c1"]);
+  const genesisRaw = cli("header", "--rpc", L2_URL, "--block", "0x0", "--chain-id", `${L2_ID}`).raw as Hex;
+  const canon = await deploy(w1(), pub1, "CanonicalBlockRegistry.sol", "CanonicalBlockRegistry", [
+    { rollupId: ROLLUP, profileHash, verifier: execV.address, anchors: anchors.address, messages: msgQueue.address, governance: gov.address, blobDA: false },
+    genesisRaw]);
+  await send(w1(), pub1, gov, "bind", [canon.address]);
   const rvL1 = await deploy(w1(), pub1, "ReceiptVerifier.sol", "ReceiptVerifier");
-  const settlement = await deploy(w1(), pub1, "ChannelSettlement.sol", "ChannelSettlement", [{ rollupId: ROLLUP, profileHash, profileKind: 1, blocks: registry.address, anchors: anchors.address, receiptVerifier: rvL1.address }]);
+  const settlement = await deploy(w1(), pub1, "ChannelSettlement.sol", "ChannelSettlement", [{ rollupId: ROLLUP, profileHash, profileKind: 1, blocks: canon.address, anchors: anchors.address, receiptVerifier: rvL1.address }]);
   // L2 (ethrex native)
-  const inbox = await deploy(w2(), pub2, "L2AnchorInbox.sol", "L2AnchorInbox", [l2Ops.address, BigInt(L1_ID)]);
+  // No system key: anchors arrive only as proven L1 messages from AnchorSender.
+  const inbox = await deploy(w2(), pub2, "L2AnchorInbox.sol", "L2AnchorInbox", ["0x0000000000000000000000000000000000000000", anchorSender.address, BigInt(L1_ID)]);
   const split = await deploy(w2(), pub2, "SplitModule.sol", "SplitModule");
   const wvL2 = await deploy(w2(), pub2, "WitnessVerifier.sol", "WitnessVerifier");
   const executor = await deploy(w2(), pub2, "ChannelExecutor.sol", "ChannelExecutor", [profileHash, BigInt(L1_ID), inbox.address, wvL2.address, [split.address]]);
@@ -154,7 +176,45 @@ async function main() {
   const h1 = (await send(w1(), pub1, fixture, "setShareBps", [7000n])).blockHash;
   const wit = cli("witness", "--rpc", L1_URL, "--block-hash", h1, "--chain-id", `${L1_ID}`, "--read", `${fixture.address}:${toHex(0, { size: 32 })}`);
   check(true, `H1 witness from ethrex L1 eth_getProof, verified against the hash-checked header`);
-  await send(w2(), pub2, inbox, "post", [wit.rawHeader]);
+  // H1 reaches L2 as an L1 message: AnchorSender checks it against L1's BLOCKHASH (and records
+  // it for settlement), ethrex relays it, and anyone proves it into the inbox.
+  while ((await pub1.getBlockNumber()) <= BigInt(cli("header", "--rpc", L1_URL, "--block", h1, "--chain-id", `${L1_ID}`).number)) await sleep(500);
+  const ANCHOR_GAS = 300_000n;
+  await send(w1(carol), pub1, anchorSender, "send", [wit.rawHeader, inbox.address, ANCHOR_GAS], "L1 AnchorSender.send");
+  const BRIDGE = "0x000000000000000000000000000000000000FfFD" as Address;
+  const processed = { type: "event", name: "L1MessageProcessed", inputs: [
+    { name: "from", type: "address", indexed: true }, { name: "to", type: "address", indexed: true },
+    { name: "value", type: "uint256", indexed: false }, { name: "gasLimit", type: "uint256", indexed: false },
+    { name: "dataHash", type: "bytes32", indexed: false }, { name: "nonce", type: "uint256", indexed: true }] } as const;
+  let mine: any;
+  for (let i = 0; i < 120 && !mine; i++) {
+    const logs = await pub2.getLogs({ address: BRIDGE, event: processed, args: { from: anchorSender.address, to: inbox.address }, fromBlock: 0n });
+    mine = logs[0];
+    if (!mine) await sleep(1000);
+  }
+  check(mine, `ethrex relayed the anchor message to L2 (block ${mine?.blockNumber}, nonce ${mine?.args.nonce})`);
+  const inBlock = (await pub2.getLogs({ address: BRIDGE, event: processed, blockHash: mine.blockHash }))
+    .sort((a: any, b: any) => Number(a.args.nonce - b.args.nonce));
+  const leaves = inBlock.map((l: any) => keccak256(encodePacked(["address", "address", "uint256", "uint256", "bytes32", "uint256"],
+    [l.args.from, l.args.to, l.args.value, l.args.gasLimit, l.args.dataHash, l.args.nonce])));
+  const proofOf = (ls: Hex[], idx: number) => {
+    let len = 1; while (len < ls.length) len <<= 1;
+    let layer = Array.from({ length: len }, (_, i) => ls[Math.min(i, ls.length - 1)]);
+    const proof: Hex[] = [];
+    let k = idx;
+    const pair = (a: Hex, b: Hex) => (BigInt(a) < BigInt(b) ? keccak256(concat([a, b])) : keccak256(concat([b, a])));
+    while (layer.length > 1) {
+      proof.push(layer[k ^ 1]);
+      layer = Array.from({ length: layer.length / 2 }, (_, i) => pair(layer[2 * i], layer[2 * i + 1]));
+      k >>= 1;
+    }
+    return proof;
+  };
+  const myIdx = inBlock.findIndex((l: any) => l.args.nonce === mine.args.nonce);
+  const l2b = await pub2.getBlock({ blockHash: mine.blockHash });
+  await send(w2(), pub2, inbox, "postFromL1", [wit.rawHeader, ANCHOR_GAS, mine.args.nonce, l2b.timestamp, proofOf(leaves, myIdx)], "L2 inbox postFromL1 (proven)");
+  check(await pub2.readContract({ address: inbox.address, abi: inbox.abi, functionName: "stateRootOf", args: [wit.anchorId] }) !== toHex(0, { size: 32 }),
+    "H1 anchor posted on L2 by L1-message proof (no system key)");
   const input = encodeAbiParameters([{ type: "address" }, { type: "bytes32" }, { type: "uint256" }], [fixture.address, toHex(0, { size: 32 }), parseEther("2")]);
   const request = { channelId, termsHash, anchorId: wit.anchorId as Hex, policyHash, executionProfileHash: profileHash, inputHash: keccak256(input), nonce: 1n };
   const domain = { name: "SkimChannels", version: "0", chainId: L1_ID, verifyingContract: settlement.address };
@@ -172,27 +232,61 @@ async function main() {
   const evidence = encodeAbiParameters([evidenceT], [{ l2BlockHash: ev.l2BlockHash, l2Header: ev.l2Header, txIndex: BigInt(ev.txIndex),
     receipt: ev.receipt, receiptProof: ev.receiptProof, logIndex: 0n, request: call.request, outcome }]);
 
-  await send(w1(), pub1, anchors, "record", [wit.rawHeader], "L1 anchor record");
   await expectRevert(pub1.simulateContract({ account: l1Ops, address: settlement.address, abi: settlement.abi, functionName: "settle", args: [channelId, evidence] }), "settle before L1 re-executed the L2 block");
 
   // Wait until ethrex's advancer has re-executed past our block on L1 (EXECUTE precompile).
   const nativeAbi = [{ type: "function", name: "blockNumber", inputs: [], outputs: [{ type: "uint256" }], stateMutability: "view" },
-    { type: "function", name: "stateRootHistory", inputs: [{ type: "uint256" }], outputs: [{ type: "bytes32" }], stateMutability: "view" }] as const;
+    { type: "function", name: "stateRootHistory", inputs: [{ type: "uint256" }], outputs: [{ type: "bytes32" }], stateMutability: "view" },
+    { type: "function", name: "advance", inputs: [{ type: "uint16" }, { type: "bytes" }], outputs: [], stateMutability: "nonpayable" },
+    { type: "event", name: "StateAdvanced", inputs: [{ name: "n", type: "uint256", indexed: true }, { name: "r", type: "bytes32", indexed: true }] }] as const;
   const target = BigInt(ev.blockNumber);
   let verified = 0n;
   for (let i = 0; i < 240 && verified <= target; i++) {
     verified = await pub1.readContract({ address: nativeAddr, abi: nativeAbi, functionName: "blockNumber" }) as bigint;
     if (verified <= target) await sleep(1000);
   }
-  check(verified > target, `ethrex L1 re-executed L2 through block ${verified} (ours: ${target})`);
-  const laterRoot = await pub1.readContract({ address: nativeAddr, abi: nativeAbi, functionName: "stateRootHistory", args: [verified] });
-  const l2Later = await pub2.getBlock({ blockNumber: verified });
-  check(laterRoot === l2Later.stateRoot, "L1-verified state root equals the L2's own state root at that height");
+  check(verified > target, `ethrex's advancer re-executed L2 through block ${verified} on L1 (ours: ${target})`);
 
-  const slot = toHex(target % 8191n, { size: 32 });
-  const proof: any = await pub2.request({ method: "eth_getProof" as any, params: [HISTORY, [slot], toHex(verified)] as any });
-  await send(w1(), pub1, registry, "acceptHistorical", [ev.l2Header, verified, proof.accountProof, proof.storageProof[0].proof], "L1 acceptHistorical (EIP-2935 proof)");
-  await send(w1(), pub1, settlement, "settle", [channelId, evidence], "L1 settle (native profile)");
+  // Permissionless submission: an unprivileged account (carol) replays the SSZ stateless inputs
+  // ethrex published in its advance() calldata, block by block, into CanonicalBlockRegistry,
+  // where ExecuteVerifier re-executes each with EXECUTE again.
+  const advanced = await pub1.getLogs({ address: nativeAddr, event: nativeAbi[3], fromBlock: 0n });
+  const inputs = new Map<bigint, { count: number; ssz: Hex }>();
+  for (const l of advanced) {
+    const tx = await pub1.getTransaction({ hash: l.transactionHash! });
+    const { args } = decodeFunctionData({ abi: nativeAbi, data: tx.input });
+    inputs.set((l as any).args.n, { count: Number(args![0]), ssz: args![1] as Hex });
+  }
+  let cursor = 0n, submitGas = 0n, submitted = 0;
+  for (let n = 1n; n <= target; n++) {
+    const inp = inputs.get(n)!;
+    cursor += BigInt(inp.count);
+    if (inp.count > 0) await send(w1(carol), pub1, msgQueue, "poke", [cursor]);
+    const raw = cli("header", "--rpc", L2_URL, "--block", toHex(n), "--chain-id", `${L2_ID}`).raw as Hex;
+    const r = await send(w1(carol), pub1, canon, "submit", [raw, toHex(0, { size: 32 }), cursor, inp.ssz]);
+    submitGas += r.gasUsed; submitted++;
+  }
+  gas["L1 CanonicalBlockRegistry.submit (EXECUTE), mean"] = submitGas / BigInt(submitted);
+  if (process.env.CAPTURE_FIXTURE) {
+    // A captured (not regenerated) sample for contracts/test/ExecuteVerifier.t.sol: the block
+    // that consumed our anchor message, its SSZ stateless input and its L1 message hashes.
+    const n = mine.blockNumber as bigint;
+    let before = 0n;
+    for (let k = 1n; k < n; k++) before += BigInt(inputs.get(k)!.count);
+    writeFileSync(`${ROOT}fixtures/native/execute-input.json`, JSON.stringify({
+      _comment: "Captured from ethrex (PR #6418 PoC) by ts/e2e-native.ts with CAPTURE_FIXTURE=1. Not regenerated deterministically.",
+      l2ChainId: L2_ID, l2GasLimit: 15000000, number: Number(n),
+      rawHeader: cli("header", "--rpc", L2_URL, "--block", toHex(n), "--chain-id", `${L2_ID}`).raw,
+      ssz: inputs.get(n)!.ssz, messagesBefore: Number(before), messageHashes: leaves,
+      anchor: { rawHeader: wit.rawHeader, gasLimit: Number(ANCHOR_GAS), nonce: Number(mine.args.nonce), l2Timestamp: Number(l2b.timestamp),
+        proof: proofOf(leaves, myIdx), l1Sender: anchorSender.address, inbox: inbox.address, l1ChainId: L1_ID },
+    }, null, 2) + "\n");
+  }
+  const ab = await pub1.readContract({ address: canon.address, abi: canon.abi, functionName: "acceptedBlock", args: [ROLLUP, ev.l2BlockHash] }) as any;
+  const nr = await pub1.readContract({ address: nativeAddr, abi: nativeAbi, functionName: "stateRootHistory", args: [target] });
+  check(ab.accepted && ab.stateRoot === nr, `carol submitted L2 blocks 1..${target} permissionlessly; EXECUTE-verified roots match ethrex's own`);
+  check(await pub1.readContract({ address: canon.address, abi: canon.abi, functionName: "profileKind" }) === 1, "registry profile: native-reexecution-devnet (from ExecuteVerifier)");
+  await send(w1(), pub1, settlement, "settle", [channelId, evidence], "L1 settle (canonical registry, EXECUTE)");
   const wa = await pub1.readContract({ address: settlement.address, abi: settlement.abi, functionName: "withdrawable", args: [participants[0]] }) as bigint;
   const wb = await pub1.readContract({ address: settlement.address, abi: settlement.abi, functionName: "withdrawable", args: [participants[1]] }) as bigint;
   check(wa === parseEther("1.4") && wb === parseEther("0.6"), "settled under native-reexecution-devnet: 1.4 / 0.6");
@@ -201,7 +295,7 @@ async function main() {
   mkdirSync(`${ROOT}experiments`, { recursive: true });
   const out = Object.fromEntries(Object.entries(gas).map(([k, v]) => [k, Number(v)]));
   writeFileSync(`${ROOT}experiments/e2e-native-ethrex.json`, JSON.stringify({
-    note: "ethrex L1 (EXECUTE 0x0101) + ethrex native L2, PR #6418 PoC; NativeRollupRegistry; no mocks in block acceptance. L2 anchor feed is still the labeled mock inbox.",
+    note: "ethrex L1 (EXECUTE 0x0101) + ethrex native L2 (PR #6418 PoC). CanonicalBlockRegistry + ExecuteVerifier (permissionless submission, calldata DA, governance), anchors via proven L1 messages. No mocks.",
     measurements: out }, null, 2) + "\n");
   console.table(out);
   console.log("NATIVE E2E PASSED");

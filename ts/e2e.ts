@@ -115,7 +115,7 @@ async function run() {
   const registry = await deploy(w1(), pub1, "MockAcceptedBlockRegistry.sol", "MockAcceptedBlockRegistry", [ops.address]);
   const anchors = await deploy(w1(), pub1, "AnchorRegistry.sol", "AnchorRegistry");
   // ---- L2 ----
-  const inbox = await deploy(w2(), pub2, "L2AnchorInbox.sol", "L2AnchorInbox", [ops.address, BigInt(L1_ID)]);
+  const inbox = await deploy(w2(), pub2, "L2AnchorInbox.sol", "L2AnchorInbox", [ops.address, "0x0000000000000000000000000000000000000000", BigInt(L1_ID)]);
   const split = await deploy(w2(), pub2, "SplitModule.sol", "SplitModule");
   const splitCodeHash = keccak256((await pub2.getCode({ address: split.address }))!);
   const profile = {

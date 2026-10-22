@@ -73,7 +73,7 @@ contract WitnessTest is Test {
     }
 
     function test_l1StateReaderSingleSlot() public {
-        L2AnchorInbox inbox = new L2AnchorInbox(address(this), 11155111);
+        L2AnchorInbox inbox = new L2AnchorInbox(address(this), address(0), 11155111);
         L1StateReader reader = new L1StateReader(inbox);
         bytes32 id = inbox.post(vm.parseJsonBytes(json, ".h1.rawHeader"));
         assertEq(id, vm.parseJsonBytes32(json, ".h1.anchor.id"));

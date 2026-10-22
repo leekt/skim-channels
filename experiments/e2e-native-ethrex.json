@@ -1,9 +1,10 @@
 {
-  "note": "ethrex L1 (EXECUTE 0x0101) + ethrex native L2, PR #6418 PoC; NativeRollupRegistry; no mocks in block acceptance. L2 anchor feed is still the labeled mock inbox.",
+  "note": "ethrex L1 (EXECUTE 0x0101) + ethrex native L2 (PR #6418 PoC). CanonicalBlockRegistry + ExecuteVerifier (permissionless submission, calldata DA, governance), anchors via proven L1 messages. No mocks.",
   "measurements": {
-    "L2 execute (ethrex native)": 288288,
-    "L1 anchor record": 284950,
-    "L1 acceptHistorical (EIP-2935 proof)": 892959,
-    "L1 settle (native profile)": 495425
+    "L1 AnchorSender.send": 829633,
+    "L2 inbox postFromL1 (proven)": 295909,
+    "L2 execute (ethrex native)": 316976,
+    "L1 CanonicalBlockRegistry.submit (EXECUTE), mean": 16039549,
+    "L1 settle (canonical registry, EXECUTE)": 501113
   }
 }

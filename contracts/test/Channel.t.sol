@@ -18,6 +18,7 @@ import {ReceiptVerifier} from "../src/verifiers/ReceiptVerifier.sol";
 import {CanonicalBlockRegistry} from "../src/CanonicalBlockRegistry.sol";
 import {MockTransitionVerifier} from "../src/mocks/MockTransitionVerifier.sol";
 import {IStateTransitionVerifier} from "../src/interfaces/IStateTransitionVerifier.sol";
+import {ForcedInclusionQueue} from "../src/queues/ForcedInclusionQueue.sol";
 
 /// Tries to write state from compute(). Approved by code hash, so only STATICCALL stops it.
 contract WritingModule {
@@ -115,7 +116,7 @@ contract ChannelTest is Test {
         rv = new ReceiptVerifier();
         registry = new MockAcceptedBlockRegistry(address(this));
         anchors = new AnchorRegistry();
-        inbox = new L2AnchorInbox(address(this), L1);
+        inbox = new L2AnchorInbox(address(this), address(0), L1);
         split = new SplitModule();
         writer = new WritingModule();
         rogue = new RogueModule();
@@ -463,7 +464,7 @@ contract ChannelTest is Test {
     }
 
     function test_anchorUnknownToInboxRejected() public {
-        L2AnchorInbox empty = new L2AnchorInbox(address(this), L1);
+        L2AnchorInbox empty = new L2AnchorInbox(address(this), address(0), L1);
         address[] memory mods = new address[](1);
         mods[0] = address(split);
         ChannelExecutor ex2 = new ChannelExecutor(profileHash, L1, empty, wv, mods);
@@ -589,7 +590,12 @@ contract ChannelTest is Test {
         bytes memory genesis = _l2Header(bytes32(0));
         // Blocks built from here on extend this genesis.
         (l2Parent, l2Number) = (keccak256(genesis), n);
-        canon = new CanonicalBlockRegistry(ROLLUP, profileHash, mockVerifier, anchors, genesis, address(this));
+        canon = new CanonicalBlockRegistry(
+            CanonicalBlockRegistry.Config(
+                ROLLUP, profileHash, mockVerifier, anchors, new ForcedInclusionQueue(), address(this), true
+            ),
+            genesis
+        );
         s2 = _deploySettlement(ChannelTypes.PROFILE_MOCK_LOCAL, canon);
     }
 

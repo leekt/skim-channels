@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IAcceptedBlockRegistry} from "./interfaces/IAcceptedBlockRegistry.sol";
 import {IStateTransitionVerifier} from "./interfaces/IStateTransitionVerifier.sol";
+import {IL1MessageQueue} from "./interfaces/IL1MessageQueue.sol";
 import {AnchorRegistry} from "./AnchorRegistry.sol";
 import {EthTypes} from "./libraries/EthTypes.sol";
 
@@ -10,11 +11,13 @@ import {EthTypes} from "./libraries/EthTypes.sol";
 ///
 /// A block is accepted only if, together:
 /// - it extends the canonical tip (parent hash and number) from a fixed genesis: one chain;
-/// - the L1 anchor it carries was recorded on L1 (AnchorRegistry);
-/// - its data is published in this L1 transaction: `daCommitment` = BLOBHASH(0) (EIP-4844);
-/// - it consumes every forced-inclusion entry older than FORCE_DELAY (censorship resistance);
+/// - the L1 anchor it claims, if any, was recorded on L1 (AnchorRegistry);
+/// - its data is on L1 in this transaction: the blob (BLOBHASH(0)) or, in calldata mode, the
+///   proof itself (e.g. EXECUTE's stateless input, which carries the whole block);
+/// - it consumes the L1 messages [cursor, newCursor) of `messages` — committed to by the
+///   transition — including every message that is overdue (forced inclusion);
 /// - the verifier accepts the transition.
-/// Anyone may submit blocks and anyone may force-include transactions.
+/// Anyone may submit blocks.
 ///
 /// Governance (Stage 2 shape): only `governance` (a RollupGovernance timelock with a ≥ 30-day
 /// delay) may replace the verifier. If anyone proves on chain that the verifier accepted two
@@ -24,78 +27,58 @@ import {EthTypes} from "./libraries/EthTypes.sol";
 /// governance's Security Council replace the verifier without the delay.
 contract CanonicalBlockRegistry is IAcceptedBlockRegistry {
     uint256 public constant FORCE_DELAY = 1 days;
-    uint256 public constant MAX_FORCED_TX_BYTES = 128 * 1024;
+
+    struct Config {
+        bytes32 rollupId;
+        bytes32 profileHash;
+        IStateTransitionVerifier verifier;
+        AnchorRegistry anchors;
+        IL1MessageQueue messages;
+        address governance;
+        bool blobDA;
+    }
 
     bytes32 public immutable rollupId;
     bytes32 public immutable profileHash;
     bytes32 public immutable genesisHash;
     AnchorRegistry public immutable anchors;
+    IL1MessageQueue public immutable messages;
     address public immutable governance;
+    bool public immutable blobDA;
 
     IStateTransitionVerifier public verifier;
     bool public frozen;
     bytes32 public head;
+    uint256 public messageCursor;
     mapping(bytes32 blockHash => AcceptedBlock) internal blocks;
 
-    /// Forced inclusion: entry i has rolling accumulator forcedAcc[i + 1] and a timestamp.
-    bytes32[] public forcedAcc;
-    uint64[] public forcedAt;
-    uint256 public forcedCursor;
-    mapping(bytes32 blockHash => uint256) public forcedCursorAt;
-
     event BlockAccepted(bytes32 indexed blockHash, uint64 number, bytes32 daCommitment, address submitter);
-    event ForcedTransaction(uint256 indexed index, bytes32 txHash, bytes32 acc);
     event Frozen(bytes32 parentStateRoot, bytes32 blockA, bytes32 blockB);
     event VerifierReplaced(address verifier, bool emergency);
 
     error Rejected(string why);
 
-    constructor(
-        bytes32 rollupId_,
-        bytes32 profileHash_,
-        IStateTransitionVerifier verifier_,
-        AnchorRegistry anchors_,
-        bytes memory genesisHeader,
-        address governance_
-    ) {
-        rollupId = rollupId_;
-        profileHash = profileHash_;
-        verifier = verifier_;
-        anchors = anchors_;
-        governance = governance_;
+    constructor(Config memory cfg, bytes memory genesisHeader) {
+        rollupId = cfg.rollupId;
+        profileHash = cfg.profileHash;
+        verifier = cfg.verifier;
+        anchors = cfg.anchors;
+        messages = cfg.messages;
+        governance = cfg.governance;
+        blobDA = cfg.blobDA;
         EthTypes.HeaderFields memory g = EthTypes.decodeHeader(genesisHeader);
         if (g.number != 0) revert Rejected("genesis number");
         genesisHash = g.hash;
         head = g.hash;
-        blocks[g.hash] = AcceptedBlock(g.parentHash, g.stateRoot, g.receiptsRoot, 0, profileHash_, 0, true);
-        forcedAcc.push(0);
+        blocks[g.hash] = AcceptedBlock(g.parentHash, g.stateRoot, g.receiptsRoot, 0, cfg.profileHash, 0, true);
     }
 
     function profileKind() external view returns (uint8) {
         return verifier.profileKind();
     }
 
-    // ---- forced inclusion ------------------------------------------------------------------
-
-    /// @notice Queues a signed L2 transaction that every block producer must include once it
-    ///         is FORCE_DELAY old. Anyone may call.
-    function forceInclude(bytes calldata signedTx) external returns (uint256 index) {
-        if (signedTx.length == 0 || signedTx.length > MAX_FORCED_TX_BYTES) revert Rejected("forced tx size");
-        index = forcedAt.length;
-        bytes32 acc = keccak256(abi.encode(forcedAcc[index], keccak256(signedTx)));
-        forcedAcc.push(acc);
-        forcedAt.push(uint64(block.timestamp));
-        emit ForcedTransaction(index, keccak256(signedTx), acc);
-    }
-
-    function forcedCount() external view returns (uint256) {
-        return forcedAt.length;
-    }
-
-    // ---- blocks ----------------------------------------------------------------------------
-
-    /// @param newForcedCursor how many queue entries (in total) this block has included.
-    function submit(bytes calldata rawHeader, bytes32 l1AnchorId, uint256 newForcedCursor, bytes calldata proof)
+    /// @param newMessageCursor how many queue messages (in total) the chain has consumed after this block.
+    function submit(bytes calldata rawHeader, bytes32 l1AnchorId, uint256 newMessageCursor, bytes calldata proof)
         external
         returns (bytes32)
     {
@@ -104,27 +87,25 @@ contract CanonicalBlockRegistry is IAcceptedBlockRegistry {
         AcceptedBlock memory parent = blocks[h.parentHash];
         if (h.parentHash != head) revert Rejected("not on the canonical tip");
         if (h.number != uint256(parent.blockNumber) + 1) revert Rejected("number");
-        if (!anchors.recorded(l1AnchorId)) revert Rejected("L1 anchor not recorded");
-        bytes32 da = blobhash(0);
+        if (l1AnchorId != 0 && !anchors.recorded(l1AnchorId)) revert Rejected("L1 anchor not recorded");
+        bytes32 da = blobDA ? blobhash(0) : keccak256(proof);
         if (da == 0) revert Rejected("no blob: data not on L1");
-        if (newForcedCursor < forcedCursor || newForcedCursor > forcedAt.length) revert Rejected("forced cursor");
-        if (newForcedCursor < forcedAt.length && block.timestamp >= uint256(forcedAt[newForcedCursor]) + FORCE_DELAY) {
-            revert Rejected("overdue forced transaction not included");
-        }
+        uint256 cursor = messageCursor;
+        if (newMessageCursor < cursor) revert Rejected("message cursor");
+        if (messages.overdue(newMessageCursor, FORCE_DELAY)) revert Rejected("overdue L1 message not included");
         IStateTransitionVerifier.Transition memory t = IStateTransitionVerifier.Transition({
             profileHash: profileHash,
             parentStateRoot: parent.stateRoot,
             daCommitment: da,
             l1AnchorId: l1AnchorId,
-            forcedTxsAcc: forcedAcc[newForcedCursor],
+            l1MessagesRoot: messages.messagesRoot(cursor, newMessageCursor - cursor), // reverts past the queue
             rawHeader: rawHeader
         });
         if (!verifier.verify(t, proof)) revert Rejected("transition not verified");
         blocks[h.hash] =
             AcceptedBlock(h.parentHash, h.stateRoot, h.receiptsRoot, l1AnchorId, profileHash, uint64(h.number), true);
         head = h.hash;
-        forcedCursor = newForcedCursor;
-        forcedCursorAt[h.hash] = newForcedCursor;
+        messageCursor = newMessageCursor;
         emit BlockAccepted(h.hash, uint64(h.number), da, msg.sender);
         return h.hash;
     }
@@ -132,8 +113,8 @@ contract CanonicalBlockRegistry is IAcceptedBlockRegistry {
     // ---- faults and governance -------------------------------------------------------------
 
     /// @notice Anyone: two verifier-accepted transitions with identical inputs (parent state,
-    ///         data, anchor, forced transactions, profile) but different results prove the
-    ///         verifier unsound. Freezes the registry.
+    ///         data, anchor, L1 messages, profile) but different results prove the verifier
+    ///         unsound. Freezes the registry.
     function proveConflict(
         IStateTransitionVerifier.Transition calldata a,
         bytes calldata proofA,

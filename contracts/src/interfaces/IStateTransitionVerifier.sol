@@ -10,9 +10,9 @@ interface IStateTransitionVerifier {
     struct Transition {
         bytes32 profileHash; // program, fork schema, DA schema
         bytes32 parentStateRoot; // accepted parent's post-state
-        bytes32 daCommitment; // versioned hash of the blob carrying the block's transactions
-        bytes32 l1AnchorId; // the L1 anchor the block makes available to L2
-        bytes32 forcedTxsAcc; // accumulator of the forced-inclusion entries the block must contain
+        bytes32 daCommitment; // blob versioned hash, or keccak256(proof) when the block travels in calldata
+        bytes32 l1AnchorId; // the L1 anchor the block makes available to L2 (0: none claimed)
+        bytes32 l1MessagesRoot; // root of the L1 messages the block must have consumed (IL1MessageQueue)
         bytes rawHeader; // the block (its hash, state root and receipts root are the result)
     }
 
