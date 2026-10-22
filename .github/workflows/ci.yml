@@ -82,3 +82,6 @@ jobs:
       - name: e2e app channels (anvil, mock verifier)
         working-directory: ts
         run: npm run -s e2e-app
+      - name: e2e prediction rounds (anvil, optimistic, no mocks)
+        working-directory: ts
+        run: npm run -s e2e-predict

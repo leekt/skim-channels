@@ -15,6 +15,8 @@ contract AnchorRegistry {
     mapping(bytes32 anchorId => bool) public recorded;
     /// The state root of each recorded anchor (for verifying witnesses on L1).
     mapping(bytes32 anchorId => bytes32) public stateRootOf;
+    /// The anchor recorded for each L1 block number (canonical, so at most one).
+    mapping(uint256 blockNumber => bytes32 anchorId) public anchorIdAt;
 
     event AnchorRecorded(bytes32 indexed anchorId, uint64 blockNumber, bytes32 blockHash, bytes32 stateRoot);
 
@@ -26,6 +28,7 @@ contract AnchorRegistry {
         anchorId = ChannelTypes.anchorId(ChannelTypes.L1Anchor(block.chainid, uint64(h.number), h.hash, h.stateRoot));
         recorded[anchorId] = true;
         stateRootOf[anchorId] = h.stateRoot;
+        anchorIdAt[h.number] = anchorId;
         emit AnchorRecorded(anchorId, uint64(h.number), h.hash, h.stateRoot);
     }
 

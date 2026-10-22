@@ -242,7 +242,7 @@ Ordinary interactions have **no standalone L1 transaction**. Their L1 cost is th
 | Withdrawal claim | per claim | 70k–180k estimate |
 | Forced request / freeze | when needed | 60k–150k each, estimate |
 | Frozen claim | per user and token | 90k–200k estimate |
-| Anchor registration | per distinct anchor | 111,953 measured |
+| Anchor registration | per distinct anchor | 134,172 measured (111,953 before `anchorIdAt` was added for outcome-independent voiding) |
 
 As an external reference, SP1 documents roughly **270k gas** for Groth16 verification and **300k** for PLONK.[2]
 

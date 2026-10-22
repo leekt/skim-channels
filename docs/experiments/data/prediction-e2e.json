@@ -1,0 +1,26 @@
+{
+  "note": "anvil prague, one round, 3 users (A: 2 stakes, B and C: 1). Gas = receipt gasUsed; (xN) rows are sums.",
+  "witnessPackageBytes": 1824,
+  "measurements": {
+    "channel deposit (x3)": 356799,
+    "openRound": 129595,
+    "commit (3 users)": 142038,
+    "AnchorRegistry.record": 134136,
+    "resolve (witness)": 261131,
+    "propose (bad)": 159109,
+    "challengeUpdate": 115684,
+    "propose (3 users)": 139197,
+    "finalize": 39467,
+    "requestWithdraw": 140956,
+    "propose (1 withdrawal)": 110283,
+    "claim": 86442,
+    "freeze": 71164,
+    "exit": 205512,
+    "L1 deposit (x3)": 130854,
+    "L1 openRound": 119333,
+    "L1 stake (x4)": 244334,
+    "L1 resolve (witness)": 258783,
+    "L1 collect (x3)": 106667,
+    "L1 withdraw": 28630
+  }
+}

@@ -35,18 +35,19 @@ The common pattern below: **the normal path posts results; L1 checks conditions 
 |---|---|
 | **Participation must be fixed before the outcome.** Signatures carry no trustworthy time, so a list posted with the result could be backfilled with winning bets. | The operator **commits the participation list on L1** before `commitDeadline`. Its own challenge window ends before the resolution block exists. So by the time anyone can know the outcome, the list is final |
 | **Cancellation must not be a free option on the outcome.** | A committed round is **never cancelled because an operator vanished**. Resolution is permissionless: anyone proves the value at the fixed block. The only void conditions are independent of the outcome: a successful challenge to the commit (decided before resolution), or a resolution block that nobody recorded on L1 within the BLOCKHASH/EIP-2935 horizon |
-| **One user's transition isn't automatically small.** | Each user has **one aggregate leaf per round**, `(user, up, down, stakesHash)`, with at most `MAX_STAKES` signed stakes. Rounds are sequential (one per settlement), so one user's balance transition reads one round leaf |
+| **One user's transition isn't automatically small.** | Each user has **one leaf per round**, `(up, down, ticketHash)`: every stake makes the user sign their **running totals** as a new ticket, and only the latest ticket reaches L1. Rounds are sequential (one per settlement), so one user's balance transition reads one round leaf |
 | **Nobody can prove anything against a fake root.** | **L1 computes every root itself.** The participation root is built on L1 from the published leaves at commit. Settlement proposals publish the updated balance leaves with their old Merkle paths, and **L1 computes the new root**. Only leaf *values* are optimistic, and the data to challenge any of them is on L1 |
 
-**What users sign:** EIP-712 `Stake(channel, round, side, amount, nonce)`.
+**What users sign:** EIP-712 `Ticket(round, up, down, nonce)`, with the channel contract in the domain. Each ticket carries the user's cumulative stakes in the round, so it supersedes the previous one.
 
 **Lifecycle on L1 (`PredictionChannel`):**
 1. **Round terms:** strike, oracle (account, slot, bit range), resolution block number, commit deadline, commit challenge window. Fixed when the operator opens the round.
-2. **Commit** (operator, by `commitDeadline`): the per-user aggregate leaves, plus each user's signed stakes, in calldata. L1 builds the participation tree (a sparse tree indexed by user) and the side totals.
-   - *Challenge until `commitDeadline + window`, before the resolution block:* a stake with a bad signature, a leaf whose stakes don't sum to it, or a stake beyond the user's available balance. A successful challenge **voids** the round (stakes simply stay with users) and slashes the operator's bond to the challenger.
+2. **Commit** (operator, by `commitDeadline`): each participant's latest ticket, signature included, packed in calldata. L1 builds the participation tree (a sparse tree indexed by user) and the side totals itself.
+   - *Challenge until `commitChallengeEnd`, a block before the resolution block:* a ticket with a bad signature, or stakes above what the user had at the commit (finalized balance plus unapplied deposits). A successful challenge **voids** the round (stakes simply stay with users) and pays the operator's bond to the challenger.
+   - An overdraft no one challenged in time forfeits what the user had; they win nothing. This keeps settlement total.
 3. **Resolve** (anyone): an L1 witness of the oracle slot at the recorded resolution block. The outcome is computed on L1.
-4. **Propose settlement** (operator): updated balance leaves `(user, balance, depositsApplied, withdrawalsApplied)` with their old paths. L1 checks the deposit and withdrawal counters against its own records and computes the new root.
-   - *Challenge until `proposedAt + window`:* one user's new leaf ≠ f(old leaf, round leaf, counters), recomputed on L1 in O(1). Omissions are covered too: a participant whose leaf didn't change is challenged the same way. A successful challenge discards the proposal and slashes the bond.
+4. **Propose settlement** (operator): changed balance leaves `(balance, cumWithdrawn, depositsApplied, requestsApplied)`, old and new, with a multiproof of the unchanged subtrees. L1 computes the old root (it must be the finalized one) and the new root.
+   - *Challenge until `proposedAt + window`:* one user's new leaf ≠ f(old leaf, round leaf, counters), recomputed on L1 in O(1), or the leaf claims more deposits or requests than L1 recorded. Omissions are covered too: a participant whose leaf didn't change is challenged the same way. A successful challenge discards the proposal and pays the bond to the challenger.
 5. **Finalize** (anyone): after the window. Withdrawals become claimable against the finalized root.
 
 **Withdrawal and the operator-free exit:**
@@ -58,7 +59,9 @@ The common pattern below: **the normal path posts results; L1 checks conditions 
   - plus, for a committed round not yet settled, the round's effect: payout − stake if resolved, nothing if void;
   - minus anything already paid.
 
-**L1 checks:** signatures and sums for one user (bounded by `MAX_STAKES`); a storage witness for the oracle; one user's balance arithmetic. No app execution.
+**L1 checks:** one ticket signature; a storage witness for the oracle; one user's balance arithmetic. No app execution.
+
+**Implementation status (2026-10-22):** built as `contracts/src/predict/PredictionChannel.sol`, with forge tests, mutation checks and an anvil e2e. Measured against the same game run directly on L1: a round costs 4–15× less per user at 100 users, and each dispute is a single transaction under 150k gas. Details in [prediction round cost](../experiments/prediction-round-cost.md).
 
 **Mechanism:** optimistic for balance settlement; participation and outcome are fixed on L1. The challenges are **non-interactive**: one transaction proves the violation, so there is a challenge-submission deadline but no response deadline. Bonds penalize invalid proposals. They don't replace the need for **someone watching**: users watch their own leaves, and any third party can.
 
@@ -161,4 +164,4 @@ So this supports **Solidity apps written against the dispute interface**, not ar
 3. **Games:** direct L1 funding first. Virtual channels later, as separate work.
 4. **Order:** complete the prediction round's close → settlement proposal → challenge → operator-free withdrawal path first, with only the optimistic layer it needs. Measure its safety and cost, **including the same app run directly on L1**, before building a general optimistic vault.
 
-**Cost caveat:** apps 1, 3 and 4 publish inputs on L1, so their DA cost grows with the number of interactions. Whether they're cheaper than L1 is an experiment, not an assumption.
+**Cost caveat:** apps 1, 3 and 4 publish inputs on L1, so their DA cost grows with the number of interactions. Whether they're cheaper than L1 is an experiment, not an assumption. For app 1 it has been run: [prediction round cost](../experiments/prediction-round-cost.md).

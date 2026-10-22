@@ -1,6 +1,12 @@
 # Open work
 
 0. **App channels:** experiments 5–8 that don't need a prover (positions and termination rules, old anchors and reorgs, upgrades). Real proofs (experiment 3) are deferred to [future considerations](guide/future-considerations.md).
+   - **Prediction rounds (app 1): done**, optimistic, measured against L1 ([log](experiments/prediction-round-cost.md)).
+   - **Next:**
+     - OTC (app 3) and AMM (app 4) disputes on the same layer;
+     - blob DA for tickets and leaves (disputes need the data within the window);
+     - cheaper first deposits (119k now);
+     - batching beyond ~1,800 users per commit or proposal transaction.
 
 1. **EIP-8288 proof dependencies** (blocked; owner accepted 2026-10-22): when EIP-8288 defines
    `get_deps_hash` for STARKs and a network carries it, implement `IDependencySource` over

@@ -92,6 +92,25 @@ Re-execution means L1 pays at least the L2's full computation, so this path cost
 
 An L2 only saves cost when L1 does less work than the L2 did: L1 verifies a **succinct proof** of the computation and receives the **net state diff**, and never re-runs anything. That's the [app channels](app-channels.md) design: proven checkpoints with recoverable state. A rough illustration (an estimate, not a benchmark) gives ~2.6k L1 gas per interaction, against ~100k on L1.
 
+## Is an app channel actually cheaper than running the app on L1?
+
+For prediction rounds, **yes, measured**: the same game, the same payout rule and the same oracle witness, run both ways ([log](../experiments/prediction-round-cost.md)).
+
+| Per user, one round | Channel | Directly on L1 |
+|---|---|---|
+| 100 users × 1 stake | 25k gas | 101k gas |
+| 100 users × 8 stakes | 25k gas | 383k gas |
+| 1,000 users × 1 stake | 17k gas | 94k gas |
+
+**Why it's cheaper:**
+- **Commit:** every stake makes the user sign their running totals, and L1 receives only each user's last ticket (~7.5k gas).
+- **Settlement:** L1 receives the changed balance leaves with a multiproof (~9k gas). No app execution runs on L1 unless someone challenges, and each challenge is one transaction under 150k gas.
+
+**What it costs instead:**
+- **Entry and exit:** about 200k more gas per user, recovered after ~3 rounds at 1 stake each.
+- **Latency:** settlement waits a challenge window of up to 6 hours.
+- **Watching:** someone must check each proposal within that window.
+
 ## What's the plan for apps (users join, lock assets on L1, use the app, withdraw any time)?
 
 **App channels** ([design](app-channels.md)):

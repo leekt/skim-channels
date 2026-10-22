@@ -3,7 +3,7 @@
   "measurements": {
     "deploy AllocationFixture": 138897,
     "deploy MockAcceptedBlockRegistry": 297636,
-    "deploy AnchorRegistry": 637226,
+    "deploy AnchorRegistry": 652735,
     "deploy L2AnchorInbox": 952607,
     "deploy SplitModule": 264685,
     "deploy WitnessVerifier": 1418974,
@@ -15,15 +15,15 @@
     "L1 fund": 45644,
     "L2 inbox post": 95092,
     "witness package bytes (1 slot)": 1824,
-    "L2 execute": 286834,
+    "L2 execute": 286846,
     "evidence bytes (31-tx L2 block)": 3296,
     "receipt proof nodes": 3,
-    "L1 anchor record": 111953,
-    "L1 mockAccept": 159911,
-    "L1 settle (31-tx L2 block)": 392030,
+    "L1 anchor record": 134172,
+    "L1 mockAccept": 159935,
+    "L1 settle (31-tx L2 block)": 392090,
     "L1 withdraw": 28519,
     "L1 refund": 71838,
-    "L1 startExit": 130364,
-    "L1 finalizeExit": 317655
+    "L1 startExit": 130388,
+    "L1 finalizeExit": 317689
   }
 }
