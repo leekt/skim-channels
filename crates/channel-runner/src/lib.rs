@@ -13,11 +13,11 @@
 //! Whether the block hash itself is canonical / confirmed is a separate question: L1 anchors
 //! need confirmation evidence (`AnchorBook`); L2 blocks need acceptance on L1.
 
-use alloy_consensus::Header;
 use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{B256, Bytes, U256, keccak256};
 use alloy_rpc_types_eth::TransactionReceipt;
 use channel_types::L1Anchor;
+use channel_witness::header::HeaderFields;
 use serde_json::{Value, json};
 
 #[derive(Debug, thiserror::Error)]
@@ -67,15 +67,19 @@ impl Rpc {
     }
 }
 
-/// A header whose bytes hash to the block hash: (hash, raw RLP, decoded).
+/// A header whose bytes hash to the block hash: (hash, raw RLP, the fields channels use).
 pub struct VerifiedHeader {
     pub hash: B256,
     pub raw: Bytes,
-    pub header: Header,
+    pub header: HeaderFields,
 }
 
-/// Fetches block `id` (a number/tag string or a 0x hash) and checks it hashes to its hash.
-/// If `id` is a hash, the header must hash to exactly that.
+/// Fetches block `id` (a number/tag string or a 0x hash). The header must hash to the block
+/// hash: the one asked for, or for a number/tag the one the node reported with it.
+///
+/// Prefers the node's raw consensus bytes (`debug_getRawHeader`, by number): any fork's header
+/// shape, nothing rebuilt. Otherwise (skim doesn't serve it) the RLP is rebuilt from the JSON
+/// fields, which works for header shapes alloy knows.
 pub fn fetch_header(rpc: &Rpc, id: &str) -> Result<VerifiedHeader, RunnerError> {
     let by_hash = id.len() == 66 && id.starts_with("0x");
     let v = if by_hash {
@@ -86,24 +90,40 @@ pub fn fetch_header(rpc: &Rpc, id: &str) -> Result<VerifiedHeader, RunnerError> 
     if v.is_null() {
         return Err(RunnerError::Other(format!("no block {id}")));
     }
+    let claimed: B256 = (if by_hash {
+        id
+    } else {
+        v["hash"].as_str().unwrap_or("")
+    })
+    .parse()
+    .map_err(|e| RunnerError::Other(format!("bad block hash: {e}")))?;
+    if let Ok(r) = rpc.call("debug_getRawHeader", json!([v["number"]]))
+        && let Some(hex) = r.as_str()
+    {
+        let raw: Bytes = hex
+            .parse()
+            .map_err(|e| RunnerError::Other(format!("bad raw header: {e}")))?;
+        let header =
+            channel_witness::header::decode(&raw).map_err(|e| RunnerError::Other(e.to_string()))?;
+        if header.hash != claimed {
+            return Err(RunnerError::HeaderHash(claimed));
+        }
+        return Ok(VerifiedHeader {
+            hash: header.hash,
+            raw,
+            header,
+        });
+    }
     let h: alloy_rpc_types_eth::Header = serde_json::from_value(v)
         .map_err(|e| RunnerError::Other(format!("bad header json: {e}")))?;
     let raw = Bytes::from(alloy_rlp::encode(&h.inner));
     let hash = keccak256(&raw);
-    let claimed = if by_hash {
-        id.parse::<B256>()
-            .map_err(|e| RunnerError::Other(e.to_string()))?
-    } else {
-        h.hash
-    };
     if hash != claimed {
         return Err(RunnerError::HeaderHash(claimed));
     }
-    Ok(VerifiedHeader {
-        hash,
-        raw,
-        header: h.inner,
-    })
+    let header =
+        channel_witness::header::decode(&raw).map_err(|e| RunnerError::Other(e.to_string()))?;
+    Ok(VerifiedHeader { hash, raw, header })
 }
 
 pub fn anchor_of(chain_id: u64, h: &VerifiedHeader) -> L1Anchor {
@@ -138,19 +158,17 @@ pub fn receipt_evidence(rpc: &Rpc, tx: B256) -> Result<ReceiptEvidence, RunnerEr
         r.transaction_index
             .ok_or_else(|| RunnerError::Other("no transaction index".into()))? as usize;
     let header = fetch_header(rpc, &block_hash.to_string())?;
-    let all: Vec<TransactionReceipt> =
-        serde_json::from_value(rpc.call("eth_getBlockReceipts", json!([block_hash]))?)
-            .map_err(|e| RunnerError::Other(format!("bad receipts json: {e}")))?;
-    let mut encoded = vec![Bytes::new(); all.len()];
-    for rc in all {
-        let i = rc
-            .transaction_index
-            .ok_or_else(|| RunnerError::Other("no transaction index".into()))?
-            as usize;
-        if rc.block_hash != Some(block_hash) || i >= encoded.len() || !encoded[i].is_empty() {
-            return Err(RunnerError::Other("inconsistent block receipts".into()));
-        }
-        encoded[i] = Bytes::from(rc.inner.into_primitives_receipt().encoded_2718());
+    // Prefer the node's consensus encodings (any receipt type); else re-encode the JSON. Either
+    // way the whole set must rebuild the header's receipts root below.
+    let encoded: Vec<Bytes> = match rpc.call("debug_getRawReceipts", json!([block_hash])) {
+        Ok(v) if v.is_array() => serde_json::from_value(v)
+            .map_err(|e| RunnerError::Other(format!("bad raw receipts: {e}")))?,
+        _ => json_receipts(rpc, block_hash)?,
+    };
+    if tx_index >= encoded.len() {
+        return Err(RunnerError::Other(
+            "transaction index outside the block".into(),
+        ));
     }
     let root = channel_receipts::receipts_root(&encoded);
     if root != header.header.receipts_root {
@@ -169,6 +187,24 @@ pub fn receipt_evidence(rpc: &Rpc, tx: B256) -> Result<ReceiptEvidence, RunnerEr
         receipts_root: root,
         block_number: header.header.number,
     })
+}
+
+fn json_receipts(rpc: &Rpc, block_hash: B256) -> Result<Vec<Bytes>, RunnerError> {
+    let all: Vec<TransactionReceipt> =
+        serde_json::from_value(rpc.call("eth_getBlockReceipts", json!([block_hash]))?)
+            .map_err(|e| RunnerError::Other(format!("bad receipts json: {e}")))?;
+    let mut encoded = vec![Bytes::new(); all.len()];
+    for rc in all {
+        let i = rc
+            .transaction_index
+            .ok_or_else(|| RunnerError::Other("no transaction index".into()))?
+            as usize;
+        if rc.block_hash != Some(block_hash) || i >= encoded.len() || !encoded[i].is_empty() {
+            return Err(RunnerError::Other("inconsistent block receipts".into()));
+        }
+        encoded[i] = Bytes::from(rc.inner.into_primitives_receipt().encoded_2718());
+    }
+    Ok(encoded)
 }
 
 /// Confirmation evidence from an RPC node's `safe` / `finalized` tags.

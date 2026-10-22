@@ -5,6 +5,7 @@ import {ChannelTypes} from "./libraries/ChannelTypes.sol";
 import {WitnessLib} from "./libraries/WitnessLib.sol";
 import {IChannelModule} from "./interfaces/IChannelModule.sol";
 import {L2AnchorInbox} from "./L2AnchorInbox.sol";
+import {WitnessVerifier} from "./verifiers/WitnessVerifier.sol";
 
 /// @notice L2: stateless channel execution (PROJECT.md §5.3, §5.4).
 ///         - Binds terms, policy, request, input, executor, module and execution profile.
@@ -25,6 +26,7 @@ contract ChannelExecutor {
     bytes32 public immutable profileHash;
     uint256 public immutable l1ChainId;
     L2AnchorInbox public immutable inbox;
+    WitnessVerifier public immutable witnessVerifier;
     /// Approved modules by code hash. Written only in the constructor.
     mapping(bytes32 codeHash => address module) public modules;
 
@@ -35,10 +37,17 @@ contract ChannelExecutor {
     error UnknownAnchor(bytes32 anchorId);
     error AnchorTooOld(uint64 anchor, uint64 latest);
 
-    constructor(bytes32 profileHash_, uint256 l1ChainId_, L2AnchorInbox inbox_, address[] memory modules_) {
+    constructor(
+        bytes32 profileHash_,
+        uint256 l1ChainId_,
+        L2AnchorInbox inbox_,
+        WitnessVerifier witnessVerifier_,
+        address[] memory modules_
+    ) {
         profileHash = profileHash_;
         l1ChainId = l1ChainId_;
         inbox = inbox_;
+        witnessVerifier = witnessVerifier_;
         for (uint256 i; i < modules_.length; ++i) {
             modules[modules_[i].codehash] = modules_[i];
         }
@@ -93,13 +102,14 @@ contract ChannelExecutor {
             if (ChannelTypes.recoverSigner(requestHash, c.signatures[i]) != c.participants[i]) revert BadSignature(i);
         }
 
-        WitnessLib.WitnessPackage memory pkg = WitnessLib.decode(c.witness);
-        if (ChannelTypes.anchorId(pkg.anchor) != r.anchorId) revert Mismatch("anchor");
-        if (pkg.anchor.chainId != l1ChainId) revert Mismatch("anchor chain");
-        if (inbox.stateRootOf(r.anchorId) != pkg.anchor.stateRoot) revert UnknownAnchor(r.anchorId);
+        // Proofs are checked by the shared verifier; the anchor they're checked against is
+        // authenticated here.
+        (ChannelTypes.L1Anchor memory anchor, WitnessLib.Read[] memory reads) = witnessVerifier.verify(c.witness);
+        if (ChannelTypes.anchorId(anchor) != r.anchorId) revert Mismatch("anchor");
+        if (anchor.chainId != l1ChainId) revert Mismatch("anchor chain");
+        if (inbox.stateRootOf(r.anchorId) != anchor.stateRoot) revert UnknownAnchor(r.anchorId);
         uint64 latest = inbox.latestNumber();
-        if (latest - pkg.anchor.blockNumber > p.maxAnchorLag) revert AnchorTooOld(pkg.anchor.blockNumber, latest);
-        WitnessLib.Read[] memory reads = WitnessLib.verify(pkg);
+        if (latest - anchor.blockNumber > p.maxAnchorLag) revert AnchorTooOld(anchor.blockNumber, latest);
 
         // `view` interface: compiled to STATICCALL, so the module cannot write anything.
         outcome = IChannelModule(module).compute(c.input, reads, c.participants.length);

@@ -886,7 +886,7 @@ fn history_fixture_is_current() {
     let history: Address = address!("0000F90827F1C53a10cb7A02335B175320002935");
     let block_state = state(1234);
     let (raw, block) = block_state.header(CHAIN, 50, B256::repeat_byte(0x11));
-    let slot = B256::from(U256::from(50u64 % 8191));
+    let slot = B256::from(U256::from(50u64)); // number % 8191
     let mut later = state(1235);
     later.accounts.insert(
         history,

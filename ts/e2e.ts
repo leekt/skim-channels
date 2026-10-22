@@ -124,11 +124,16 @@ async function run() {
     daSchemaHash: keccak256(toHex("none:mock-local")), executorCodeHash: keccak256(toHex("ChannelExecutor@e2e")),
   };
   const profileHash = hashStruct({ types: eip712, primaryType: "ExecutionProfile", data: profile });
-  const executor = await deploy(w2(), pub2, "ChannelExecutor.sol", "ChannelExecutor", [profileHash, BigInt(L1_ID), inbox.address, [split.address]]);
+  const wvL2 = await deploy(w2(), pub2, "WitnessVerifier.sol", "WitnessVerifier");
+  const executor = await deploy(w2(), pub2, "ChannelExecutor.sol", "ChannelExecutor", [profileHash, BigInt(L1_ID), inbox.address, wvL2.address, [split.address]]);
   // The same SplitModule bytecode on L1, for emergency exits (same code hash).
   const splitL1 = await deploy(w1(), pub1, "SplitModule.sol", "SplitModule");
   const WINDOW = 600n;
-  const settlement = await deploy(w1(), pub1, "ChannelSettlement.sol", "ChannelSettlement", [ROLLUP, profileHash, 0, registry.address, anchors.address, WINDOW, [splitL1.address]]);
+  const wvL1 = await deploy(w1(), pub1, "WitnessVerifier.sol", "WitnessVerifier");
+  const rvL1 = await deploy(w1(), pub1, "ReceiptVerifier.sol", "ReceiptVerifier");
+  const settlement = await deploy(w1(), pub1, "ChannelSettlement.sol", "ChannelSettlement", [{ rollupId: ROLLUP, profileHash, profileKind: 0, blocks: registry.address, anchors: anchors.address, receiptVerifier: rvL1.address }]);
+  const exits = await deploy(w1(), pub1, "EmergencyExit.sol", "EmergencyExit", [settlement.address, wvL1.address, WINDOW, [splitL1.address]]);
+  await send(w1(), pub1, settlement, "bindExits", [exits.address]);
 
   const policy = { anchorConfirmation: 0, maxAnchorLag: 64 }; // Latest: optimistic, local experiment only
   const policyHash = hashStruct({ types: eip712, primaryType: "ChannelPolicy", data: policy });
@@ -245,12 +250,12 @@ async function run() {
   const exitDomain = { name: "SkimChannels", version: "0", chainId: L1_ID, verifyingContract: settlement.address };
   const exitSigs = await Promise.all([alice, bob].map((a) => a.signTypedData({ domain: exitDomain, types: { FinalRequest: eip712.FinalRequest }, primaryType: "FinalRequest", message: exitReq })));
   const exitReqBytes = encodeAbiParameters([requestT], [exitReq]);
-  await send(w1(carol), pub1, settlement, "startExit", [three.terms.channelId, exitReqBytes, exitSigs], "L1 startExit");
-  await expectRevert(pub1.simulateContract({ account: carol, address: settlement.address, abi: settlement.abi, functionName: "finalizeExit", args: [three.terms.channelId, exitReqBytes, input, b.witness.package] }), "finalizeExit inside the challenge window");
+  await send(w1(carol), pub1, exits, "startExit", [three.terms.channelId, exitReqBytes, exitSigs], "L1 startExit");
+  await expectRevert(pub1.simulateContract({ account: carol, address: exits.address, abi: exits.abi, functionName: "finalizeExit", args: [three.terms.channelId, exitReqBytes, input, b.witness.package] }), "finalizeExit inside the challenge window");
   await pub1.request({ method: "evm_increaseTime" as any, params: [Number(WINDOW)] as any });
   await pub1.request({ method: "evm_mine" as any, params: [] as any });
   const balBefore = await pub1.readContract({ address: settlement.address, abi: settlement.abi, functionName: "withdrawable", args: [alice.address] }) as bigint;
-  await send(w1(carol), pub1, settlement, "finalizeExit", [three.terms.channelId, exitReqBytes, input, b.witness.package], "L1 finalizeExit");
+  await send(w1(carol), pub1, exits, "finalizeExit", [three.terms.channelId, exitReqBytes, input, b.witness.package], "L1 finalizeExit");
   const balAfter = await pub1.readContract({ address: settlement.address, abi: settlement.abi, functionName: "withdrawable", args: [alice.address] }) as bigint;
   check(balAfter - balBefore === parseEther("1.4"), "emergency exit finalized on L1 alone: 1.4 credited (L1 re-executed the split)");
 

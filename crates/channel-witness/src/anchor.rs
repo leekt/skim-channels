@@ -18,9 +18,7 @@
 
 use std::collections::HashMap;
 
-use alloy_consensus::Header;
 use alloy_primitives::{B256, U256, keccak256};
-use alloy_rlp::Decodable;
 use channel_types::{ConfirmationPolicy, L1Anchor};
 
 use crate::{ReadKey, VerifiedWitness, WitnessError, WitnessPackage, verify};
@@ -134,13 +132,7 @@ impl AnchorBook {
 
     /// Records a header seen on L1. The anchor is derived from the header bytes.
     pub fn observe(&mut self, raw_header: &[u8]) -> Result<L1Anchor, AnchorError> {
-        let h = Header::decode(&mut &raw_header[..])
-            .map_err(|e| AnchorError::BadHeader(e.to_string()))?;
-        if alloy_rlp::encode(&h) != raw_header {
-            return Err(AnchorError::BadHeader(
-                "does not re-encode to the same bytes".into(),
-            ));
-        }
+        let h = crate::header::decode(raw_header).map_err(|e| AnchorError::BadHeader(e.0))?;
         let hash = keccak256(raw_header);
         let anchor = L1Anchor {
             chainId: U256::from(self.chain_id),

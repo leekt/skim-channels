@@ -50,7 +50,7 @@ const procs: ChildProcess[] = [];
 async function main() {
   rmSync(DATA, { recursive: true, force: true });
   mkdirSync(DATA, { recursive: true });
-  procs.push(spawn(BIN, ["--network", `${ETHREX}/fixtures/genesis/l1_native.json`, "--http.port", "28545", "--http.addr", "127.0.0.1",
+  procs.push(spawn(BIN, ["--network", `${ETHREX}/fixtures/genesis/l1_native.json`, "--http.port", "28545", "--http.addr", "127.0.0.1", "--http.api", "eth,net,web3,debug",
     "--authrpc.port", "28551", "--p2p.port", "30333", "--discovery.port", "30333", "--dev", "--datadir", `${DATA}/l1`],
     { cwd: ETHREX, stdio: ["ignore", "ignore", "ignore"] }));
   await rpcUp(L1_URL);
@@ -61,7 +61,7 @@ async function main() {
   check(nativeAddr, `ethrex NativeRollup.sol deployed at ${nativeAddr}`);
   procs.push(spawn(BIN, ["l2", "--native-rollups", "--native-rollups.contract-address", nativeAddr,
     "--native-rollups.relayer-pk", RELAYER, "--native-rollups.l1-pk", L1_KEY, "--network", "fixtures/genesis/native_l2.json",
-    "--http.port", "21729", "--http.addr", "127.0.0.1", "--authrpc.port", "28552", "--p2p.port", "30334", "--discovery.port", "30334",
+    "--http.port", "21729", "--http.addr", "127.0.0.1", "--http.api", "eth,net,web3,debug", "--authrpc.port", "28552", "--p2p.port", "30334", "--discovery.port", "30334",
     "--datadir", `${DATA}/l2`, "--eth.rpc-url", L1_URL, "--no-monitor"], { cwd: ETHREX, stdio: ["ignore", "ignore", "ignore"] }));
   await rpcUp(L2_URL);
 
@@ -126,12 +126,13 @@ async function main() {
   const fixture = await deploy(w1(), pub1, "AllocationFixture.sol", "AllocationFixture", [6000n]);
   const anchors = await deploy(w1(), pub1, "AnchorRegistry.sol", "AnchorRegistry");
   const registry = await deploy(w1(), pub1, "NativeRollupRegistry.sol", "NativeRollupRegistry", [ROLLUP, profileHash, nativeAddr]);
-  const splitL1 = await deploy(w1(), pub1, "SplitModule.sol", "SplitModule");
-  const settlement = await deploy(w1(), pub1, "ChannelSettlement.sol", "ChannelSettlement", [ROLLUP, profileHash, 1, registry.address, anchors.address, 600n, [splitL1.address]]);
+  const rvL1 = await deploy(w1(), pub1, "ReceiptVerifier.sol", "ReceiptVerifier");
+  const settlement = await deploy(w1(), pub1, "ChannelSettlement.sol", "ChannelSettlement", [{ rollupId: ROLLUP, profileHash, profileKind: 1, blocks: registry.address, anchors: anchors.address, receiptVerifier: rvL1.address }]);
   // L2 (ethrex native)
   const inbox = await deploy(w2(), pub2, "L2AnchorInbox.sol", "L2AnchorInbox", [l2Ops.address, BigInt(L1_ID)]);
   const split = await deploy(w2(), pub2, "SplitModule.sol", "SplitModule");
-  const executor = await deploy(w2(), pub2, "ChannelExecutor.sol", "ChannelExecutor", [profileHash, BigInt(L1_ID), inbox.address, [split.address]]);
+  const wvL2 = await deploy(w2(), pub2, "WitnessVerifier.sol", "WitnessVerifier");
+  const executor = await deploy(w2(), pub2, "ChannelExecutor.sol", "ChannelExecutor", [profileHash, BigInt(L1_ID), inbox.address, wvL2.address, [split.address]]);
   check(true, `contracts deployed on ethrex L1 (chain ${L1_ID}) and ethrex native L2 (chain ${L2_ID})`);
 
   const policy = { anchorConfirmation: 0, maxAnchorLag: 1000 };

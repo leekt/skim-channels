@@ -17,3 +17,9 @@ if command -v anvil >/dev/null; then
 else
   echo "skipped e2e: anvil not installed"
 fi
+# Native execution verification (ethrex EXECUTE PoC): set ETHREX to a release build checkout.
+if [ -n "${ETHREX:-}" ]; then
+  (cd ts && npm run -s e2e-native)
+else
+  echo "skipped native e2e: ETHREX not set"
+fi

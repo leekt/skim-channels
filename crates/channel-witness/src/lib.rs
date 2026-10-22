@@ -26,6 +26,7 @@ use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY, Nibbles, TrieAccount, proof::ver
 use channel_types::L1Anchor;
 
 pub mod anchor;
+pub mod header;
 pub mod readiness;
 pub mod source;
 #[cfg(any(test, feature = "testkit"))]

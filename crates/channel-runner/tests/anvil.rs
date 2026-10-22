@@ -132,12 +132,14 @@ fn anvil_headers_witnesses_receipts_and_confirmations() {
     assert!(exp.executable(anchor.id(), &keys).is_ok());
 }
 
-/// Serves one JSON-RPC answer (the real block with a modified state root) and exits.
-fn lying_server(body: Value) -> String {
+/// A JSON-RPC server answering by method: `debug_getRawHeader` with `raw` (or method-not-found
+/// if `None`), anything else with `body`.
+fn lying_server(raw: Option<String>, body: Value) -> String {
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", l.local_addr().unwrap());
     std::thread::spawn(move || {
-        if let Ok((mut s, _)) = l.accept() {
+        for s in l.incoming().take(4) {
+            let Ok(mut s) = s else { continue };
             let mut r = BufReader::new(s.try_clone().unwrap());
             let mut len = 0usize;
             loop {
@@ -152,7 +154,15 @@ fn lying_server(body: Value) -> String {
             }
             let mut buf = vec![0; len];
             r.read_exact(&mut buf).unwrap();
-            let resp = json!({"jsonrpc": "2.0", "id": 1, "result": body}).to_string();
+            let req: Value = serde_json::from_slice(&buf).unwrap();
+            let resp = match (req["method"].as_str(), &raw) {
+                (Some("debug_getRawHeader"), Some(raw)) => json!({"jsonrpc": "2.0", "id": 1, "result": raw}),
+                (Some("debug_getRawHeader"), None) => {
+                    json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32601, "message": "not found"}})
+                }
+                _ => json!({"jsonrpc": "2.0", "id": 1, "result": body}),
+            }
+            .to_string();
             write!(
                 s,
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
@@ -178,7 +188,15 @@ fn a_header_with_a_swapped_state_root_is_refused() {
         .unwrap();
     let hash = block["hash"].as_str().unwrap().to_string();
     block["stateRoot"] = json!(B256::repeat_byte(0x66));
-    let liar = Rpc::new(lying_server(block));
+    // JSON path: rebuilt RLP doesn't hash to the claimed block hash.
+    let liar = Rpc::new(lying_server(None, block.clone()));
+    assert!(matches!(
+        fetch_header(&liar, &hash),
+        Err(RunnerError::HeaderHash(_))
+    ));
+    // Raw path: the bytes of another header, offered for this hash.
+    let other = fetch_header(&rpc, "0x0").unwrap();
+    let liar = Rpc::new(lying_server(Some(other.raw.to_string()), block));
     assert!(matches!(
         fetch_header(&liar, &hash),
         Err(RunnerError::HeaderHash(_))
