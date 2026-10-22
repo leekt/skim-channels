@@ -111,8 +111,9 @@ Added since:
 | anvil (Prague) | L2 `execute`; `finalizeExit`; `startExit` | see `experiments/e2e-mock-local.json` |
 
 Gas on the ethrex chains is higher across the board, because Amsterdam reprices state access
-and creation; compare `record`, 285k vs. 111k on anvil. Not measured: settlement versus L2 block
-size beyond 31 transactions; FCR lag once finality is running normally.
+and creation; compare `record`, 285k vs. 111k on anvil. FCR with finality running (second devnet, finalized
+epoch 2): three samples confirmed blocks 133/137/141 at 1/0/0 behind latest while `finalized` was
+block 64, so FCR was 69–77 blocks (~7–8 min at 6 s slots) ahead of finality.
 
 ## Known limitations
 - **`native-proof-dependencies` can't be built honestly yet.** EIP-8288 has no reference
@@ -136,8 +137,7 @@ size beyond 31 transactions; FCR lag once finality is running normally.
 
 ## Next tasks
 1. When EIP-8288 gets a prover: a `ProofDependencyVerifier` behind the same governance path.
-2. FCR lag versus finality on a devnet that finalizes (more validators / nodes).
-3. Batching that shares work across channels settled from the same L2 block (one header and
+2. Batching that shares work across channels settled from the same L2 block (one header and
    acceptance check for many receipts). `BatchSettler` amortizes only transaction overhead.
 
 M4 items done: FCR, witness prefetching (`AnchorBook::prefetch`), batched settlement
