@@ -303,12 +303,12 @@ Never fall back automatically from validity proofs to weaker settlement within t
 
 ### Decisions
 
-1. **Verification:** allow a non-native zkVM verifier for this profile, or accept a narrower or delayed product. *(Open)*
+1. **Verification:** a non-native zkVM verifier (SP1, RISC Zero). *Deferred by the owner (2026-10-22); see [future considerations](future-considerations.md). The mock stays until then.*
 2. **Exit semantics:** a proven terminal allocation at every checkpoint. Start with one app whose allocation is simple.
 3. **Finality budget:** checkpoint cadence, and acceptance that unproven interactions can disappear.
 4. **Window semantics:** keep the window as a frozen-root payout delay, or retire it for proven roots. Keep the one-day forced service either way.
 5. **Upgrade scope:** existing channels stay immutable.
-6. **App logic form** *(added in review)*:
+6. **App logic form** *(added in review; deferred together with 1)*:
    - **EVM contracts, proven in a zkEVM** (RSP-style on SP1, for example). Apps stay Solidity, but this is the dominant proving cost and latency, and it's unmeasured.
    - **Native zkVM programs** (Rust). Far cheaper to prove, but apps aren't Solidity.
 
