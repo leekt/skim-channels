@@ -932,6 +932,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "channel-app"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "alloy-sol-types",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "channel-receipts"
 version = "0.1.0"
 dependencies = [
@@ -958,6 +970,7 @@ dependencies = [
  "alloy-rlp",
  "alloy-rpc-types-eth",
  "alloy-sol-types",
+ "channel-app",
  "channel-receipts",
  "channel-types",
  "channel-witness",

@@ -14,7 +14,7 @@
 10. [Trust and correctness](guide/trust-and-correctness.md): what is verified, what is trusted, labeled mocks
 11. [Stage 2](guide/stage-2.md): emergency exit, governance, forced inclusion, owner decisions
 12. [Troubleshooting](guide/troubleshooting.md): failure modes found while building, and their causes
-13. [App channels (proposed)](guide/app-channels.md): a channel as an app's L2 session; users join with L1-locked assets, transact many times, withdraw any time
+13. [App channels](guide/app-channels.md): apps on channels with proven checkpoints, L1-locked assets, withdraw any time, operator-free exit (accounting built behind a mock verifier)
 
 ## Examples
 
@@ -23,6 +23,7 @@
 | [Read-and-Split on anvil](../ts/e2e.ts) | open and fund, previews at H0 and H1, a real L2 receipt mid-block, settle once, refund, emergency exit (mock block acceptance) |
 | [Read-and-Split on ethrex](../ts/e2e-native.ts) | the same flow under native verification: EXECUTE, permissionless submission, anchors via proven L1 messages, no mocks |
 | [Split module](../contracts/src/examples/SplitModule.sol) | an approved, stateless channel module |
+| [App-channel recovery](../ts/e2e-app.ts) | deposits, checkpoints, a credit claim, the operator vanishing, the late checkpoint refused, recovery from L1 data alone, vault drained exactly |
 
 ## Operations and development
 
@@ -41,3 +42,4 @@ Measurements of the builds named in each log. Use the guides for current behavio
 | [M3 native on ethrex](experiments/m3-native-ethrex.md) | EXECUTE re-execution, permissionless submission, trustless anchors, gas |
 | [M4 FCR](experiments/m4-fcr.md) | Lighthouse fast confirmation vs. finality |
 | [M4 settlement cost](experiments/m4-settlement-cost.md) | settle gas vs. L2 block size, batching |
+| [App channels: accounting](experiments/app-channels-accounting.md) | experiments 1, 2 and 4: operator death, adversarial accounting, the one-day fence |

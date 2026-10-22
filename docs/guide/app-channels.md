@@ -260,7 +260,7 @@ Exit-entitlement fan-out can make diffs larger: one shared price change may upda
 | Existing component | Treatment |
 |---|---|
 | `ChannelSettlement` | Reuse its escrow-isolation, pull-payment and conservation patterns. App channels get a separate multi-asset, open-membership vault (`AppChannelVault`) |
-| `MerklePatricia`, `EthTypes`, `RLP` | Reuse for L1 headers and witnesses. App state uses a purpose-built bounded binary tree (`AppMerkle`) |
+| `MerklePatricia`, `EthTypes`, `RLP` | Reuse for L1 headers and witnesses. App state uses a purpose-built bounded binary tree (`AppLeaves`) |
 | `WitnessVerifier`, `WitnessLib`, `L1StateReader` | Keep their exact-root, absence and fail-closed checks; carry them into the proven program |
 | `AnchorRegistry` | Reuse; anchors are recorded once per epoch |
 | `L2AnchorInbox` | Becomes a cache and API; authority moves to checkpoint public inputs |
@@ -331,8 +331,9 @@ Never fall back automatically from validity proofs to weaker settlement within t
 
 The checkpoint accounting is built and tested behind `MockAppCheckpointVerifier`, a **labeled mock** that binds proofs to the public inputs but doesn't check execution:
 - `AppChannelVault`: multi-asset deposits, forced requests with L1 timestamps, checkpoint acceptance with the deadline fence, freeze, credit / exit / refund claims, per-token solvency.
-- `AppMerkle` and `AppLeaves`: bounded binary trees for exit and credit leaves.
-- The `channel-app` crate: the reference ledger, diff codec and reconstruction.
+- `AppLeaves`: the bounded binary tree for exit and credit leaves.
+- The `channel-app` crate: the reference ledger (the mock prover), the net-diff codec and reconstruction.
+- `skim-channels app-checkpoint` / `app-recover`: recovery reads only `CheckpointAccepted` events and their calldata.
 
 Experiments **1, 2 and 4** pass; see [experiments](../experiments/app-channels-accounting.md). Experiments 3 and 5–8 wait on decisions 1 and 6.
 

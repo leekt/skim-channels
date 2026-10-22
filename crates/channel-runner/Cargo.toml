@@ -15,6 +15,7 @@ path = "src/main.rs"
 channel-types.workspace = true
 channel-witness.workspace = true
 channel-receipts.workspace = true
+channel-app.workspace = true
 alloy-primitives.workspace = true
 alloy-rlp.workspace = true
 alloy-consensus.workspace = true

@@ -52,6 +52,32 @@ enum Cmd {
         #[arg(long)]
         tx: B256,
     },
+    /// App channels, MOCK prover: next checkpoint from the vault's queues + `--actions`.
+    AppCheckpoint {
+        #[arg(long)]
+        rpc: String,
+        #[arg(long)]
+        vault: Address,
+        #[arg(long)]
+        channel: B256,
+        /// Ledger state JSON from the previous accepted checkpoint (absent: genesis).
+        #[arg(long)]
+        state: Option<std::path::PathBuf>,
+        /// JSON array of {"op":"transfer"|"withdraw", ...}
+        #[arg(long)]
+        actions: Option<std::path::PathBuf>,
+        #[arg(long)]
+        terminal: bool,
+    },
+    /// App channels: every claim, rebuilt from L1 events and calldata alone.
+    AppRecover {
+        #[arg(long)]
+        rpc: String,
+        #[arg(long)]
+        vault: Address,
+        #[arg(long)]
+        channel: B256,
+    },
 }
 
 fn main() {
@@ -96,6 +122,36 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let pkg = collect_witness(&SkimRpc::new(rpc), &anchor, &reads)?;
             json!({ "anchorId": anchor.id(), "rawHeader": h.raw, "package": hex::encode_prefixed(pkg.abi_encode()), "packageHash": package_hash(&pkg) })
         }
+        Cmd::AppCheckpoint {
+            rpc,
+            vault,
+            channel,
+            state,
+            actions,
+            terminal,
+        } => {
+            let ledger = match state {
+                Some(p) => serde_json::from_str(&std::fs::read_to_string(p)?)?,
+                None => channel_app::Ledger::default(),
+            };
+            let acts: Vec<channel_runner::app::Action> = match actions {
+                Some(p) => serde_json::from_str(&std::fs::read_to_string(p)?)?,
+                None => vec![],
+            };
+            channel_runner::app::checkpoint(
+                &Rpc::new(rpc),
+                vault,
+                channel,
+                ledger,
+                &acts,
+                terminal,
+            )?
+        }
+        Cmd::AppRecover {
+            rpc,
+            vault,
+            channel,
+        } => channel_runner::app::recover_channel(&Rpc::new(rpc), vault, channel)?,
         Cmd::Evidence { rpc, tx } => {
             let e = receipt_evidence(&Rpc::new(rpc), tx)?;
             json!({

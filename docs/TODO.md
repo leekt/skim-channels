@@ -1,5 +1,7 @@
 # Open work
 
+0. **App channels: a real proof system** (decisions 1 and 6 in [app channels](guide/app-channels.md)), then experiments 3 and 5–8. The accounting, fence and recovery are built behind a labeled mock.
+
 1. **EIP-8288 proof dependencies** (blocked; owner accepted 2026-10-22): when EIP-8288 defines
    `get_deps_hash` for STARKs and a network carries it, implement `IDependencySource` over
    EIP-8141 frame introspection, deploy `ProofDependencyVerifier`, and schedule it through

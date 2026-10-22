@@ -28,3 +28,4 @@ proptest = "1"
 channel-types = { path = "crates/channel-types" }
 channel-witness = { path = "crates/channel-witness" }
 channel-receipts = { path = "crates/channel-receipts" }
+channel-app = { path = "crates/channel-app" }

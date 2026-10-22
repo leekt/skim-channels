@@ -5,7 +5,8 @@
   "scripts": {
     "check-encodings": "node --experimental-strip-types check-encodings.ts",
     "e2e": "node --experimental-strip-types e2e.ts",
-    "e2e-native": "node --experimental-strip-types e2e-native.ts"
+    "e2e-native": "node --experimental-strip-types e2e-native.ts",
+    "e2e-app": "node --experimental-strip-types e2e-app.ts"
   },
   "dependencies": {
     "viem": "2.30.0"

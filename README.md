@@ -61,6 +61,7 @@ Three pieces arrived at once:
 | **Fast confirmation** | Lighthouse v8.3.0 `fast_confirmation`: anchors confirmed at the chain head, **69–77 blocks ahead of finality** ([log](docs/experiments/m4-fcr.md)) |
 | **Settlement cost** | L1 `settle` 320k gas (1-tx L2 block) → ~396k (127 or 255 txs); `settleFromBlock` 281k vs. 315k per channel (forge, two in one block); evidence 2.5–3.5 KB ([log](docs/experiments/m4-settlement-cost.md)) |
 | **Native verification cost** | ~16M gas per L2 block (the gas limit is charged even for empty blocks): **not cheaper than L1**, see [app channels](docs/guide/app-channels.md) |
+| **App channels (accounting, mock verifier)** | Operator gone before or after checkpoints: every right rebuilt from L1 events and calldata alone and claimed; the vault drains exactly; the one-day fence holds ([log](docs/experiments/app-channels-accounting.md)) |
 | **Correctness** | 50 Rust and 88 Solidity tests; every security check mutation-checked (removing it makes a named test fail) |
 
 ## Architecture
@@ -74,7 +75,9 @@ Three pieces arrived at once:
 | `contracts/` (L1) | `ChannelSettlement`, `EmergencyExit`, `AnchorRegistry`, `AnchorSender`, `CanonicalBlockRegistry` + `RollupGovernance`, `NativeRollupRegistry`, message queues, `BatchSettler` |
 | `contracts/` (L2) | `ChannelExecutor`, `L2AnchorInbox`, `L1StateReader`, modules (`SplitModule`) |
 | `contracts/src/verifiers` | `WitnessVerifier`, `ReceiptVerifier`, `ExecuteVerifier` (EXECUTE), `ProofDependencyVerifier` (EIP-8288 adapter, not deployable yet) |
-| `ts/` | viem cross-checks of every commitment; `e2e.ts` (two anvil chains) and `e2e-native.ts` (ethrex) |
+| `crates/channel-app` | App channels: exit/credit trees, the reference ledger (mock prover), net diffs, recovery from L1 data |
+| `contracts/src/app` | `AppChannelVault`, `AppLeaves`, `IAppCheckpointVerifier`, `MockAppCheckpointVerifier` (labeled mock) |
+| `ts/` | viem cross-checks of every commitment; `e2e.ts` (two anvil chains), `e2e-native.ts` (ethrex), `e2e-app.ts` (app-channel recovery) |
 
 ## Quick start
 
@@ -103,7 +106,7 @@ Requires Rust 1.97, Foundry and Node ≥ 23. The native e2e needs an ethrex chec
 | What's verified and what's trusted | [Trust and correctness](docs/guide/trust-and-correctness.md) |
 | Exits without the operator, governance, forced inclusion | [Stage 2](docs/guide/stage-2.md) |
 | Known failure modes and their causes | [Troubleshooting](docs/guide/troubleshooting.md) |
-| A channel as an app's L2 session (proposed design) | [App channels](docs/guide/app-channels.md) |
+| Apps on channels: proven checkpoints, L1-locked assets, withdraw any time | [App channels](docs/guide/app-channels.md) |
 
 Full index: [docs/README.md](docs/README.md).
 

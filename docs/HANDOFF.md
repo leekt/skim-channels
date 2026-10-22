@@ -12,6 +12,16 @@ governance, forced inclusion). Read first: [PROJECT](../PROJECT.md) (spec v0.1),
 | M4 | **FCR from Lighthouse v8.3.0's `fast_confirmation` event, live.** Measurements below |
 | Stage 2 | Operator-free exit (L1 re-execution); 30-day upgrade timelock; fault-gated Security Council; forced inclusion; permissionless block submission (in `CanonicalBlockRegistry`) |
 
+## App channels (2026-10-22)
+- **Direction:** [app channels](guide/app-channels.md). Proven app checkpoints plus net state diffs on L1, not per-block re-execution. Re-execution doesn't save cost.
+- **Built:**
+  - `AppChannelVault` and `AppLeaves` (`contracts/src/app`);
+  - the `channel-app` crate;
+  - CLI `app-checkpoint` / `app-recover`;
+  - `ts/e2e-app.ts`.
+- **Experiments 1, 2 and 4 pass,** behind the labeled `MockAppCheckpointVerifier` ([log](experiments/app-channels-accounting.md)). That covers 12 vault and 4 recovery checks, all mutation-checked.
+- **Open:** decision 1 (a real, non-native proof system) and decision 6 (app logic as EVM in a zkEVM, or as zkVM programs). Then experiments 3 and 5–8.
+
 ## Baseline
 - **skim** `df686b70cd567210860582097e25a3f8b3fe6616`, used over JSON-RPC with no crate
   dependency. The live run used `../skim/target/release/skim`, built from that commit plus the

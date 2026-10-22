@@ -1,0 +1,17 @@
+{
+  "note": "anvil Prague; AppChannelVault with the labeled MOCK verifier (no proof cost). Gas = receipt gasUsed; data bytes = published net diff.",
+  "measurements": {
+    "openChannel": 214351,
+    "deposit ETH": 117203,
+    "deposit ERC-20": 195775,
+    "forceExit": 126434,
+    "freeze": 40858,
+    "refundDeposit": 94478,
+    "submitCheckpoint #1": 114428,
+    "submitCheckpoint #1 data bytes": 416,
+    "submitCheckpoint #2": 102495,
+    "submitCheckpoint #2 data bytes": 608,
+    "claimCredit": 93005,
+    "claimExit": 75239
+  }
+}

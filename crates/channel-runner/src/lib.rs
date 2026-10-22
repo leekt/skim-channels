@@ -17,6 +17,8 @@ use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{B256, Bytes, U256, keccak256};
 use alloy_rpc_types_eth::TransactionReceipt;
 use channel_types::L1Anchor;
+pub mod app;
+
 use channel_witness::header::HeaderFields;
 use serde_json::{Value, json};
 
