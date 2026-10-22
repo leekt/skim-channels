@@ -1,0 +1,28 @@
+[package]
+name = "channel-witness"
+description = "Exact-root L1 witness packages, anchor lifecycle and the skim proof bridge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# Synthetic state tries with proofs, for this crate's tests and dependent crates' tests.
+testkit = []
+
+[dependencies]
+channel-types.workspace = true
+alloy-primitives.workspace = true
+alloy-rlp.workspace = true
+alloy-trie.workspace = true
+alloy-consensus.workspace = true
+alloy-sol-types.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ureq.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+channel-witness = { path = ".", features = ["testkit"] }

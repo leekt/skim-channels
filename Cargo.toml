@@ -1,0 +1,28 @@
+[workspace]
+resolver = "3"
+members = ["crates/channel-types", "crates/channel-witness", "crates/channel-receipts"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+# Same alloy line as skim df686b7 (reth v2.7.0's graph).
+alloy-primitives = { version = "1.6.1", features = ["serde", "k256"] }
+alloy-rlp = "0.3.16"
+alloy-trie = "0.9.8"
+alloy-consensus = "2.5.0"
+alloy-eips = "2.5.0"
+alloy-sol-types = { version = "1", features = ["eip712-serde"] }
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", features = ["json"] }
+proptest = "1"
+
+channel-types = { path = "crates/channel-types" }
+channel-witness = { path = "crates/channel-witness" }
+channel-receipts = { path = "crates/channel-receipts" }

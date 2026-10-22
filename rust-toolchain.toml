@@ -1,0 +1,3 @@
+[toolchain]
+# Same toolchain as the pinned skim revision (df686b7).
+channel = "1.97.0"

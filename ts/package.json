@@ -1,0 +1,11 @@
+{
+  "name": "skim-channels-ts",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check-encodings": "node --experimental-strip-types check-encodings.ts"
+  },
+  "dependencies": {
+    "viem": "2.30.0"
+  }
+}
