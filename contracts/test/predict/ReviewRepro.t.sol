@@ -64,6 +64,9 @@ contract ReviewReproTest is PredictionBase {
         assertFalse(_deploys(c), "round plus two windows must fit the forced delay");
         c.forceDelay = 2 days; // a longer forced delay admits a longer window
         assertTrue(_deploys(c));
+        c = _policy();
+        c.forceDelay = 60 days + 1; // upper bounds keep at + delay far from overflow
+        assertFalse(_deploys(c), "forced delay above 60 days");
     }
 
     /// The review's schedule (N, N+1, N+2) is refused, and a commit made in its last allowed

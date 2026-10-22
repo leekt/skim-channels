@@ -20,6 +20,9 @@ abstract contract PredictionStorage {
     uint256 public constant MIN_COMMIT_CHALLENGE_BLOCKS = 64;
     /// The owner-decided forced-request delay (2026-10-22): one day, never less.
     uint256 public constant MIN_FORCE_DELAY = 1 days;
+    /// Upper bounds: keep `at + window` and deadlines far from overflow.
+    uint256 public constant MAX_CHALLENGE_WINDOW = 30 days;
+    uint256 public constant MAX_FORCE_DELAY = 60 days;
     /// Only used to check that a round plus two challenge windows fit in forceDelay.
     uint256 public constant ASSUMED_SLOT_SECONDS = 12;
     uint256 public constant HISTORY_HORIZON = 8191;
@@ -126,7 +129,8 @@ abstract contract PredictionStorage {
 
     constructor(Config memory c) {
         if (
-            c.challengeWindow < MIN_CHALLENGE_WINDOW || c.forceDelay < MIN_FORCE_DELAY
+            c.challengeWindow < MIN_CHALLENGE_WINDOW || c.challengeWindow > MAX_CHALLENGE_WINDOW
+                || c.forceDelay < MIN_FORCE_DELAY || c.forceDelay > MAX_FORCE_DELAY
                 || c.commitChallengeBlocks < MIN_COMMIT_CHALLENGE_BLOCKS || c.commitChallengeBlocks >= c.maxRoundBlocks
                 // A request made as a round opens can still be served: the round, then a
                 // proposal that may be challenged once and proposed again.

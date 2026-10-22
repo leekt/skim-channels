@@ -32,6 +32,9 @@ interface IERC20Min {
 /// without one, and finalized balances are always withdrawable.
 contract ClearingSettlement {
     uint256 public constant MIN_CHALLENGE_WINDOW = 1 hours;
+    /// Upper bounds keep `at + window` far from overflow and anchors within EIP-2935's reach.
+    uint256 public constant MAX_CHALLENGE_WINDOW = 30 days;
+    uint256 public constant MAX_ANCHOR_AGE = 8191;
 
     struct Account {
         uint128 ethBal;
@@ -114,10 +117,14 @@ contract ClearingSettlement {
     error BadPolicy();
     error BadAnchor();
     error NotWrong();
+    error BalanceOutOfRange();
     error TransferFailed();
 
     constructor(Config memory c) {
-        if (c.challengeWindow < MIN_CHALLENGE_WINDOW || c.bandBps > 10_000) revert BadPolicy();
+        if (
+            c.challengeWindow < MIN_CHALLENGE_WINDOW || c.challengeWindow > MAX_CHALLENGE_WINDOW || c.bandBps > 10_000
+                || c.maxAnchorAge > MAX_ANCHOR_AGE
+        ) revert BadPolicy();
         operator = c.operator;
         usd = c.usd;
         anchors = c.anchors;
@@ -261,8 +268,8 @@ contract ClearingSettlement {
         if (keccak256(abi.encode(p.batchNo, users, dEth, dUsd, nonces)) != p.effectsHash) revert WrongState();
         for (uint256 i; i < users.length; ++i) {
             Account storage a = accounts[users[i]];
-            a.ethBal = uint128(uint256(int256(uint256(a.ethBal)) + dEth[i]));
-            a.usdBal = uint128(uint256(int256(uint256(a.usdBal)) + dUsd[i]));
+            a.ethBal = _toBalance(int256(uint256(a.ethBal)) + dEth[i]);
+            a.usdBal = _toBalance(int256(uint256(a.usdBal)) + dUsd[i]);
             a.nonceFloor = nonces[i];
         }
         delete pending;
@@ -285,6 +292,12 @@ contract ClearingSettlement {
         ) revert BadAnchor();
         price = WitnessLib.find(reads, priceFeed, priceSlot);
         blockNumber = an.blockNumber;
+    }
+
+    /// An explicit range check: a narrowing cast alone would silently truncate.
+    function _toBalance(int256 v) internal pure returns (uint128) {
+        if (v < 0 || v > int256(uint256(type(uint128).max))) revert BalanceOutOfRange();
+        return uint128(uint256(v));
     }
 
     /// Balance not reserved for withdrawals. A request made while a batch was pending can

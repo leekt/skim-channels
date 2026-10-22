@@ -193,6 +193,24 @@ contract ClearingSettlementTest is Test {
         (eth, dollars,,,) = st.accounts(who);
     }
 
+    function test_policyBounds() public {
+        ClearingSettlement.Config memory c = _config();
+        c.challengeWindow = 30 days + 1;
+        assertFalse(_deploys(c), "window above 30 days");
+        c = _config();
+        c.maxAnchorAge = 8192;
+        assertFalse(_deploys(c), "anchors older than EIP-2935 reaches");
+        assertTrue(_deploys(_config()));
+    }
+
+    function _deploys(ClearingSettlement.Config memory c) internal returns (bool) {
+        try new ClearingSettlement(c) returns (ClearingSettlement) {
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
     // ---- the normal path ----------------------------------------------------------------------
 
     function test_batchSettlesNetAndNextBatchContinues() public {
