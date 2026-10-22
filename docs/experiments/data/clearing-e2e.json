@@ -1,0 +1,30 @@
+{
+  "note": "anvil prague L1 (chain 900) + local executor (chain 7001, not trusted). Gas = L1 receipt gasUsed unless labeled executor; bytes = calldata length. Sums for repeated labels.",
+  "l1": {
+    "deploy ClearingSettlement": 1908154,
+    "deposit ETH": 92198,
+    "deposit USD": 110802,
+    "AnchorRegistry.record": 402564,
+    "proposeBatch #1 (2 fills)": 425672,
+    "fills calldata bytes #1": 1536,
+    "witness calldata bytes #1": 1824,
+    "finalize #1": 161083,
+    "proposeBatch #2 (1 fills)": 377364,
+    "fills calldata bytes #2": 800,
+    "witness calldata bytes #2": 1824,
+    "finalize #2": 62576,
+    "requestWithdraw": 118111,
+    "claimWithdraw": 51350,
+    "proposeBatch #3 (0 fills)": 334380,
+    "fills calldata bytes #3": 64,
+    "witness calldata bytes #3": 1824,
+    "finalize #3": 40606,
+    "proposeBatch #4 (1 fills)": 377319,
+    "fills calldata bytes #4": 800,
+    "witness calldata bytes #4": 1824,
+    "finalize #4": 62564
+  },
+  "executor": {
+    "executor: L1View.pin": 11190797
+  }
+}

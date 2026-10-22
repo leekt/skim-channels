@@ -24,6 +24,9 @@ skim-channels is built so that it can be **slow or unavailable, but not wrong** 
 | A full beacon node | FCR anchors | FCR needs every validator's latest vote; light-client data can't evaluate it |
 | ethrex's EXECUTE prototype | Native verification | Not production software |
 | Participants | Signing the final request | Closes are cooperative; stale requests are handled by nonce in the exit |
+| Watchers (prediction rounds, clearing) | Challenging within the window (commit challenges, settlement proposals, signatures) | Optimistic paths: an unchallenged bad result finalizes. Payouts stay capped by the escrow |
+| Witness holders (prediction rounds) | Resolving a round after its proof is no longer served | Pinned by watchers and participants; otherwise an archive node ([details](../experiments/prediction-review-fixes.md#a4-losing-the-resolution-witness)) |
+| The clearing app's executor | Liveness only | It holds AppState; L1 re-checks every fill it settles ([stateful runtime](stateful-runtime.md)) |
 
 ## Labeled mocks
 

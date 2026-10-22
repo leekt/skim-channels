@@ -342,6 +342,12 @@ Choose the proof or dispute mechanism after that. Done for four apps in [app enf
 
 ## Implementation status
 
+**Update (2026-10-22): two app paths are now built without any mock verifier.**
+- **[Prediction rounds](../experiments/prediction-round-cost.md):** optimistic, with every root computed on L1.
+- **[Clearing](stateful-runtime.md):** stateful Solidity on a local executor, with each fill re-checked on L1 and only signatures optimistic.
+
+The validity-shaped `AppChannelVault` below still has only the labeled mock verifier.
+
 The checkpoint accounting is built and tested behind `MockAppCheckpointVerifier`, a **labeled mock** that binds proofs to the public inputs but doesn't check execution. What this demonstrates: **given correct checkpoints**, accounting, the deadline fence and recovery work. It does not show that a checkpoint's balances are legitimate.
 - `AppChannelVault`: multi-asset deposits, forced requests with L1 timestamps, checkpoint acceptance with the deadline fence, freeze, credit / exit / refund claims, per-token solvency.
 - `AppLeaves`: the bounded binary tree for exit and credit leaves.

@@ -23,14 +23,26 @@ On Sepolia (see [M1 live skim](../experiments/m1-live-skim.md)):
 - witnesses for WETH (account, code, two slots) were collected at those exact roots, ~13 KB each, in ~1 s;
 - a ~19-minute-old finalized root was still served.
 
+## Used by the stateful runtime (`ts/runtime/l1view.ts`)
+
+The clearing app ([stateful runtime](stateful-runtime.md)) also uses:
+
+| Need | skim feature |
+|---|---|
+| Which watched contracts changed, block by block, and rewinds after reorgs | `skim_streamNext` with `bal: {addresses}` (state changes from block access lists); `rewind` events |
+| A batch's single snapshot | `eth_getBlockByNumber("safe")` (or `finalized`, or N confirmations): one block, then every read names its hash |
+| Previews (state-ready) | `eth_getStorageAt` at `{blockHash}`; on skim a tracked key is kept current from BALs. Never an execution input |
+| Execution inputs (proof-ready) | `eth_getProof` at `{blockHash}`, verified again by `L1View` on the executor |
+
+Measured live on Sepolia: [clearing runtime](../experiments/clearing-runtime.md#live-skim-on-sepolia-skim_rpc-npm-run-live-skim).
+
 ## Not used (yet)
 
-- **skim's BAL-maintained cached values.** They're modelled as *state-ready but not proof-ready*: a value kept current from BALs has no Merkle proof at the newer root, so it can't back an execution (`channel_witness::readiness`).
-- **`eth_call` / `eth_simulateV1`.** Previews run on L2 (`ChannelExecutor.preview`).
-- **Subscriptions and block streams.**
+- **`eth_call` / `eth_simulateV1`.** Computation-channel previews run on L2 (`ChannelExecutor.preview`). The clearing app runs on its own executor.
+- **`skim_subscriptionStatus` / pinned subscriptions (`skim.yaml`).** The runtime asks for proofs per batch instead.
 
 ## Limits
 
-- **Recent roots only.** skim serves proofs only for state roots its peers still keep. An emergency exit at an old anchor may need an archive node; the refund path covers the case where no witness can be obtained.
+- **Recent roots only.** skim serves proofs only for state roots its peers still keep. In the live run, a block 64 back was served, and blocks 256 or more back weren't even returned by number. An emergency exit at an old anchor may need an archive node; the refund path covers the case where no witness can be obtained. For prediction rounds, watchers pin the resolution witness while it's still served ([evidence retention](../experiments/prediction-review-fixes.md#a4-losing-the-resolution-witness)).
 - **No raw headers.** skim has no `debug_getRawHeader`, so headers are rebuilt from JSON, which requires alloy to know the fork's header shape. Nodes that serve raw headers (ethrex, anvil) are used raw.
 - **Not the e2e L1.** The end-to-end runs use anvil and ethrex as L1, because skim follows Glamsterdam networks like Sepolia. skim is exercised by the live tests.

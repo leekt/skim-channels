@@ -1,0 +1,22 @@
+{
+  "skim": "http://127.0.0.1:18545",
+  "head": 11970156,
+  "slot": "0x36361a8b101761b24daf84dbb0961bdf9ced960708b8bb2402cd6d7389402b39",
+  "witnessMs": 331,
+  "witnessBytes": 13152,
+  "values": {
+    "a": "5674171053967",
+    "b": "0",
+    "blocks": [
+      "11970153",
+      "11970155"
+    ]
+  },
+  "rewinds": 0,
+  "proofDepth": {
+    "64": "served",
+    "256": "no header: no block for 0xb6a56e",
+    "1024": "no header: no block for 0xb6a26e",
+    "4096": "no header: no block for 0xb6966e"
+  }
+}

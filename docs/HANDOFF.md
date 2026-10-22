@@ -32,6 +32,27 @@ governance, forced inclusion). Read first: [PROJECT](../PROJECT.md) (spec v0.1),
 - **Cost:** a round costs 4–15× less per user than on L1 at 100 users. Entry and exit cost ~265k more, recovered after ~3.5 rounds at 1 stake per user. Disputes are about 150k gas each ([log](experiments/prediction-round-cost.md)).
 - **Next:** the OTC and AMM rules (apps 3 and 4) on the same optimistic layer; blob DA for tickets and leaves; deposit cost.
 
+## Stateful clearing runtime (2026-10-22)
+- **Model:** [stateful runtime](guide/stateful-runtime.md).
+  - **L1ReadView:** skim snapshots, state-ready vs proof-ready, `skim_streamNext`.
+  - **AppState:** `ClearingApp`, Solidity on a local executor that L1 doesn't trust.
+  - **L1Settlement:** `ClearingSettlement`. Every fill is re-checked with the shared `ClearingRules`; only signatures are optimistic.
+- **Built:**
+  - `contracts/src/clearing`;
+  - `ts/runtime/{l1view,executor,clearing,evidence}.ts`;
+  - `ts/e2e-clearing.ts` (deterministic, in CI);
+  - `ts/live-skim-clearing.ts` (`SKIM_RPC`, not in CI).
+- **Verified:**
+  - **Tests:** 15 forge tests, with 22 mutants all caught.
+  - **e2e:** state kept across H → H+1; replay from pinned evidence is deterministic; tampered or missing witnesses are refused; a reorged anchor is rolled back and replayed; a partial withdrawal forces a rebase while trading continues; with no operator, everything is withdrawn.
+  - **Live:** skim reads on Sepolia.
+  - Results: [clearing runtime](experiments/clearing-runtime.md).
+- **Open:**
+  - censorship resistance for orders;
+  - partial fills, more assets, blob DA;
+  - a live settlement through skim (no escrow on a Glamsterdam network yet);
+  - a cost comparison with clearing directly on L1.
+
 ## Baseline
 - **skim** `df686b70cd567210860582097e25a3f8b3fe6616`, used over JSON-RPC with no crate
   dependency. The live run used `../skim/target/release/skim`, built from that commit plus the

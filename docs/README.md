@@ -17,6 +17,7 @@
 13. [App channels](guide/app-channels.md): apps on channels with proven checkpoints, L1-locked assets, withdraw any time, operator-free exit (accounting built behind a mock verifier)
 14. [Future considerations](guide/future-considerations.md): proof systems (SP1, RISC Zero), zkEVMs, native proof verification; deferred on purpose
 15. [App enforcement rules](guide/app-enforcement.md): prediction rounds, 1:1 games, OTC matching, shared AMM. What users sign, who disputes with what evidence, what L1 checks, where withdrawals come from
+16. [Stateful runtime](guide/stateful-runtime.md): stateful apps (clearing): L1 read view, AppState on an untrusted executor, L1 settlement, reorg replay, evidence retention
 
 ## Examples
 
@@ -47,3 +48,4 @@ Measurements of the builds named in each log. Use the guides for current behavio
 | [App channels: accounting](experiments/app-channels-accounting.md) | experiments 1, 2 and 4: operator death, adversarial accounting, the one-day fence |
 | [Prediction round cost](experiments/prediction-round-cost.md) | optimistic prediction rounds: safety tests, dispute gas, cost vs. the same game on L1 |
 | [Prediction review fixes](experiments/prediction-review-fixes.md) | f4aab62 review: challenge-period floors, request coverage, request queue deadlines, exits without a witness |
+| [Clearing runtime](experiments/clearing-runtime.md) | skim → stateful Solidity → L1 net settlement: deterministic e2e, live skim reads, costs by category |

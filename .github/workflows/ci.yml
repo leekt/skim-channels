@@ -85,3 +85,6 @@ jobs:
       - name: e2e prediction rounds (anvil, optimistic, no mocks)
         working-directory: ts
         run: npm run -s e2e-predict
+      - name: e2e stateful clearing (anvil L1 + local executor)
+        working-directory: ts
+        run: npm run -s e2e-clearing
