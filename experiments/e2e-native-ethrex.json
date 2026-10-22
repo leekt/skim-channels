@@ -1,9 +1,9 @@
 {
   "note": "ethrex L1 (EXECUTE 0x0101) + ethrex native L2, PR #6418 PoC; NativeRollupRegistry; no mocks in block acceptance. L2 anchor feed is still the labeled mock inbox.",
   "measurements": {
-    "L2 execute (ethrex native)": 288262,
+    "L2 execute (ethrex native)": 288288,
     "L1 anchor record": 284950,
-    "L1 acceptHistorical (EIP-2935 proof)": 892971,
-    "L1 settle (native profile)": 495437
+    "L1 acceptHistorical (EIP-2935 proof)": 892959,
+    "L1 settle (native profile)": 495425
   }
 }

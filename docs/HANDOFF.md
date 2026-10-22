@@ -101,7 +101,7 @@ Added since:
 |---|---|---|
 | skim, Sepolia, live | witness (WETH: account and code, 2 slots) at a **finalized** anchor about 19 min old | 13,376 B, collected in 1.2 s |
 | | same at a **safe** anchor | 13,376 B, 0.97 s |
-| Lighthouse v8.3.0 FCR devnet (6 s slots) | FCR-confirmed block vs. latest / finalized, early chain | at latest (0 behind); finalized still at genesis; event after 5.5 s |
+| Lighthouse v8.3.0 FCR devnet (2 nodes, 6 s slots) | FCR-confirmed block vs. latest / finalized | block 14: at latest, event after 5.5 s; block 93 (~9 min in): at latest, event after 2.6 s. `finalized` was still at genesis on this devnet in both samples, so FCR gave confirmation where finality gave none |
 | ethrex native (EXECUTE) | L2 `execute` | 288,262 gas |
 | | L1 `acceptHistorical` (EIP-2935 proof) | 892,971 gas |
 | | L1 `settle` (native profile) | 495,437 gas |
