@@ -70,7 +70,7 @@ It does **not** remove the cost of proving existing L1 state (witnesses) or the 
   (`BLOBHASH(0)`), and the verifier's approval. Its security is exactly the verifier's, and
   only a labeled mock verifier exists.
 
-**Choices to review:**
+**Choices to review** (owner decisions; implemented with these defaults):
 1. The nonce acts as the checkpoint version. No separate checkpoint type exists: a checkpoint
    *is* a signed `FinalRequest`.
 2. The window is fixed per deployment, and challenges don't extend it.
@@ -110,18 +110,45 @@ re-executing them with the EXECUTE precompile. It reads ethrex's `NativeRollup.s
 - The header's state root must equal the verified root at its height.
 - Measured end to end (`ts/e2e-native.ts`). Profile: `native-reexecution-devnet`.
 
-**Limits of that PoC, outside this repo:**
-- ethrex's `advance()` is restricted to a single advancer, so it is not permissionless.
-- Its L2 DA is the SSZ stateless input in `advance()` calldata, not blobs.
-- EIP-8288 / EIP-8357 proof verification (`native-proof-dependencies`) has no reference
-  implementation; L2BEAT's demo uses a mock verifier. That profile stays unimplemented.
+## The full native stack (implemented 2026-10-22, run end to end on ethrex)
+- **Real verifier behind the governed registry.** `ExecuteVerifier` is an
+  `IStateTransitionVerifier` that calls ethrex's EXECUTE precompile (0x0101, schema 0x1501)
+  with the SSZ stateless input. It accepts only if the precompile validates the payload and
+  the validated payload *is* the submitted block:
+  - block hash = keccak(header), with the header's parent, number and state root equal to the
+    payload's;
+  - the payload's gas limit and chain id are the rollup's;
+  - its L1-messages root equals the registry's root for the messages consumed;
+  - the DA commitment is the input itself.
+- **Permissionless advancement.** `CanonicalBlockRegistry.submit` is open to anyone. In the
+  e2e, an unprivileged account replays the SSZ inputs that ethrex's advancer published in L1
+  calldata. Anyone running an ethrex node can produce them, so ethrex's single-advancer
+  restriction applies only to ethrex's own contract, not to this registry. Each submission
+  re-executes the block with EXECUTE, and the accepted roots match ethrex's.
+- **Data availability.** The registry has two modes: `blobDA` (BLOBHASH(0)) or calldata. In
+  calldata mode the DA commitment is keccak(proof). The proof is the stateless input, which
+  carries the whole block (transactions included), and EXECUTE executes exactly it. So an
+  accepted block's data is necessarily on L1, and withholding can't produce an accepted block.
+- **L1 messages and forced inclusion** run on one queue (`IL1MessageQueue`). Blocks commit to
+  the messages they consume, and EXECUTE checks that root inside the block (ethrex puts it in
+  `parent_beacon_block_root`). `NativeRollupMessageQueue` reads ethrex's own `sendL1Message`
+  queue. ethrex records no message times, so deadlines start at a permissionless `poke`.
+- **Trustless L2 anchor feed.**
+  - `AnchorSender` (L1) forwards a header as an L1 message only after `AnchorRegistry`
+    authenticated it against L1's BLOCKHASH.
+  - On L2, anyone calls `L2AnchorInbox.postFromL1` with a Merkle proof of that message
+    against the L2 block's L1-messages root, read from EIP-4788's beacon-roots contract.
+  - The mock system key is disabled (`system = 0`).
+- **Measured** (`experiments/e2e-native-ethrex.json`): `submit` with EXECUTE costs about
+  16.0M gas per L2 block, which is the L2 gas limit. One block per L1 transaction is the
+  ceiling under EIP-7825.
 
-**Still open:**
-- Data-withholding handling beyond `CanonicalBlockRegistry`'s blob requirement.
-- A permissionless advancer for the native path.
-- Combining `CanonicalBlockRegistry`'s governance with a real EXECUTE-backed
-  `IStateTransitionVerifier`. That needs an EXECUTE ABI stable enough to call directly;
-  ethrex's is SSZ with fixed offsets, called brittle in its own review.
+**Not achievable today, with evidence:**
+- **`native-proof-dependencies` (EIP-8288 + EIP-8357).** EIP-8288's reference implementation
+  is listed as forthcoming. On L2BEAT's bogota devnet the rollup uses `MockDependencyVerifier`
+  (a trusted prover's signature) because LeanSTARK dependencies can't be proven yet. Any
+  verifier built against it here would be a mock under a native name, which the spec forbids.
+  The registry is ready for it: `IStateTransitionVerifier` behind the 30-day governance path.
 
 ## Effect on what is built now (M0/M1)
 

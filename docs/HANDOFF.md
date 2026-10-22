@@ -8,7 +8,7 @@ governance, forced inclusion). Read first: [PROJECT](PROJECT.md) (spec v0.1), [S
 | M0 shared types | Rust, Solidity and viem agree; strict decoding everywhere |
 | M1 witnesses | Exact-root packages, `AnchorBook`; **live against skim on Sepolia** (finalized and safe anchors) |
 | M2 channels | Read-and-Split e2e on two anvil chains (mock acceptance), plus the full forge suite |
-| M3 native verification | **`native-reexecution-devnet` e2e on ethrex (EXECUTE precompile), no mocks in block acceptance.** `native-proof-dependencies` (EIP-8288/8357) has no implementation to target |
+| M3 native verification | **`native-reexecution-devnet` on ethrex, no mocks anywhere in the e2e.** `ExecuteVerifier` (EXECUTE) behind the permissionless, governed `CanonicalBlockRegistry`; L1 messages, forced inclusion and calldata DA; anchors fed trustlessly via proven L1 messages. `native-proof-dependencies` (EIP-8288/8357) is not implementable yet (see STAGE2) |
 | M4 | **FCR from Lighthouse v8.3.0's `fast_confirmation` event, live.** Measurements below |
 | Stage 2 | Operator-free exit (L1 re-execution); 30-day upgrade timelock; fault-gated Security Council; forced inclusion; permissionless block submission (in `CanonicalBlockRegistry`) |
 
@@ -29,7 +29,7 @@ governance, forced inclusion). Read first: [PROJECT](PROJECT.md) (spec v0.1), [S
 |---|---|
 | everything | `scripts/check.sh`, plus `ETHREX=<checkout>` for the native e2e |
 | Rust | `cargo test --workspace`: 48 tests. anvil tests skip without anvil; live tests skip without their env vars |
-| Solidity | `cd contracts && forge test`: 74 tests |
+| Solidity | `cd contracts && forge test`: 83 tests |
 | TypeScript | `cd ts && npm run check-encodings`: 9 |
 | anvil e2e | `cargo build -p channel-runner && cd ts && npm run e2e` |
 | native e2e | `ETHREX=… npm run e2e-native`. Starts ethrex L1 and L2 itself; writes `experiments/e2e-native-ethrex.json` |
@@ -102,10 +102,10 @@ Added since:
 | skim, Sepolia, live | witness (WETH: account and code, 2 slots) at a **finalized** anchor about 19 min old | 13,376 B, collected in 1.2 s |
 | | same at a **safe** anchor | 13,376 B, 0.97 s |
 | Lighthouse v8.3.0 FCR devnet (2 nodes, 6 s slots) | FCR-confirmed block vs. latest / finalized | block 14: at latest, event after 5.5 s; block 93 (~9 min in): at latest, event after 2.6 s. `finalized` was still at genesis on this devnet in both samples, so FCR gave confirmation where finality gave none |
-| ethrex native (EXECUTE) | L2 `execute` | 288,262 gas |
-| | L1 `acceptHistorical` (EIP-2935 proof) | 892,971 gas |
-| | L1 `settle` (native profile) | 495,437 gas |
-| | L1 anchor `record` | 284,950 gas |
+| ethrex native (EXECUTE) | L1 `CanonicalBlockRegistry.submit` (EXECUTE re-execution), mean per L2 block | ~16.0M gas, about the L2 gas limit |
+| | L1 `AnchorSender.send` (record and L1 message) / L2 `postFromL1` (proof) | 829,633 / 295,909 gas |
+| | L2 `execute`; L1 `settle` (canonical registry) | 317,050; 501,125 gas |
+| | L1 `NativeRollupRegistry.acceptHistorical` (earlier run) | 892,971 gas |
 | anvil (Prague) | L2 `execute`; L1 `settle` (31-tx L2 block); `finalizeExit`; `startExit` | see `experiments/e2e-mock-local.json` |
 
 Gas on the ethrex chains is higher across the board, because Amsterdam reprices state access
@@ -113,29 +113,26 @@ and creation; compare `record`, 285k vs. 111k on anvil. Not measured: settlement
 size beyond 31 transactions; FCR lag once finality is running normally.
 
 ## Known limitations
-- **Native path:**
-  - ethrex's PoC `advance()` is restricted to a single advancer, so it isn't permissionless.
-  - Its L2 data travels as calldata, not blobs.
-  - `CanonicalBlockRegistry` (permissionless, governed, forced inclusion) still only has a mock
-    verifier, because the EXECUTE input is SSZ with brittle fixed offsets and too unstable to
-    wrap yet.
-  - EIP-8288/8357 have no implementation.
-- **The L2 anchor feed is a labeled mock** (`L2AnchorInbox`). On ethrex, L2 blocks commit to
-  L1 messages, not L1 block hashes. Settlement and exits re-authenticate anchors on L1, so this
-  affects liveness and previews, not funds.
-- **FCR trusts a full beacon node**, as the FCR spec requires the full vote view; light-client
-  data can't evaluate it.
+- **`native-proof-dependencies` can't be built honestly yet.** EIP-8288 has no reference
+  implementation, and L2BEAT's devnet mocks the dependency verifier.
+- **ethrex PoC specifics:**
+  - its own `advance()` has a single advancer (our registry doesn't);
+  - forced-inclusion deadlines start at `poke`, because ethrex records no message times;
+  - EXECUTE costs about the L2 block gas limit per block, so one block per L1 transaction.
+- **The EXECUTE ABI is ethrex's.** SSZ, schema 0x1501, fixed offsets mirrored from
+  `NativeRollup.sol`. A schema change means a new `ExecuteVerifier` through the 30-day
+  governance path.
+- **FCR trusts a full beacon node**, as the FCR spec requires the full vote view.
 - **The emergency exit needs a witness at the request's anchor**, and skim serves only recent
-  roots. The live finalized anchor (~19 min old) was still served. Older anchors may need an
-  archive node, and the refund fallback covers that.
-- Exit-prototype choices await owner review (STAGE2).
+  roots. Older anchors may need an archive node; the refund fallback covers that.
+- **The anvil e2e still uses the labeled mock feed and registry.** The native e2e uses none.
+- **Owner decisions pending:** the STAGE2 "Choices to review" (exit window, nonce as
+  checkpoint, governance delays, `FORCE_DELAY`). They're implemented with defaults; changing
+  them means changing constants.
 
 ## Next tasks
 1. Owner review of the STAGE2 choices: exit window, nonce-as-checkpoint, governance delays,
    `FORCE_DELAY`.
-2. Wrap EXECUTE as an `IStateTransitionVerifier` once its input/output ABI stabilizes. That
-   joins the native path with permissionless submission, governance and forced inclusion.
-3. An L2 anchor feed on ethrex: derive L1 block hashes from its L1-message mechanism instead of
-   the mock inbox.
-4. M4 leftovers: settlement gas versus block size, witness prefetching, receipt batching across
+2. When EIP-8288 gets a prover: a `ProofDependencyVerifier` behind the same governance path.
+3. M4 leftovers: settlement gas versus block size, witness prefetching, receipt batching across
    channels, FCR lag with live finality.
