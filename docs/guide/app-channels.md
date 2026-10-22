@@ -16,7 +16,28 @@ Funds never leave L1. They sit in a vault there the whole time, and L1 pays out 
 **Owner decisions (2026-10-22):**
 - withdraw any time, not only at close;
 - app logic is the **app's own contracts**, registered by code hash;
-- ETH plus allow-listed ERC-20.
+- ETH plus allow-listed ERC-20;
+- apps get **read-only access to L1 state**: they can read it on L2 but never modify it.
+
+## L1 state: readable, never writable
+
+Apps in a channel can **read any L1 state** but **can't modify it**. This holds by construction, not by policy.
+
+**How an app reads L1.** A transaction carries a witness: Merkle proofs from skim's `eth_getProof` at an anchor that `L2AnchorInbox` holds. Anchors reach L2 trustlessly as proven L1 messages, BLOCKHASH-checked on L1. The app verifies the witness through `WitnessVerifier`, or `L1StateReader.readStorage` for a single slot, and gets the values at that L1 block. One transaction reads one anchor, so its view of L1 is consistent. Freshness is the channel's `maxAnchorLag`.
+
+**Why it can't write:**
+- A witness is only proof data. There is no path from L2 to an L1 contract's storage, and no L2 call reaches L1.
+- The only L2→L1 effect is `ChannelVault` paying out **that channel's own escrowed deposits**, and only against L2 state that L1 verified.
+- Reading a pool, an oracle or a balance on L1 grants no right to move it. For example, an app can price a trade off a Uniswap pool's reserves, but it can't touch the pool's tokens.
+
+**Example:** a prediction game settles each round on the ETH/USDC price read from an L1 pool at an agreed anchor. Players' stakes move only between channel balances on L2. On L1, only the vault pays out, and only from deposits.
+
+| Direction | Allowed | Mechanism |
+|---|---|---|
+| L1 state → L2 app | Read, any contract | Witness at an inbox anchor (skim proofs) |
+| L1 vault → L2 balances | Deposits | Proven L1 message from the vault |
+| L2 → L1 vault | Payouts of the channel's own escrow | Withdrawal or balance proven at an L1-verified L2 state root |
+| L2 → any other L1 contract | **Never** | No mechanism exists |
 
 ## How it differs from computation channels
 
