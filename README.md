@@ -101,6 +101,7 @@ Requires Rust 1.97, Foundry and Node ≥ 23. The native e2e needs an ethrex chec
 | What's verified and what's trusted | [Trust and correctness](docs/guide/trust-and-correctness.md) |
 | Exits without the operator, governance, forced inclusion | [Stage 2](docs/guide/stage-2.md) |
 | Known failure modes and their causes | [Troubleshooting](docs/guide/troubleshooting.md) |
+| A channel as an app's L2 session (proposed design) | [App channels](docs/guide/app-channels.md) |
 
 Full index: [docs/README.md](docs/README.md).
 

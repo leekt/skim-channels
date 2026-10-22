@@ -14,6 +14,7 @@
 10. [Trust and correctness](guide/trust-and-correctness.md): what is verified, what is trusted, labeled mocks
 11. [Stage 2](guide/stage-2.md): emergency exit, governance, forced inclusion, owner decisions
 12. [Troubleshooting](guide/troubleshooting.md): failure modes found while building, and their causes
+13. [App channels (proposed)](guide/app-channels.md): a channel as an app's L2 session; users join with L1-locked assets, transact many times, withdraw any time
 
 ## Examples
 
