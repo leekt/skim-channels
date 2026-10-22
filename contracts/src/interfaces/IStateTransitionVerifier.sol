@@ -6,20 +6,18 @@ pragma solidity ^0.8.28;
 ///         wraps a Native Rollup verification mechanism (EIP-8079 re-execution, or EIP-8288 /
 ///         EIP-8357 proof verification) once a compatible network provides one.
 interface IStateTransitionVerifier {
+    /// @notice Everything a transition is a deterministic function of, plus its claimed result.
+    struct Transition {
+        bytes32 profileHash; // program, fork schema, DA schema
+        bytes32 parentStateRoot; // accepted parent's post-state
+        bytes32 daCommitment; // versioned hash of the blob carrying the block's transactions
+        bytes32 l1AnchorId; // the L1 anchor the block makes available to L2
+        bytes32 forcedTxsAcc; // accumulator of the forced-inclusion entries the block must contain
+        bytes rawHeader; // the block (its hash, state root and receipts root are the result)
+    }
+
     /// @notice The ExecutionProfile kind this verifier provides (ChannelTypes.PROFILE_*).
     function profileKind() external view returns (uint8);
 
-    /// @param profileHash  the execution profile (program, fork schema, DA schema) to verify under
-    /// @param parentStateRoot  the accepted parent's post-state root
-    /// @param rawHeader  the block's RLP header; its hash is the block hash
-    /// @param daCommitment  versioned hash of the blob carrying the block's transactions
-    /// @param l1AnchorId  the L1 anchor the block makes available to L2
-    function verify(
-        bytes32 profileHash,
-        bytes32 parentStateRoot,
-        bytes calldata rawHeader,
-        bytes32 daCommitment,
-        bytes32 l1AnchorId,
-        bytes calldata proof
-    ) external view returns (bool);
+    function verify(Transition calldata t, bytes calldata proof) external view returns (bool);
 }

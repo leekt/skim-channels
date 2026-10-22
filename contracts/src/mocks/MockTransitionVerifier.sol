@@ -15,11 +15,7 @@ contract MockTransitionVerifier is IStateTransitionVerifier {
         return ChannelTypes.PROFILE_MOCK_LOCAL;
     }
 
-    function verify(bytes32, bytes32, bytes calldata, bytes32, bytes32, bytes calldata proof)
-        external
-        pure
-        returns (bool)
-    {
+    function verify(Transition calldata, bytes calldata proof) external pure returns (bool) {
         return proof.length == 32 && bytes32(proof) == MOCK_PROOF;
     }
 }

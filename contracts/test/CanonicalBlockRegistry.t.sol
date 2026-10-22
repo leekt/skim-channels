@@ -8,14 +8,26 @@ import {IStateTransitionVerifier} from "../src/interfaces/IStateTransitionVerifi
 import {AnchorRegistry} from "../src/AnchorRegistry.sol";
 import {ChannelTypes} from "../src/libraries/ChannelTypes.sol";
 import {RLPEncode} from "./helpers/RLPEncode.sol";
+import {RollupGovernance} from "../src/RollupGovernance.sol";
 
 contract RejectingVerifier is IStateTransitionVerifier {
     function profileKind() external pure returns (uint8) {
         return ChannelTypes.PROFILE_NATIVE_REEXECUTION_DEVNET;
     }
 
-    function verify(bytes32, bytes32, bytes calldata, bytes32, bytes32, bytes calldata) external pure returns (bool) {
+    function verify(Transition calldata, bytes calldata) external pure returns (bool) {
         return false;
+    }
+}
+
+/// Accepts only if the proof commits to the forced-transaction accumulator it was given.
+contract AccCheckingVerifier is IStateTransitionVerifier {
+    function profileKind() external pure returns (uint8) {
+        return ChannelTypes.PROFILE_MOCK_LOCAL;
+    }
+
+    function verify(Transition calldata t, bytes calldata proof) external pure returns (bool) {
+        return keccak256(proof) == keccak256(abi.encode(t.forcedTxsAcc));
     }
 }
 
@@ -28,6 +40,8 @@ contract CanonicalBlockRegistryTest is Test {
     bytes genesis;
     bytes32 anchorId;
     bytes proof;
+    RollupGovernance gov;
+    address constant COUNCIL = address(0xC0C);
 
     function _header(bytes32 parent, uint256 number, bytes32 salt) internal pure returns (bytes memory) {
         bytes[] memory f = new bytes[](15);
@@ -53,7 +67,9 @@ contract CanonicalBlockRegistryTest is Test {
         anchors = new AnchorRegistry();
         mockV = new MockTransitionVerifier();
         genesis = _header(bytes32(0), 0, "g");
-        reg = new CanonicalBlockRegistry(ROLLUP, PROFILE, mockV, anchors, genesis);
+        gov = new RollupGovernance(address(this), COUNCIL);
+        reg = new CanonicalBlockRegistry(ROLLUP, PROFILE, mockV, anchors, genesis, address(gov));
+        gov.bind(reg);
         // A real L1 anchor: an L1 header whose hash this chain reports at its height.
         bytes memory l1 = _header(keccak256("l1-parent"), 5, "l1");
         vm.roll(10);
@@ -67,7 +83,7 @@ contract CanonicalBlockRegistryTest is Test {
 
     function test_extendsCanonicalChain() public {
         bytes memory b1 = _header(keccak256(genesis), 1, "a");
-        bytes32 h1 = reg.submit(b1, anchorId, proof);
+        bytes32 h1 = reg.submit(b1, anchorId, 0, proof);
         assertEq(reg.head(), h1);
         assertTrue(reg.isAcceptedBlock(ROLLUP, h1));
         assertFalse(reg.isAcceptedBlock(keccak256("other rollup"), h1));
@@ -78,45 +94,152 @@ contract CanonicalBlockRegistryTest is Test {
         assertEq(reg.profileKind(), ChannelTypes.PROFILE_MOCK_LOCAL);
         // Permissionless: anyone extends it.
         vm.prank(address(0xbeef));
-        reg.submit(_header(h1, 2, "b"), anchorId, proof);
+        reg.submit(_header(h1, 2, "b"), anchorId, 0, proof);
     }
 
     function test_competingForkRejected() public {
-        reg.submit(_header(keccak256(genesis), 1, "a"), anchorId, proof);
+        reg.submit(_header(keccak256(genesis), 1, "a"), anchorId, 0, proof);
         vm.expectRevert(abi.encodeWithSelector(CanonicalBlockRegistry.Rejected.selector, "not on the canonical tip"));
-        reg.submit(_header(keccak256(genesis), 1, "competitor"), anchorId, proof);
+        reg.submit(_header(keccak256(genesis), 1, "competitor"), anchorId, 0, proof);
     }
 
     function test_wrongParentOrNumberRejected() public {
         vm.expectRevert(abi.encodeWithSelector(CanonicalBlockRegistry.Rejected.selector, "not on the canonical tip"));
-        reg.submit(_header(keccak256("unknown"), 1, "a"), anchorId, proof);
+        reg.submit(_header(keccak256("unknown"), 1, "a"), anchorId, 0, proof);
         vm.expectRevert(abi.encodeWithSelector(CanonicalBlockRegistry.Rejected.selector, "number"));
-        reg.submit(_header(keccak256(genesis), 2, "a"), anchorId, proof);
+        reg.submit(_header(keccak256(genesis), 2, "a"), anchorId, 0, proof);
     }
 
     function test_unrecordedAnchorRejected() public {
         vm.expectRevert(abi.encodeWithSelector(CanonicalBlockRegistry.Rejected.selector, "L1 anchor not recorded"));
-        reg.submit(_header(keccak256(genesis), 1, "a"), keccak256("fake anchor"), proof);
+        reg.submit(_header(keccak256(genesis), 1, "a"), keccak256("fake anchor"), 0, proof);
     }
 
     function test_missingBlobRejected() public {
         vm.blobhashes(new bytes32[](0));
         vm.expectRevert(abi.encodeWithSelector(CanonicalBlockRegistry.Rejected.selector, "no blob: data not on L1"));
-        reg.submit(_header(keccak256(genesis), 1, "a"), anchorId, proof);
+        reg.submit(_header(keccak256(genesis), 1, "a"), anchorId, 0, proof);
     }
 
     function test_unverifiedTransitionRejected() public {
         vm.expectRevert(abi.encodeWithSelector(CanonicalBlockRegistry.Rejected.selector, "transition not verified"));
-        reg.submit(_header(keccak256(genesis), 1, "a"), anchorId, hex"00");
+        reg.submit(_header(keccak256(genesis), 1, "a"), anchorId, 0, hex"00");
         CanonicalBlockRegistry strict =
-            new CanonicalBlockRegistry(ROLLUP, PROFILE, new RejectingVerifier(), anchors, genesis);
+            new CanonicalBlockRegistry(ROLLUP, PROFILE, new RejectingVerifier(), anchors, genesis, address(gov));
         assertEq(strict.profileKind(), ChannelTypes.PROFILE_NATIVE_REEXECUTION_DEVNET);
         vm.expectRevert(abi.encodeWithSelector(CanonicalBlockRegistry.Rejected.selector, "transition not verified"));
-        strict.submit(_header(keccak256(genesis), 1, "a"), anchorId, proof);
+        strict.submit(_header(keccak256(genesis), 1, "a"), anchorId, 0, proof);
     }
 
     function test_genesisMustBeBlockZero() public {
         vm.expectRevert(abi.encodeWithSelector(CanonicalBlockRegistry.Rejected.selector, "genesis number"));
-        new CanonicalBlockRegistry(ROLLUP, PROFILE, mockV, anchors, _header(bytes32(0), 1, "g"));
+        new CanonicalBlockRegistry(ROLLUP, PROFILE, mockV, anchors, _header(bytes32(0), 1, "g"), address(gov));
+    }
+
+    // ---- forced inclusion ---------------------------------------------------------------
+
+    function test_overdueForcedTransactionMustBeIncluded() public {
+        reg.forceInclude(hex"02f8aa01");
+        assertEq(reg.forcedCount(), 1);
+        bytes32 g = keccak256(genesis);
+        // Not overdue yet: a block may skip it.
+        bytes32 h1 = reg.submit(_header(g, 1, "a"), anchorId, 0, proof);
+        vm.warp(block.timestamp + reg.FORCE_DELAY());
+        vm.expectRevert(
+            abi.encodeWithSelector(CanonicalBlockRegistry.Rejected.selector, "overdue forced transaction not included")
+        );
+        reg.submit(_header(h1, 2, "b"), anchorId, 0, proof);
+        vm.expectRevert(abi.encodeWithSelector(CanonicalBlockRegistry.Rejected.selector, "forced cursor"));
+        reg.submit(_header(h1, 2, "b"), anchorId, 2, proof);
+        bytes32 h2 = reg.submit(_header(h1, 2, "b"), anchorId, 1, proof);
+        assertEq(reg.forcedCursor(), 1);
+        assertEq(reg.forcedCursorAt(h2), 1);
+        // The cursor never moves back.
+        vm.expectRevert(abi.encodeWithSelector(CanonicalBlockRegistry.Rejected.selector, "forced cursor"));
+        reg.submit(_header(h2, 3, "c"), anchorId, 0, proof);
+    }
+
+    function test_verifierSeesForcedAccumulator() public {
+        AccCheckingVerifier v = new AccCheckingVerifier();
+        CanonicalBlockRegistry r = new CanonicalBlockRegistry(ROLLUP, PROFILE, v, anchors, genesis, address(gov));
+        r.forceInclude(hex"aa");
+        bytes32 acc1 = keccak256(abi.encode(bytes32(0), keccak256(hex"aa")));
+        assertEq(r.forcedAcc(1), acc1);
+        bytes32 g = keccak256(genesis);
+        // Claiming inclusion with a proof for the empty accumulator fails.
+        vm.expectRevert(abi.encodeWithSelector(CanonicalBlockRegistry.Rejected.selector, "transition not verified"));
+        r.submit(_header(g, 1, "a"), anchorId, 1, abi.encode(bytes32(0)));
+        r.submit(_header(g, 1, "a"), anchorId, 1, abi.encode(acc1));
+    }
+
+    // ---- faults and governance -----------------------------------------------------------
+
+    function _transition(bytes memory header) internal view returns (IStateTransitionVerifier.Transition memory) {
+        return IStateTransitionVerifier.Transition({
+            profileHash: PROFILE,
+            parentStateRoot: keccak256("parent-state"),
+            daCommitment: keccak256("da"),
+            l1AnchorId: anchorId,
+            forcedTxsAcc: 0,
+            rawHeader: header
+        });
+    }
+
+    function test_provenConflictFreezesAndOnlyThenCouncilActs() public {
+        bytes32 g = keccak256(genesis);
+        bytes32 h1 = reg.submit(_header(g, 1, "a"), anchorId, 0, proof);
+        MockTransitionVerifier repaired = new MockTransitionVerifier();
+        // No fault yet: the council can't act.
+        vm.prank(COUNCIL);
+        vm.expectRevert(abi.encodeWithSelector(CanonicalBlockRegistry.Rejected.selector, "no proven fault"));
+        gov.emergencyReplace(repaired);
+        // Same inputs, same result: not a conflict.
+        vm.expectRevert(abi.encodeWithSelector(CanonicalBlockRegistry.Rejected.selector, "same result"));
+        reg.proveConflict(_transition(_header(h1, 2, "x")), proof, _header(h1, 2, "x"), proof);
+        // One side unverified: not a conflict.
+        vm.expectRevert(abi.encodeWithSelector(CanonicalBlockRegistry.Rejected.selector, "not both verified"));
+        reg.proveConflict(_transition(_header(h1, 2, "x")), proof, _header(h1, 2, "y"), hex"00");
+        // The mock accepts anything: two results for identical inputs. Anyone proves it.
+        vm.prank(address(0xbeef));
+        reg.proveConflict(_transition(_header(h1, 2, "x")), proof, _header(h1, 2, "y"), proof);
+        assertTrue(reg.frozen());
+        assertFalse(reg.isAcceptedBlock(ROLLUP, h1), "frozen: nothing reported accepted");
+        vm.expectRevert(abi.encodeWithSelector(CanonicalBlockRegistry.Rejected.selector, "frozen"));
+        reg.submit(_header(h1, 2, "b"), anchorId, 0, proof);
+        // Only the council, only now, without delay.
+        vm.expectRevert(RollupGovernance.Unauthorized.selector);
+        gov.emergencyReplace(repaired);
+        vm.prank(COUNCIL);
+        gov.emergencyReplace(repaired);
+        assertFalse(reg.frozen());
+        assertEq(address(reg.verifier()), address(repaired));
+        assertTrue(reg.isAcceptedBlock(ROLLUP, h1));
+    }
+
+    function test_ordinaryUpgradeWaitsThirtyDays() public {
+        MockTransitionVerifier next = new MockTransitionVerifier();
+        vm.prank(address(0xbad));
+        vm.expectRevert(RollupGovernance.Unauthorized.selector);
+        gov.schedule(next);
+        gov.schedule(next);
+        (, uint64 eta) = gov.pending();
+        assertEq(eta, block.timestamp + 30 days);
+        vm.warp(block.timestamp + 30 days - 1);
+        vm.expectRevert(abi.encodeWithSelector(RollupGovernance.TooEarly.selector, eta));
+        gov.execute();
+        vm.warp(block.timestamp + 1);
+        vm.prank(address(0xbeef)); // anyone executes a matured upgrade
+        gov.execute();
+        assertEq(address(reg.verifier()), address(next));
+        vm.expectRevert(RollupGovernance.NothingScheduled.selector);
+        gov.execute();
+        // Nobody but governance touches the registry directly.
+        vm.expectRevert(abi.encodeWithSelector(CanonicalBlockRegistry.Rejected.selector, "not governance"));
+        reg.replaceVerifier(mockV, false);
+    }
+
+    function test_governanceBindsOnce() public {
+        vm.expectRevert(RollupGovernance.AlreadyBound.selector);
+        gov.bind(reg);
     }
 }

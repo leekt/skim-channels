@@ -14,6 +14,7 @@ import {SplitModule} from "../src/examples/SplitModule.sol";
 import {RLPEncode} from "./helpers/RLPEncode.sol";
 import {CanonicalBlockRegistry} from "../src/CanonicalBlockRegistry.sol";
 import {MockTransitionVerifier} from "../src/mocks/MockTransitionVerifier.sol";
+import {IStateTransitionVerifier} from "../src/interfaces/IStateTransitionVerifier.sol";
 
 /// Tries to write state from compute(). Approved by code hash, so only STATICCALL stops it.
 contract WritingModule {
@@ -577,7 +578,7 @@ contract ChannelTest is Test {
         bytes memory genesis = _l2Header(bytes32(0));
         // Blocks built from here on extend this genesis.
         (l2Parent, l2Number) = (keccak256(genesis), n);
-        canon = new CanonicalBlockRegistry(ROLLUP, profileHash, mockVerifier, anchors, genesis);
+        canon = new CanonicalBlockRegistry(ROLLUP, profileHash, mockVerifier, anchors, genesis, address(this));
         s2 = new ChannelSettlement(
             ROLLUP, profileHash, ChannelTypes.PROFILE_MOCK_LOCAL, canon, anchors, WINDOW, _l1Modules()
         );
@@ -602,7 +603,28 @@ contract ChannelTest is Test {
         bytes32[] memory blobs = new bytes32[](1);
         blobs[0] = bytes32(uint256(0x01) << 248 | 0x1);
         vm.blobhashes(blobs);
-        assertEq(canon.submit(e.l2Header, anchorId, abi.encodePacked(mockVerifier.MOCK_PROOF())), e.l2BlockHash);
+        assertEq(canon.submit(e.l2Header, anchorId, 0, abi.encodePacked(mockVerifier.MOCK_PROOF())), e.l2BlockHash);
+    }
+
+    function test_provenVerifierFaultHaltsReceiptsButNotEmergencyExit() public {
+        settlement = _canonicalSettlement();
+        ChannelTypes.ChannelTerms memory t = _openAndFund("fault", address(split));
+        (ChannelExecutor.Call memory c, ChannelTypes.FinalRequest memory r) = _call(t, ".h1", _input());
+        bytes memory evidence = _executeAndProve(c, r, false);
+        _submitCanonical(evidence, r.anchorId);
+        // Someone proves the (mock) verifier unsound: the registry freezes.
+        bytes memory a = _l2Header(bytes32(0));
+        bytes memory b = _l2Header(bytes32(uint256(1)));
+        bytes memory mp = abi.encodePacked(mockVerifier.MOCK_PROOF());
+        canon.proveConflict(IStateTransitionVerifier.Transition(profileHash, 0, 0, r.anchorId, 0, a), mp, b, mp);
+        vm.expectRevert(abi.encodeWithSelector(ChannelSettlement.Invalid.selector, "block not accepted"));
+        settlement.settle(t.channelId, evidence);
+        // The operator-free path doesn't depend on the verifier.
+        bytes memory req = c.request;
+        settlement.startExit(t.channelId, req, c.signatures);
+        vm.warp(block.timestamp + WINDOW);
+        settlement.finalizeExit(t.channelId, req, _input(), vm.parseJsonBytes(wjson, ".h1.package"));
+        assertEq(settlement.withdrawable(participants[0]), 1.4 ether);
     }
 
     function test_crossChannelReuseRejected() public {
