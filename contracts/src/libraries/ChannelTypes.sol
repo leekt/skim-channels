@@ -159,6 +159,22 @@ library ChannelTypes {
         return keccak256(abi.encode(participants));
     }
 
+    /// @notice Signer of a 65-byte (r, s, v) signature; zero for malformed or high-s (EIP-2).
+    function recoverSigner(bytes32 digest, bytes memory sig) internal pure returns (address) {
+        if (sig.length != 65) return address(0);
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+        assembly {
+            r := mload(add(sig, 32))
+            s := mload(add(sig, 64))
+            v := byte(0, mload(add(sig, 96)))
+        }
+        if (uint256(s) > 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0) return address(0);
+        if (v != 27 && v != 28) return address(0);
+        return ecrecover(digest, v, r, s);
+    }
+
     /// @notice Strict decoding: exact length (no trailing bytes); the ABI decoder rejects
     ///         dirty padding of narrow types.
     function decodeFinalRequest(bytes memory data) internal pure returns (FinalRequest memory r) {

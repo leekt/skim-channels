@@ -125,7 +125,10 @@ async function run() {
   };
   const profileHash = hashStruct({ types: eip712, primaryType: "ExecutionProfile", data: profile });
   const executor = await deploy(w2(), pub2, "ChannelExecutor.sol", "ChannelExecutor", [profileHash, BigInt(L1_ID), inbox.address, [split.address]]);
-  const settlement = await deploy(w1(), pub1, "ChannelSettlement.sol", "ChannelSettlement", [ROLLUP, profileHash, 0, registry.address, anchors.address]);
+  // The same SplitModule bytecode on L1, for emergency exits (same code hash).
+  const splitL1 = await deploy(w1(), pub1, "SplitModule.sol", "SplitModule");
+  const WINDOW = 600n;
+  const settlement = await deploy(w1(), pub1, "ChannelSettlement.sol", "ChannelSettlement", [ROLLUP, profileHash, 0, registry.address, anchors.address, WINDOW, [splitL1.address]]);
 
   const policy = { anchorConfirmation: 0, maxAnchorLag: 64 }; // Latest: optimistic, local experiment only
   const policyHash = hashStruct({ types: eip712, primaryType: "ChannelPolicy", data: policy });
@@ -224,6 +227,21 @@ async function run() {
   await expectRevert(pub1.simulateContract({ account: carol, address: settlement.address, abi: settlement.abi, functionName: "refund", args: [two.terms.channelId] }), "second refund");
   const rb = await pub1.readContract({ address: settlement.address, abi: settlement.abi, functionName: "withdrawable", args: [bob.address] }) as bigint;
   check(rb === parseEther("0.6") + parseEther("1"), "refund credited bob's 1 ETH deposit (on top of 0.6 unwithdrawn)");
+
+  // ---- Emergency exit: no L2 at all. L1 re-executes the module against the H1 witness ----
+  const three = await openChannel(keccak256(toHex("channel-3")));
+  const exitReq = { channelId: three.terms.channelId, termsHash: three.termsHash, anchorId: b.request.anchorId, policyHash, executionProfileHash: profileHash, inputHash: keccak256(input), nonce: 1n };
+  const exitDomain = { name: "SkimChannels", version: "0", chainId: L1_ID, verifyingContract: settlement.address };
+  const exitSigs = await Promise.all([alice, bob].map((a) => a.signTypedData({ domain: exitDomain, types: { FinalRequest: eip712.FinalRequest }, primaryType: "FinalRequest", message: exitReq })));
+  const exitReqBytes = encodeAbiParameters([requestT], [exitReq]);
+  await send(w1(carol), pub1, settlement, "startExit", [three.terms.channelId, exitReqBytes, exitSigs], "L1 startExit");
+  await expectRevert(pub1.simulateContract({ account: carol, address: settlement.address, abi: settlement.abi, functionName: "finalizeExit", args: [three.terms.channelId, exitReqBytes, input, b.witness.package] }), "finalizeExit inside the challenge window");
+  await pub1.request({ method: "evm_increaseTime" as any, params: [Number(WINDOW)] as any });
+  await pub1.request({ method: "evm_mine" as any, params: [] as any });
+  const balBefore = await pub1.readContract({ address: settlement.address, abi: settlement.abi, functionName: "withdrawable", args: [alice.address] }) as bigint;
+  await send(w1(carol), pub1, settlement, "finalizeExit", [three.terms.channelId, exitReqBytes, input, b.witness.package], "L1 finalizeExit");
+  const balAfter = await pub1.readContract({ address: settlement.address, abi: settlement.abi, functionName: "withdrawable", args: [alice.address] }) as bigint;
+  check(balAfter - balBefore === parseEther("1.4"), "emergency exit finalized on L1 alone: 1.4 credited (L1 re-executed the split)");
 
   // ---- Measurements ----
   mkdirSync(`${ROOT}experiments`, { recursive: true });

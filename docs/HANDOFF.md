@@ -1,107 +1,171 @@
 # Handoff: skim-channels
 
-Status as of 2026-10-22: **M0 done, M1 foundation done** (witness packages, anchor lifecycle,
-readiness, skim bridge). Receipt-trie fixtures are ready for M2. Nothing is on L2 yet. Block
-acceptance exists only as a labeled mock.
+Status as of 2026-10-22:
+- **M0, M1, M2 done.** M2 runs with **mocked** block acceptance.
+- **M3 groundwork done.** Block acceptance is real except the transition verifier, which is
+  external.
+- **Stage 2 emergency-exit prototype done.**
+- **M4 partly done:** measurements only; FCR is blocked.
 
-Read first: [PROJECT](PROJECT.md) (spec v0.1), [STAGE2](STAGE2.md) (the design target since
-2026-10-22).
+Read first: [PROJECT](PROJECT.md) (spec v0.1) and [STAGE2](STAGE2.md) (the design target).
 
 ## Baseline
-- **skim:** `df686b70cd567210860582097e25a3f8b3fe6616`, used as a **JSON-RPC service**
-  (`eth_getProof`, `eth_getCode` at `{blockHash, requireCanonical}`). There is no Rust
-  dependency on skim crates: `skim-snap` pulls in reth through `skim-el`, and this layer only
-  needs to *verify* proofs, which it does with `alloy-trie`. skim is unchanged.
-- **Toolchain:** Rust 1.97.0 (same as skim). Alloy line as skim (`alloy-primitives` 1.6/1.7,
-  `alloy-trie` 0.9.8, `alloy-consensus` 2.5). Solidity 0.8.28 (`prague`). forge-std 1.9.7 is
-  vendored. Node 23, viem 2.30.0.
+- **skim:** `df686b70cd567210860582097e25a3f8b3fe6616`, used as a JSON-RPC service
+  (`eth_getProof`, `eth_getCode`, `eth_getBlockBy*`). There is no crate dependency on skim:
+  `skim-snap` pulls in reth, and this layer only *verifies* proofs, using `alloy-trie`. skim is
+  unchanged.
+- **Toolchain:** Rust 1.97.0 (as skim), alloy as skim (primitives 1.6/1.7, trie 0.9.8,
+  consensus 2.5).
+- **Solidity:** 0.8.28, `prague`, via-IR, optimizer 200. forge-std 1.9.7 is vendored.
+- **Node:** 23 with viem 2.30.0. The e2e needs anvil (Foundry 1.8.5 was used).
 
 ## Commands
 | | |
 |---|---|
-| everything | `scripts/check.sh` |
-| Rust | `cargo test --workspace` (37 tests, 1 ignored live test) |
-| regenerate encodings | `cargo run -p channel-types --bin gen-fixtures` |
-| regenerate receipts | `UPDATE_FIXTURES=1 cargo test -p channel-receipts` |
-| Solidity | `cd contracts && forge test` (10 tests) |
-| TypeScript | `cd ts && npm ci && npm run check-encodings` (9 commitments) |
-| live skim | `SKIM_RPC=http://127.0.0.1:8545 SKIM_ADDRESS=0x… cargo test -p channel-witness -- --ignored` |
+| everything | `scripts/check.sh` (fmt, clippy, Rust, fixture freshness, forge, viem, e2e if anvil) |
+| Rust | `cargo test --workspace`: 41 tests, plus 1 ignored live-skim test. The anvil tests skip if anvil is missing |
+| Solidity | `cd contracts && forge test`: 64 tests |
+| TypeScript | `cd ts && npm ci && npm run check-encodings`: 9 commitments |
+| two-chain e2e | `cargo build -p channel-runner && cd ts && npm run e2e`. Writes `experiments/e2e-mock-local.json` |
+| regenerate fixtures | `cargo run -p channel-types --bin gen-fixtures`; `UPDATE_FIXTURES=1 cargo test -p channel-receipts -p channel-witness` |
+| live skim | `SKIM_RPC=… SKIM_ADDRESS=0x… cargo test -p channel-witness -- --ignored` |
+| CLI | `target/debug/skim-channels {header,witness,evidence} --help` |
 
-## Decisions (M0)
-- **Commitments are EIP-712 struct hashes.** `anchorId`, `termsHash`, `policyHash`,
-  `profileHash`. The signed `requestHash` is the EIP-712 digest under the domain
-  `{name: "SkimChannels", version: "0", chainId: L1, verifyingContract: settlement}`.
-- **`channelId` = `keccak256(abi.encode(keccak256("skim-channels/channel-id/v0"), l1ChainId, settlement, opener, salt))`.**
-  The settlement contract derives it at open, which breaks the circularity of `ChannelTerms.channelId`.
-- **`participantRoot` = `keccak256(abi.encode(address[]))`.** Participants must be strictly
-  ascending and nonzero. Anything else is rejected, not sorted.
-- **Strict decoding everywhere.** Bytes must re-encode to themselves. Solidity checks the
-  exact length (the ABI decoder already rejects dirty padding).
-- **`ExecutionProfile` commits to `kind` and `daSchemaHash`.** `kind` is
-  mock / native-reexecution / native-proof. A mock-profile request can't authorize native
-  settlement. `IAcceptedBlockRegistry.profileKind()` lets settlement compare the two.
+## What exists
+| Layer | Pieces |
+|---|---|
+| Shared (M0) | `channel-types` (Rust), `ChannelTypes.sol`, `ts/check-encodings.ts`. EIP-712 commitments, strict decoding, profile kinds plus `daSchemaHash` |
+| L1 witnesses (M1) | `channel-witness`: `WitnessPackage`, `verify`, `AnchorBook` (observe, attach, promote, reorg, prune), readiness, `collect_witness` |
+| Runtime (M1/M2) | `channel-runner`: hash-checked headers, `RpcConfirmations` (skim `safe`/`finalized`), `observe_back`, receipt evidence. CLI `skim-channels` |
+| L2 contracts | `L2AnchorInbox` (**mock feed**, labeled), `L1StateReader`, `ChannelExecutor`, `IChannelModule`, `SplitModule` |
+| L1 contracts | `AnchorRegistry` (BLOCKHASH/EIP-2935), `ChannelSettlement` (open/fund/settle/refund plus emergency exit), `AllocationFixture` |
+| Block acceptance | `CanonicalBlockRegistry` (permissionless; genesis, single-chain lineage, L1-recorded anchor, blob DA, `IStateTransitionVerifier`); `MockTransitionVerifier`, `MockAcceptedBlockRegistry` (both labeled mocks) |
+| Proof libraries | `RLP.sol` (strict, bounded), `MerklePatricia.sol` (inclusion/exclusion, inline nodes, exact proofs), `EthTypes.sol` (header, typed receipts, logs, accounts), `WitnessLib.sol` (the Solidity twin of `channel-witness::verify`) |
 
-## Decisions (M1)
-- **`WitnessPackage` = `abi.encode(anchor, AccountWitness[], StorageWitness[])`.** Sorted, no
-  duplicates, bounded: 256 accounts, 1,024 slots, 64 nodes per proof, 600 bytes per node.
-  `package_hash` = keccak of that encoding. The field is `slots`, because `storage` is a
-  Solidity keyword.
-- **`verify(pkg, trusted_anchor)` is the only way to a `VerifiedWitness`.**
-  - Absent accounts must carry zero fields and an exclusion proof.
-  - Slots in an empty trie must be zero with an empty proof, so the package is canonical.
-  - Reading anything uncovered is `NotWitnessed`, never zero.
-- **`AnchorBook` derives anchors from raw headers.** It hashes the bytes and requires
-  canonical RLP.
-  - **Promotion:** only on authenticated evidence at exactly the channel's policy, and only if
-    the confirmed head links back through observed headers. Promotion is recomputed on every
-    `promote`.
-  - **Invalidation:** reorgs and finalized conflicts invalidate an anchor and its descendants
-    permanently, and drop their witnesses.
-  - **Policies:** `FcrConfirmed` is refused outright. `Latest` needs `Mode::OptimisticExperiment`.
-- **`readiness()` reports `state_ready` and `proof_ready` separately.** A BAL-derived cached
-  value is state-ready but never proof-ready.
-- **`collect_witness` decides account presence from the proof, not from the answer's fields.**
-  It re-verifies everything against the authenticated anchor. There is no fallback RPC.
+## Key decisions
+- **Commitments** are EIP-712 struct hashes. The signed `requestHash` uses the domain
+  `{SkimChannels, 0, L1 chain, settlement}`.
+  - `channelId` binds L1 chain, settlement, opener and salt.
+  - Participants must be strictly ascending.
+- **Strict decoding everywhere.** Bytes must re-encode to themselves (Rust and Solidity), and
+  RLP must be canonical.
+- **Anchor authentication happens twice.**
+  - On L2, the inbox derives anchors from raw headers posted by the mock feed.
+  - On L1, `AnchorRegistry` records an anchor only if `keccak(rawHeader)` is L1's own
+    BLOCKHASH or EIP-2935 hash at that height.
+  - Settlement and emergency exits accept only L1-recorded anchors, so a lying L2 feed can't
+    get an outcome settled. An anchor from a block L1 later reorgs away can't be recorded on
+    the chain where settlement happens.
+- **Executor.** Terms, policy, request, input, executor, module code hash and execution
+  profile are all bound. Every participant's signature is checked (low-s). The witness is
+  verified against an inbox anchor within `maxAnchorLag`. The module runs via STATICCALL (a
+  writing module reverts). The executor has no mutable storage (`vm.accesses` checks this).
+- **Settlement.**
+  1. The registry's profile kind must equal the deployment's, so a mock can't serve a native
+     deployment.
+  2. The block is accepted with the deployment's profile, the header hashes to it, and the
+     receipts root matches.
+  3. The receipt is included and succeeded.
+  4. The log comes from the executor and binds the channel and request hash.
+  5. The request binds the terms, policy and profile, and its anchor is L1-recorded.
+  6. The outcome conserves the escrow.
 
-## Security tests (spec §12) covered so far
+  There is exactly one terminal transition: settle before the deadline, refund at or after it.
+- **Emergency exit (prototype; design in STAGE2).**
+  - `startExit` posts an all-signed request.
+  - `challengeExit` replaces it with a higher nonce inside the window; the window is not
+    extended.
+  - `finalizeExit` re-executes the approved module **on L1** with a witness verified at the
+    L1-recorded anchor.
+  - During an exit, the normal path can only settle the pending request.
+  - If nobody finalizes within a further window, refund reopens.
+- **Canonical acceptance.**
+  - The chain must extend the tip from a fixed genesis, so there are no forks.
+  - The L1 anchor must be recorded.
+  - `BLOBHASH(0)` must be present, so the block's data is on L1.
+  - The verifier must accept.
+  - Anyone may submit.
+  - `profileKind()` comes from the verifier, so security is exactly the verifier's.
+
+## Security tests (spec §12)
 | Test | Where |
 |---|---|
-| Advance H0 → H1 without reopening | `channel_advances_from_h0_to_h1_without_reopening` |
-| Mix proofs from two roots | `proofs_from_two_roots_are_rejected` |
-| Unauthenticated state root | `unauthenticated_roots_are_rejected` |
-| Cached value without a current proof | `bal_derived_value_is_state_ready_but_not_proof_ready` |
-| Reorg during witness collection | `reorg_invalidates_witnesses_and_replacement_needs_its_own`, `finalizing_a_competitor_invalidates_the_other_branch` |
-| Missing storage proof | `missing_or_truncated_storage_proofs_fail_closed` |
-| Modified receipt trie nodes | `modified_trie_nodes_are_rejected` (receipts) |
-| Modified receipt type or status | `modified_type_or_status_is_rejected` (receipts) |
-| Mock registry vs native profile | encoded in profile kind; *enforcement* is M2 settlement |
-| Changed native execution configuration | `profile_kind_and_config_change_the_hash` |
-| Canonical encoding (property) | `request_roundtrips_canonically`, `decode_never_panics…`, `package_decode_never_panics` |
+| H0 → H1 without reopening | Rust `channel_advances_from_h0_to_h1_without_reopening`; forge `test_readAndSplit_previewH0_settleH1_once`; e2e |
+| Mixed roots | Rust `proofs_from_two_roots_are_rejected`; forge `test_badPackagesRevert`, executor mixed-root case |
+| Unauthenticated root | Rust `unauthenticated_roots_are_rejected`, `a_header_with_a_swapped_state_root_is_refused`, anvil genesis case; forge `test_anchorNotOnL1Rejected` |
+| Cached value without a proof | `bal_derived_value_is_state_ready_but_not_proof_ready` |
+| Reorg during collection | `reorg_invalidates_witnesses_and_replacement_needs_its_own`, `finalizing_a_competitor_invalidates_the_other_branch` |
+| Missing proof fails closed | `missing_or_truncated_storage_proofs_fail_closed`; forge `test_unwitnessedReadReverts` |
+| Persistent write | `test_persistentWriteRejectedByStaticcall` (+ no executor storage writes) |
+| Unauthorized module | `test_unapprovedModuleRejected`, `test_emergencyExitModuleMustBeApprovedOnL1` |
+| Unaccepted L2 fork / block | `test_unacceptedBlockRejected`, `test_competingForkRejected` |
+| Modified trie nodes | Rust `modified_trie_nodes_are_rejected`; forge `test_tamperedNodesRevert`, `test_truncatedAndPaddedProofsRevert` |
+| Modified receipt type / status | Rust `modified_type_or_status_is_rejected`; forge `test_receiptTamperingRejected`, `test_failedReceiptRejected` |
+| Forged outcome emitter | `test_forgedEmitterRejected` |
+| Modified signed request | `test_signaturesAndBindingsEnforcedOnL2`, `test_modifiedOutcomeOrRequestRejected` |
+| Cross-channel reuse | `test_crossChannelReuseRejected` |
+| Double settlement | MVP test, e2e |
+| Settle/refund at the deadline | `test_deadlineBoundaryExactlyOneTransition` |
+| Withheld receipt → refund | `test_refundWithoutSequencerExactlyOnce`, e2e |
+| Mock registry vs native profile | `test_mockRegistryRejectedUnderNativeProfile` |
+| Changed native configuration | `profile_kind_and_config_change_the_hash` (all fields, including DA) |
+| Stale state in an emergency exit | `test_emergencyExitStaleRequestIsReplaced`, `test_normalSettleDuringExitOnlyForPendingRequest` |
+| **Properties** | payout conservation (`testFuzz_splitConserves`, `test_nonConservingOutcomeRejected`); canonical encoding and bounded parsing (Rust proptests, `testFuzz_rlpNeverPanics`, `testFuzz_randomProofsNeverProveMembership`) |
 
-**Mutation-checked** (check disabled → a test fails), 2026-10-22: anchor equality in
-`verify`; the empty-trie slot check; the absent-account fields check; the unauthenticated
-evidence filter; finalized-conflict invalidation; recomputed (non-sticky) promotion.
+**Mutation-checked** (disable the check → a named test fails), 2026-10-22:
+- **Rust (6):** anchor equality, empty-trie slot, absent-account fields, unauthenticated
+  evidence, finalized conflict, non-sticky promotion.
+- **Solidity, settlement and executor (16):** emitter, log binding, conservation, registry
+  profile kind, L1 anchor recorded, settle deadline, terminal status, receipt status, input
+  binding, signatures, module approval, canonical package, no trailing proof nodes.
+- **Solidity, emergency exit (10):** challenge nonce, exit signatures, challenge-window end,
+  finalize waits, pending-request match, exit anchor on L1, exit input, settle during exit,
+  refund grace, L1 module approval.
+
+## Measurements (anvil prague, `experiments/e2e-mock-local.json`; gas = receipt gasUsed)
+| | gas / bytes |
+|---|---|
+| L2 `execute` (2 signatures, 1-slot witness, split) | 282,670 gas |
+| L1 `settle` (receipt proof in a 1-tx L2 block) | 306,323 gas |
+| L1 `finalizeExit` (L1 re-execution, same witness) | 295,172 gas |
+| L1 `startExit` | 102,881 gas |
+| L1 anchor `record` | 111,062 gas |
+| L1 `open` / `fund` / `refund` / `withdraw` | 301,793 / 45,947 / 72,199 / 28,501 gas |
+| witness package (1 account with code, 1 slot) | 1,920 bytes |
+| settlement evidence | 2,528 bytes |
+
+Settlement in a busier L2 block costs more: receipt proofs grow with block size, and log
+decoding grows with the receipt. That is unmeasured. For this tiny module, L1 re-execution
+costs about the same as receipt settlement. That observation is from one data point and is
+not a general claim.
 
 ## Known limitations
-- **No authenticated header source yet.** `AnchorBook` takes raw headers and evidence through
-  the `ConfirmationSource` trait. Wiring both to skim's light client (finalized/safe hashes
-  plus raw headers) is not done. The ignored live test reads the header over RPC and trusts it.
-- **The live skim path is unexercised in this session.** No skim instance was running. skim
-  only serves `eth_getProof` for recent state roots, so a finalized anchor (~13 min old) may
-  already be outside what peers serve. This needs measuring.
-- **Witness updates from BALs are not attempted** (§13.1).
-- **Untested at the boundary:** `AnchorBook` storage is unbounded (no pruning) and `promote`
-  is O(n · depth).
-- **No signatures yet.** Only digests. ECDSA recovery and participant-set checks come with M2
-  settlement.
-- **No Solidity MPT verifier yet.** The receipt fixtures exist for it.
+- **Native verification (M3) is external and missing.** No compatible network or verifier
+  was available. `CanonicalBlockRegistry` takes an `IStateTransitionVerifier`, and only the
+  labeled mock exists. Next: target an EIP-8079 / EIP-8288 + EIP-8357 devnet when one is
+  runnable; L2BEAT's demo uses mock proofs as of 2026-10.
+- **The L2 anchor feed is a mock** (`L2AnchorInbox`, system key). L1 re-authentication makes
+  this safe for settlement, but not for liveness or correct previews.
+- **FCR (M4) is blocked.** There is no evidence source; `FcrConfirmed` is refused everywhere.
+- **The emergency exit needs a witness at the request's anchor.** skim serves proofs only for
+  recent roots, so finalization may need an archive node. The refund fallback covers a
+  witness that can't be obtained.
+  - Prototype choices (window length, no window extension, nonce = checkpoint version)
+    await owner review (STAGE2).
+- **Untested:**
+  - the live skim path (no skim instance was running; the ignored test exists);
+  - receipt evidence in multi-transaction L2 blocks on a real chain (covered by the 130-receipt
+    fixtures, but not end to end);
+  - blob DA end to end (forge `vm.blobhashes` only).
+- **Single-slot reads only in the demo.** Bounds: 256 accounts and 1,024 slots per package,
+  64 proof nodes, 600 bytes per node, 256 logs per receipt.
 
-## Next bounded task
-**M2a: the L1 receipt verifier in Solidity.** An MPT inclusion verifier plus a strict
-typed-receipt decoder (status, logs) and header decoding (`keccak(raw) == blockHash`,
-extract `receiptsRoot`), all tested against `fixtures/receipts/block-130.json`. That covers
-the valid cases and the tampered node, index, type and status cases, with bounded parsing
-and fuzzing. It needs no L2 and no native verification, and it unblocks `ChannelSettlement`.
-After that:
-- M2b: `L1StateReader` on L2, consuming `abi.encode(WitnessPackage)`.
-- M2c: the Read-and-Split demo against the mock registry.
+## Next tasks
+1. Owner review of the emergency-exit choices (STAGE2, "Prototype").
+2. M3: a real `IStateTransitionVerifier` on the first runnable native-rollup devnet. Then
+   replace the e2e's `MockAcceptedBlockRegistry` with `CanonicalBlockRegistry` and blob
+   submissions.
+3. Live skim run: finalized-anchor witness availability and latency (`--ignored` test, then
+   the e2e against skim as L1).
+4. M4: multi-transaction L2 blocks in the e2e (evidence size and gas vs. block size), witness
+   prefetching, batching several channels' receipts.

@@ -90,7 +90,7 @@ contract ChannelExecutor {
         if (c.signatures.length != c.participants.length) revert Mismatch("signature count");
         requestHash = ChannelTypes.requestSigningHash(r, l1ChainId, t.settlementContract);
         for (uint256 i; i < c.participants.length; ++i) {
-            if (_recover(requestHash, c.signatures[i]) != c.participants[i]) revert BadSignature(i);
+            if (ChannelTypes.recoverSigner(requestHash, c.signatures[i]) != c.participants[i]) revert BadSignature(i);
         }
 
         WitnessLib.WitnessPackage memory pkg = WitnessLib.decode(c.witness);
@@ -103,16 +103,5 @@ contract ChannelExecutor {
 
         // `view` interface: compiled to STATICCALL, so the module cannot write anything.
         outcome = IChannelModule(module).compute(c.input, reads, c.participants.length);
-    }
-
-    /// @dev 65-byte (r, s, v) signatures, low-s only (EIP-2).
-    function _recover(bytes32 digest, bytes calldata sig) internal pure returns (address) {
-        if (sig.length != 65) return address(0);
-        bytes32 rr = bytes32(sig[0:32]);
-        bytes32 ss = bytes32(sig[32:64]);
-        uint8 v = uint8(sig[64]);
-        if (uint256(ss) > 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0) return address(0);
-        if (v != 27 && v != 28) return address(0);
-        return ecrecover(digest, v, rr, ss);
     }
 }

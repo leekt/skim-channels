@@ -13,6 +13,8 @@ contract AnchorRegistry {
     address internal constant HISTORY = 0x0000F90827F1C53a10cb7A02335B175320002935;
 
     mapping(bytes32 anchorId => bool) public recorded;
+    /// The state root of each recorded anchor (for verifying witnesses on L1).
+    mapping(bytes32 anchorId => bytes32) public stateRootOf;
 
     event AnchorRecorded(bytes32 indexed anchorId, uint64 blockNumber, bytes32 blockHash, bytes32 stateRoot);
 
@@ -23,6 +25,7 @@ contract AnchorRegistry {
         if (h.number >= block.number || canonicalHash(h.number) != h.hash) revert NotCanonical(h.number, h.hash);
         anchorId = ChannelTypes.anchorId(ChannelTypes.L1Anchor(block.chainid, uint64(h.number), h.hash, h.stateRoot));
         recorded[anchorId] = true;
+        stateRootOf[anchorId] = h.stateRoot;
         emit AnchorRecorded(anchorId, uint64(h.number), h.hash, h.stateRoot);
     }
 

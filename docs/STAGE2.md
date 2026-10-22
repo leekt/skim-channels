@@ -53,13 +53,43 @@ The emergency path must:
 
 It does **not** remove the cost of proving existing L1 state (witnesses) or the DA obligation.
 
+## Prototype (implemented 2026-10-22, awaiting review)
+`ChannelSettlement.startExit` / `challengeExit` / `finalizeExit`, plus `CanonicalBlockRegistry`.
+
+- **Validity without the operator.** A channel's outcome is a pure function of
+  (request, input, L1 state at the anchor). `finalizeExit` re-runs the approved module on L1
+  (same code hash as on L2) with a witness verified against the request's **L1-recorded**
+  anchor. There is no L2 state to reconstruct: the ephemeral design pays off here.
+- **Stale state.** Any all-signed request can start an exit. During `challengeWindow`, anyone
+  can replace it with an all-signed request with a **strictly higher nonce**. The window is
+  not extended. During an exit, the normal receipt path can only settle the pending request.
+- **Liveness.** If nobody can finalize (for example, no witness for that anchor is obtainable)
+  within a further window, `refund` reopens. There is exactly one terminal transition.
+- **Block acceptance.** `CanonicalBlockRegistry` is permissionless. It requires genesis and
+  single-chain lineage, an L1-recorded anchor, the block's data in this L1 transaction's blob
+  (`BLOBHASH(0)`), and the verifier's approval. Its security is exactly the verifier's, and
+  only a labeled mock verifier exists.
+
+**Choices to review:**
+1. The nonce acts as the checkpoint version. No separate checkpoint type exists: a checkpoint
+   *is* a signed `FinalRequest`.
+2. The window is fixed per deployment, and challenges don't extend it.
+3. The refund grace is one more window.
+4. Exits must start before the channel deadline.
+5. L1 module copies are approved at deployment.
+
+**Measured on anvil:** `finalizeExit` costs 295k gas; receipt-based `settle` costs 306k.
+
+**Not yet:** 30-day governance exit window (no upgradeability exists, so there is nothing to
+govern yet), forced inclusion of L2 transactions, data-withholding handling in
+`CanonicalBlockRegistry` beyond the blob requirement.
+
 ## Effect on what is built now (M0/M1)
 
 - `ExecutionProfile` commits to `daSchemaHash`. A request signed under one DA scheme cannot
   settle under another, and a profile without L1 DA is distinguishable.
 - `ExecutionProfile.kind` separates `mock-local` from native kinds in the hash itself.
-- `FinalRequest.nonce` is kept so that checkpoints can extend it later. **No checkpoint or
-  challenge encoding is defined yet**: it waits for the stale-state model below.
+- `FinalRequest.nonce` serves as the checkpoint version in the emergency-exit prototype above.
 
 ## Status of Native Rollup verification (as of 2026-10)
 
