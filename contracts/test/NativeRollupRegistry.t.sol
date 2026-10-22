@@ -81,6 +81,15 @@ contract NativeRollupRegistryTest is Test {
         reg.acceptHistorical(
             other, 60, vm.parseJsonBytesArray(json, ".accountProof"), vm.parseJsonBytesArray(json, ".storageProof")
         );
+        // A height whose history slot exists but holds a different hash.
+        native.set(7, vm.parseJsonBytes32(json, ".stateRoot7"), bytes32(0), 0);
+        vm.expectRevert(abi.encodeWithSelector(NativeRollupRegistry.Rejected.selector, "hash not in history"));
+        reg.acceptHistorical(
+            vm.parseJsonBytes(json, ".header7"),
+            60,
+            vm.parseJsonBytesArray(json, ".accountProof"),
+            vm.parseJsonBytesArray(json, ".storageProof7")
+        );
         // Outside the history window / not later.
         vm.expectRevert(abi.encodeWithSelector(NativeRollupRegistry.Rejected.selector, "history window"));
         reg.acceptHistorical(header, 50, new bytes[](0), new bytes[](0));
