@@ -15,7 +15,7 @@
   <img src="assets/concept.svg" alt="skim-channels in one picture: L1 holds state and escrow; skim proves L1 reads; the channel executes on L2; L1 re-executes the L2 block and settles" width="100%">
 </p>
 
-**skim-channels** is an experimental architecture for running computation in ephemeral execution channels on a native rollup, with Ethereum L1 as the only persistent state. A second path runs **stateful apps**: Solidity contracts that keep their own state across many interactions and L1 snapshots, read L1 through skim, and settle net results on L1 ([stateful runtime](docs/guide/stateful-runtime.md)).
+**skim-channels** is an experimental architecture for running computation in ephemeral execution channels on a native rollup, with Ethereum L1 as the only persistent state. A second path runs **stateful apps**: Solidity contracts that keep their own state across many interactions and L1 snapshots, read L1 through skim, and settle optimistically on L1 with their account state committed there ([stateful runtime](docs/guide/stateful-runtime.md)).
 
 A channel holds its participants' funds in an L1 escrow. It reads any L1 contract at an authenticated block through [skim](https://github.com/leekt/skim)'s verified proofs, computes on L2 without keeping application state of its own, and settles its outcome back on L1 exactly once. L1 checks the L2 execution by re-executing the block itself (the EIP-8079-style `EXECUTE` precompile). If the operator disappears, L1 re-runs the channel's computation directly.
 
@@ -55,8 +55,8 @@ Three pieces arrived at once:
 | | Where it lives | Lifetime |
 |---|---|---|
 | L1 reads | One pinned, proven snapshot per batch (`L1View`) | Per batch |
-| AppState (book, nonces, obligations) | `ClearingApp` on a local executor, which L1 doesn't trust | Across batches and L1 snapshots |
-| Escrow, finalized balances, payouts | L1 `ClearingSettlement` (each fill re-checked; signatures challengeable) | Permanent |
+| AppState (accounts, book, nonces) | `ClearingBook` on a local executor, which L1 doesn't trust | Across batches and L1 snapshots |
+| Escrow, the account root, queues, payouts | L1 `ClearingChannel` (optimistic; one-transaction challenges per fill or account) | Permanent |
 
 **Lifecycle:** open and fund on L1 → preview against newer anchors as L1 changes (no reopen) → every participant signs one final request → it executes on L2 → L1 accepts the L2 block (re-execution) → the receipt is proven and the channel settles once. Without settlement by the deadline, anyone can refund. If the operator is gone, anyone can start the [emergency exit](docs/guide/stage-2.md).
 
@@ -70,8 +70,7 @@ Three pieces arrived at once:
 | **Settlement cost** | L1 `settle` 320k gas (1-tx L2 block) → ~396k (127 or 255 txs); `settleFromBlock` 281k vs. 315k per channel (forge, two in one block); evidence 2.5–3.5 KB ([log](docs/experiments/m4-settlement-cost.md)) |
 | **Native verification cost** | ~16M gas per L2 block (the gas limit is charged even for empty blocks): **not cheaper than L1**, see [app channels](docs/guide/app-channels.md) |
 | **App channels (accounting, mock verifier)** | Operator gone before or after checkpoints: every right rebuilt from L1 events and calldata alone and claimed; the vault drains exactly; the one-day fence holds ([log](docs/experiments/app-channels-accounting.md)) |
-| **Clearing v2** | Optimistic settlement with the account root on L1: 14.6k gas per fill (dense) vs 45.5k when the same batch is fully verified at once and 67.4k as one L1 transaction per fill. Handover from L1 data alone, forced orders ([log](docs/experiments/clearing-v2.md)) |
-| **Stateful clearing** | One app's state carried across L1 snapshots H → H+1 on a local executor. Reorged anchors are rolled back and replayed, and replay from pinned evidence is deterministic. L1 re-checks every fill. With no operator, every balance is withdrawable. Live reads through skim on Sepolia ([log](docs/experiments/clearing-runtime.md)) |
+| **Stateful clearing** | One app's Solidity state carried across L1 snapshots on a local executor; optimistic settlement with the account root on L1: 14.6k gas per fill (dense) vs 45.5k for the same batch fully verified at once and 67.4k as one L1 transaction per fill. Multi-batch reorg recovery, proofs fetched before rollback, handover from L1 data alone, forced orders and freeze. Live reads through skim on Sepolia ([log](docs/experiments/clearing.md)) |
 | **Prediction rounds** | Optimistic rounds, about 4–15× cheaper per user than the same game on L1 at 100 users. Review fixes for challenge periods, request coverage, deadlines and witness loss ([cost](docs/experiments/prediction-round-cost.md), [fixes](docs/experiments/prediction-review-fixes.md)) |
 | **Correctness** | Rust, Solidity and TypeScript suites (`scripts/check.sh`); every security check mutation-checked (removing it makes a named test fail) |
 
@@ -88,8 +87,8 @@ Three pieces arrived at once:
 | `contracts/src/verifiers` | `WitnessVerifier`, `ReceiptVerifier`, `ExecuteVerifier` (EXECUTE), `ProofDependencyVerifier` (EIP-8288 adapter, not deployable yet) |
 | `crates/channel-app` | App channels: exit/credit trees, the reference ledger (mock prover), net diffs, recovery from L1 data |
 | `contracts/src/app` | `AppChannelVault`, `AppLeaves`, `IAppCheckpointVerifier`, `MockAppCheckpointVerifier` (labeled mock) |
-| `contracts/src/predict`, `contracts/src/clearing` | Prediction rounds (optimistic); clearing (`ClearingApp` and `L1View` for the executor; `ClearingSettlement` and `ClearingChecker` on L1) |
-| `ts/runtime` | The stateful runtime: `L1ReadView` (skim snapshots, readiness, streams), executor checkpoints, the clearing operator (rebase and replay), the evidence store |
+| `contracts/src/predict`, `contracts/src/clearing` | Prediction rounds (optimistic); clearing (`ClearingBook` and `L1View` for the executor; `ClearingChannel` + `ClearingDisputes` + `ClearingCodec` on L1; `ClearingLedger` shared; cost controls `ClearingDirectBatch`, `ClearingL1`) |
+| `ts/runtime` | The stateful runtime: `L1ReadView` (skim snapshots, readiness, rewinds), executor checkpoints, the batch journal and recovery engine, the clearing operator, the evidence store |
 | `ts/` | viem cross-checks of every commitment; `e2e.ts` (two anvil chains), `e2e-native.ts` (ethrex), `e2e-app.ts` (app-channel recovery), `e2e-predict.ts`, `e2e-clearing.ts`, `live-skim-clearing.ts` (needs `SKIM_RPC`) |
 
 ## Quick start

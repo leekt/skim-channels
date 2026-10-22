@@ -83,10 +83,47 @@ export class L1ReadView {
     }
   }
 
-  /** Is the snapshot's block still the canonical block at its height? */
+  /** The node's current head (state-ready on skim). */
+  async head(): Promise<bigint> {
+    return BigInt(await this.rpc<Hex>("eth_blockNumber", []));
+  }
+
+  /**
+   * canonical: the node's block at that height is this one. orphaned: the node has a
+   * different block there. unknown: the node returns nothing for that height (e.g. it no
+   * longer serves the header) — not evidence of a reorg.
+   */
+  async canonicalStatus(snap: Snapshot): Promise<"canonical" | "orphaned" | "unknown"> {
+    let b: any;
+    try {
+      b = await this.rpc<any>("eth_getBlockByNumber", [`0x${snap.number.toString(16)}`, false]);
+    } catch {
+      return "unknown";
+    }
+    if (!b) return "unknown";
+    return b.hash === snap.hash ? "canonical" : "orphaned";
+  }
+
+  /** Is the snapshot's block known to be canonical? (unknown counts as no) */
   async canonical(snap: Snapshot): Promise<boolean> {
-    const b = await this.rpc<any>("eth_getBlockByNumber", [`0x${snap.number.toString(16)}`, false]);
-    return !!b && b.hash === snap.hash;
+    return (await this.canonicalStatus(snap)) === "canonical";
+  }
+
+  /**
+   * On skim: ask the block stream to continue from `snap` for the `watched` contracts (skim
+   * needs at least one). A `rewind` to below its height means the block left the chain.
+   * "unsupported" on nodes without skim_streamNext.
+   */
+  async skimRewound(snap: Snapshot, watched: Address[]): Promise<"rewound" | "ok" | "unsupported" | "error"> {
+    let r: any;
+    try {
+      r = await this.streamNext({ recent: [{ number: Number(snap.number), hash: snap.hash }], addresses: watched, maxBlocks: 1 });
+    } catch (e: any) {
+      // -32601: no such method (not skim). Anything else: skim answered with an error.
+      return String(e?.code ?? e?.cause?.code) === "-32601" || /not.*found|does not exist/i.test(String(e?.message)) ? "unsupported" : "error";
+    }
+    const rw = (r?.events ?? []).find((e: any) => e.type === "rewind");
+    return rw && BigInt(rw.to?.number ?? rw.to ?? 0) < snap.number ? "rewound" : "ok";
   }
 
   /**

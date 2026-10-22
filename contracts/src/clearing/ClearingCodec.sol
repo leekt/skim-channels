@@ -9,7 +9,7 @@ import {WitnessVerifier} from "../verifiers/WitnessVerifier.sol";
 import {WitnessLib} from "../libraries/WitnessLib.sol";
 import {ChannelTypes} from "../libraries/ChannelTypes.sol";
 
-/// @notice Stateless helpers for the clearing channel (v2), split out for code size: the
+/// @notice Stateless helpers for the clearing channel, split out for code size: the
 ///         account-root transition of a proposal, the L1 price at a recorded anchor, and the
 ///         replay of one account through a batch (ClearingLedger) for disputes.
 contract ClearingCodec {

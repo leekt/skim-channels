@@ -4,8 +4,8 @@ pragma solidity ^0.8.28;
 import {ClearingRules as R} from "./ClearingRules.sol";
 import {ChannelTypes} from "../libraries/ChannelTypes.sol";
 
-/// @notice Stateless half of ClearingSettlement (code-size split): decodes a batch's fills
-///         and applies ClearingRules to each, exactly as ClearingApp did when it ran them.
+/// @notice Full on-L1 verification of a batch of fills for ClearingDirectBatch (the cost
+///         control): decodes the fills and applies ClearingRules to each, in order.
 contract ClearingChecker {
     uint256 public constant MAX_USERS = 64;
     uint256 public constant MAX_FILLS = 128;
@@ -28,7 +28,7 @@ contract ClearingChecker {
     /// @param at for each fill, the indices in `users` of its two traders (a, then b)
     /// @param floors each user's settled nonce floor
     /// @param free each user's free escrow [ETH, USD] (balance minus reserved withdrawals);
-    ///        after every fill, each spending side must still be ≥ 0 — the check ClearingApp
+    ///        after every fill, each spending side must still be ≥ 0 — the check ClearingBook
     ///        makes as it executes, in the same order
     /// @return dEth net ETH change per user
     /// @return dUsd net USD change per user

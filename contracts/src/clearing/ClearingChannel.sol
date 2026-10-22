@@ -8,7 +8,7 @@ import {ClearingRules as R} from "./ClearingRules.sol";
 import {SparseTree16} from "../predict/SparseTree16.sol";
 import {ChannelTypes} from "../libraries/ChannelTypes.sol";
 
-/// @notice L1 side of the clearing channel, v2: optimistic, with the app's account state
+/// @notice L1 side of the clearing channel: optimistic, with the app's account state
 ///         committed on L1.
 ///
 /// - Every batch commits a new **account root** (each trader's balances, deposit and

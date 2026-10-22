@@ -58,7 +58,7 @@ jobs:
     # Cross-language commitments, then Read-and-Split on two anvil chains (mock acceptance).
     name: Encodings and anvil e2e
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
@@ -85,9 +85,6 @@ jobs:
       - name: e2e prediction rounds (anvil, optimistic, no mocks)
         working-directory: ts
         run: npm run -s e2e-predict
-      - name: e2e stateful clearing (anvil L1 + local executor)
+      - name: e2e stateful clearing (optimistic settlement, recovery, handover, forced orders)
         working-directory: ts
         run: npm run -s e2e-clearing
-      - name: e2e clearing v2 (optimistic, handover, forced orders)
-        working-directory: ts
-        run: npm run -s e2e-clearing-v2

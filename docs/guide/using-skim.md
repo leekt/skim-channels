@@ -34,7 +34,7 @@ The clearing app ([stateful runtime](stateful-runtime.md)) also uses:
 | Previews (state-ready) | `eth_getStorageAt` at `{blockHash}`; on skim a tracked key is kept current from BALs. Never an execution input |
 | Execution inputs (proof-ready) | `eth_getProof` at `{blockHash}`, verified again by `L1View` on the executor |
 
-Measured live on Sepolia: [clearing runtime](../experiments/clearing-runtime.md#live-skim-on-sepolia-skim_rpc-npm-run-live-skim).
+Measured live on Sepolia: [clearing runtime](../experiments/clearing.md#verification).
 
 ## Not used (yet)
 

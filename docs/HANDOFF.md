@@ -32,36 +32,30 @@ governance, forced inclusion). Read first: [PROJECT](../PROJECT.md) (spec v0.1),
 - **Cost:** a round costs 4–15× less per user than on L1 at 100 users. Entry and exit cost ~265k more, recovered after ~3.5 rounds at 1 stake per user. Disputes are about 150k gas each ([log](experiments/prediction-round-cost.md)).
 - **Next:** the OTC and AMM rules (apps 3 and 4) on the same optimistic layer; blob DA for tickets and leaves; deposit cost.
 
-## Stateful clearing runtime (2026-10-22)
+## Stateful clearing (2026-10-23)
 - **Model:** [stateful runtime](guide/stateful-runtime.md).
-  - **L1ReadView:** skim snapshots, state-ready vs proof-ready, `skim_streamNext`.
-  - **AppState:** `ClearingApp`, Solidity on a local executor that L1 doesn't trust.
-  - **L1Settlement:** `ClearingSettlement`. Every fill is re-checked with the shared `ClearingRules`; only signatures are optimistic.
+  - **L1ReadView:** skim snapshots, state-ready vs proof-ready, rewinds.
+  - **AppState:** `ClearingBook`, Solidity on a local executor that L1 doesn't trust.
+  - **L1 settlement:** `ClearingChannel`. Optimistic, with the account root on L1 and one-transaction challenges per fill or account that replay the shared `ClearingLedger`.
 - **Built:**
   - `contracts/src/clearing`;
-  - `ts/runtime/{l1view,executor,clearing,evidence}.ts`;
+  - `ts/runtime/{l1view,executor,batches,clearing,evidence,tree}.ts`;
   - `ts/e2e-clearing.ts` (deterministic, in CI);
   - `ts/live-skim-clearing.ts` (`SKIM_RPC`, not in CI).
-- **Verified:**
-  - **Tests:** 15 forge tests, with 22 mutants all caught.
-  - **e2e:** state kept across H → H+1; replay from pinned evidence is deterministic; tampered or missing witnesses are refused; a reorged anchor is rolled back and replayed; a partial withdrawal forces a rebase while trading continues; with no operator, everything is withdrawn.
-  - **Live:** skim reads on Sepolia.
-  - Results: [clearing runtime](experiments/clearing-runtime.md).
+- **Runtime recovery** (review of 5db7064):
+  - a journal on disk with batch states;
+  - recovery from the earliest affected batch, with proofs fetched before rollback;
+  - only accepted actions replayed;
+  - canonical / orphaned / unknown, with skim rewinds consumed by `tick()`;
+  - anchors re-pinned when they age;
+  - a lost executor rebuilt from L1 plus the journal.
+- **Verified:** 31 forge tests and 40 mutants (one equivalent); an e2e covering reorg, recovery, handover and freeze; live skim reads. Results and costs: [clearing](experiments/clearing.md).
+- **Cost:** 14.6k gas per fill dense vs 45.5k for the same batch fully verified at once vs 67.4k as one L1 transaction per fill. When every account trades once per batch, about break-even with per-transaction L1.
 - **Open:**
-  - censorship resistance for orders;
-  - partial fills, more assets, blob DA;
-  - a live settlement through skim (no escrow on a Glamsterdam network yet);
-  - a cost comparison with clearing directly on L1.
-
-## Clearing v2 (2026-10-23)
-- **Design:** [clearing v2](experiments/clearing-v2.md).
-  - Optimistic: L1 checks nothing per fill.
-  - Each batch publishes packed fills and changed account leaves, and L1 commits the account root.
-  - `challengeFill` and `challengeAccount` replay the shared `ClearingLedger`.
-  - Anyone can propose after `takeoverDelay`; forced orders and freeze are in.
-- **Verified:** 28 forge tests; 40 mutants (one equivalent); anvil e2e with a challenge, a forced order, a handover rebuilt from L1 alone, and a freeze with exits.
-- **Cost:** 14.6k gas per fill dense vs 45.5k (direct batch) vs 67.4k (per-transaction L1). Sparse (each account once): about break-even with per-transaction L1. v1's optimistic signatures don't pay against the direct batch.
-- **Open:** the runtime recovery issues from the 5db7064 review (multi-batch recovery, proof failure during rebase, replaying rejected actions, rewind consumption, a three-valued canonical check, anchor ageing under real block progress).
+  - matching isn't forced;
+  - unpublished resting orders are lost on handover;
+  - discarded-proposal recovery isn't automatic;
+  - no live settlement through skim yet.
 
 ## Baseline
 - **skim** `df686b70cd567210860582097e25a3f8b3fe6616`, used over JSON-RPC with no crate

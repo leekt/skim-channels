@@ -7,7 +7,7 @@ import {L1View} from "./L1View.sol";
 import {SparseTree16} from "../predict/SparseTree16.sol";
 import {ChannelTypes} from "../libraries/ChannelTypes.sol";
 
-/// @notice The clearing app for ClearingChannel (v2), on the app's executor (local, not
+/// @notice The clearing app for ClearingChannel, on the app's executor (local, not
 ///         trusted by L1). AppState: every account exactly as L1 commits it (ClearingLedger),
 ///         the order book, and the open batch. Each batch pins one L1 anchor in L1View and
 ///         reads only what it needs there: the price, the channel's user list, the deposits

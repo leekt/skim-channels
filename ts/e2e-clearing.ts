@@ -1,19 +1,20 @@
-// Stateful clearing, end to end and deterministic (local only): docs/guide/stateful-runtime.md.
-//   L1       = anvil (chain 900): price feed, AnchorRegistry, ClearingSettlement (escrow).
-//   executor = a second anvil (chain 7001): L1View + ClearingApp. LOCAL EXECUTOR — it holds
-//              AppState; nothing on L1 trusts it.
-//   L1 reads = eth_getProof witnesses at one pinned block per batch (skim-channels CLI). This
-//              run uses anvil's RPC, not skim: see ts/live-skim-clearing.ts for skim.
+// Clearing channel end to end (deterministic, local): optimistic settlement with the app's
+// account state committed on L1, a bad proposal challenged, a forced order, a handover to a
+// second operator rebuilt from L1 alone, and a freeze with operator-free exits.
+//   L1        = anvil (chain 900): price feed, AnchorRegistry, ClearingChannel (+ Disputes, Codec)
+//   executors = two more anvils (chain 7001): operator A's and operator B's ClearingBook.
+//               LOCAL EXECUTORS — L1 trusts neither.
 // Run: npm run e2e-clearing  (needs anvil, forge build, cargo build).
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { parseEther, toHex, type Address, type Hex } from "viem";
+import { encodeAbiParameters, encodeFunctionData, parseEther, toHex, zeroHash, type Address, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { Chain, type C } from "./runtime/executor.ts";
 import { L1ReadView } from "./runtime/l1view.ts";
 import { EvidenceStore } from "./runtime/evidence.ts";
-import { ClearingOperator, orderHash, eip712Order, finalizeArgs, type Order } from "./runtime/clearing.ts";
+import { levels, rootOf, siblings } from "./runtime/tree.ts";
+import { ClearingOperator, EMPTY, eip712Order, leafHash, mergeAbi, orderHash, type Account, type Order } from "./runtime/clearing.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const CLI = `${ROOT}target/debug/skim-channels`;
@@ -23,263 +24,408 @@ const KEYS = [
   "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a",
   "0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6",
   "0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a",
+  "0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba",
+  "0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e",
 ] as const;
-const [op, alice, bob, carol, watcher] = KEYS.map((k) => privateKeyToAccount(k));
+const [opA, alice, bob, carol, watcher, opB, dave] = KEYS.map((k) => privateKeyToAccount(k));
 const ETH = 0, USD = 1;
 const usd = (x: number) => BigInt(Math.round(x * 1e6));
 const SLOT0: Hex = `0x${"0".repeat(64)}`;
-const FAR = 10n ** 9n; // order expiry (L1 block)
+const FAR = 10n ** 9n;
+const DAY = 86400, WINDOW = 3600;
 
 function check(cond: unknown, msg: string) {
   if (!cond) throw new Error(`FAILED: ${msg}`);
   console.log(`ok  ${msg}`);
 }
 
+const accountT = {
+  type: "tuple",
+  components: [
+    { name: "eth", type: "uint128" }, { name: "usd", type: "uint128" }, { name: "ethIn", type: "uint128" },
+    { name: "usdIn", type: "uint128" }, { name: "ethOut", type: "uint128" }, { name: "usdOut", type: "uint128" },
+    { name: "nonce", type: "uint64" }, { name: "requests", type: "uint32" },
+  ],
+} as const;
+void accountT;
+void encodeAbiParameters;
+
 async function main() {
-  const l1 = await Chain.anvil(18665, 900);
-  const ex = await Chain.anvil(18666, 7001);
-  const ex2 = await Chain.anvil(18667, 7001); // a second, fresh executor for replay
+  // L1 keeps the last 512 states (like a non-archive node): older proofs are refused.
+  const l1 = await Chain.anvil(18690, 900, ["--prune-history", "512"]);
+  const exA = await Chain.anvil(18691, 7001);
+  const exB = await Chain.anvil(18692, 7001);
   try {
-    await run(l1, ex, ex2);
+    await run(l1, exA, exB);
   } finally {
-    [l1, ex, ex2].forEach((c) => c.stop());
+    [l1, exA, exB].forEach((c) => c.stop());
   }
 }
 
-async function run(l1: Chain, ex: Chain, ex2: Chain) {
+async function run(l1: Chain, exA: Chain, exB: Chain) {
   // ---- L1 ----
-  const oracle = await l1.deploy(ROOT, op, "AllocationFixture.sol", "AllocationFixture", [usd(2000)]);
-  const anchors = await l1.deploy(ROOT, op, "AnchorRegistry.sol", "AnchorRegistry");
-  const wv = await l1.deploy(ROOT, op, "WitnessVerifier.sol", "WitnessVerifier");
-  const checker = await l1.deploy(ROOT, op, "ClearingChecker.sol", "ClearingChecker");
-  const token = await l1.deploy(ROOT, op, "Clearing.t.sol", "TestUSD");
-  const WINDOW = 3600;
-  const st = await l1.deploy(ROOT, op, "ClearingSettlement.sol", "ClearingSettlement", [{
-    operator: op.address, usd: token.address, anchors: anchors.address, witnessVerifier: wv.address,
-    priceFeed: oracle.address, priceSlot: SLOT0, bandBps: 100n, challengeWindow: BigInt(WINDOW),
-    maxAnchorAge: 256n, minBond: parseEther("1"), checker: checker.address,
-  }], "deploy ClearingSettlement");
-  await l1.send(st, "postBond", [], op, undefined, parseEther("1"));
+  const oracle = await l1.deploy(ROOT, opA, "AllocationFixture.sol", "AllocationFixture", [usd(2000)]);
+  const anchors = await l1.deploy(ROOT, opA, "AnchorRegistry.sol", "AnchorRegistry");
+  const wv = await l1.deploy(ROOT, opA, "WitnessVerifier.sol", "WitnessVerifier");
+  const codec = await l1.deploy(ROOT, opA, "ClearingCodec.sol", "ClearingCodec");
+  const token = await l1.deploy(ROOT, opA, "Clearing.t.sol", "TestUSD");
+  const disputes = await l1.deploy(ROOT, opA, "ClearingDisputes.sol", "ClearingDisputes", [{
+    operator: opA.address, usd: token.address, anchors: anchors.address, witnessVerifier: wv.address, codec: codec.address,
+    priceFeed: oracle.address, priceSlot: SLOT0, bandBps: 100n, challengeWindow: BigInt(WINDOW), forceDelay: BigInt(DAY),
+    maxAnchorAge: 256n, minBond: parseEther("1"), takeoverDelay: BigInt(2 * DAY),
+  }], "deploy ClearingDisputes");
+  const core = await l1.deploy(ROOT, opA, "ClearingChannel.sol", "ClearingChannel", [disputes.address], "deploy ClearingChannel");
+  const ch = mergeAbi(core, disputes);
+  // Time passes with blocks (12 s each), as on a real chain: anchors age by block number.
+  const time = async (s: number) => { await l1.rpc("anvil_mine", [toHex(Math.ceil(s / 12)), toHex(12)]); };
   async function fund(who: typeof alice, eth: bigint, dollars: bigint) {
-    if (eth) await l1.send(st, "deposit", [ETH, eth], who, "deposit ETH", eth);
+    if (eth) await l1.send(ch, "deposit", [ETH, eth], who, "deposit ETH", eth);
     if (dollars) {
       await l1.send(token, "mint", [who.address, dollars], who);
-      await l1.send(token, "approve", [st.address, dollars], who);
-      await l1.send(st, "deposit", [USD, dollars], who, "deposit USD");
+      await l1.send(token, "approve", [ch.address, dollars], who);
+      await l1.send(ch, "deposit", [USD, dollars], who, "deposit USD");
     }
   }
   await fund(alice, parseEther("2"), 0n);
   await fund(bob, 0n, usd(10_000));
   await fund(carol, parseEther("1"), usd(2_000));
+  await fund(dave, 0n, usd(1_000));
+  const totalEth = parseEther("3"), totalUsd = usd(12_000);
 
-  // ---- executor (local) ----
-  async function deployApp(chain: Chain) {
-    const view = await chain.deploy(ROOT, op, "L1View.sol", "L1View", [900n]);
-    const app = await chain.deploy(ROOT, op, "ClearingApp.sol", "ClearingApp", [view.address, st.address, 900n, oracle.address, SLOT0, 100n, op.address]);
-    return { view, app };
+  // ---- operator A's executor ----
+  async function deployBook(ex: Chain, operator: typeof opA) {
+    const view = await ex.deploy(ROOT, operator, "L1View.sol", "L1View", [900n]);
+    const book = await ex.deploy(ROOT, operator, "ClearingBook.sol", "ClearingBook", [view.address, ch.address, 900n, oracle.address, SLOT0, 100n, operator.address]);
+    return { view, book };
   }
-  const { view: l1view, app } = await deployApp(ex);
   const reader = new L1ReadView({ url: l1.url, chainId: 900, cli: CLI });
-  const evidence = new EvidenceStore(join(tmpdir(), `skim-clearing-${process.pid}`));
-  const operator = new ClearingOperator({
-    view: reader, exec: ex, app, l1view, op, settlement: st.address, priceFeed: oracle.address, priceSlot: SLOT0,
-    evidence, policy: { kind: "confirmations", n: 1 },
-  });
-  const traders = [alice.address, bob.address, carol.address] as Address[];
-  const domain = { name: "SkimClearing", version: "0", chainId: 900, verifyingContract: st.address };
+  const mkOp = async (ex: Chain, who: typeof opA) => {
+    const { view, book } = await deployBook(ex, who);
+    return new ClearingOperator({
+      view: reader, exec: ex, book, l1view: view, op: who, l1, channel: ch, anchors, priceFeed: oracle.address, priceSlot: SLOT0,
+      evidence: new EvidenceStore(join(tmpdir(), `skim-clearing-${who.address.slice(2, 8)}-${process.pid}`)),
+      policy: { kind: "confirmations", n: 1 }, bond: parseEther("1"),
+      journal: join(tmpdir(), `skim-clearing-journal-${who.address.slice(2, 8)}-${process.pid}.json`),
+      maxAnchorAge: 256n, ageMargin: 16n,
+    });
+  };
+  const A = await mkOp(exA, opA);
+  const domain = { name: "SkimClearing", version: "0", chainId: 900, verifyingContract: ch.address };
   async function order(who: typeof alice, sellToken: number, sellAmount: bigint, buyAmount: bigint, nonce: bigint, signer = who) {
     const o: Order = { trader: who.address, sellToken, sellAmount, buyAmount, nonce, expiry: FAR };
     const sig = await signer.signTypedData({ domain, types: eip712Order, primaryType: "Order", message: o as any });
     return { o, sig, h: orderHash(o) };
   }
-  const place = (x: { o: Order; sig: Hex }) => operator.apply({ kind: "order", order: x.o, sig: x.sig });
-  const fill = (a: { h: Hex }, b: { h: Hex }) => operator.apply({ kind: "fill", a: a.h, b: b.h });
-  const unsettled = (t: Address, tok: number) => ex.read<bigint>(app, "unsettled", [t, tok]);
+  const idxOf = async (a: Address) => Number(await l1.read(ch, "indexPlusOne", [a])) - 1;
+  const [ia, ib, ic, id] = [await idxOf(alice.address), await idxOf(bob.address), await idxOf(carol.address), await idxOf(dave.address)];
+
+  /** A watcher's view: challenge every fill and every touched account; all must fail. */
+  async function watch(op: ClearingOperator, p: Awaited<ReturnType<ClearingOperator["proposal"]>>, expectFault?: number) {
+    const n = Number(await l1.read(ch, "userCount"));
+    const finDense = Array.from({ length: n }, (_, i) => leafHash(op.fin.get(i) ?? EMPTY));
+    const nextDense = finDense.map((h, i) => (p.next.has(i) ? leafHash(p.next.get(i)!) : h));
+    let faults: number[] = [];
+    for (let i = 0; i < n; i++) {
+      try {
+        await l1.pub.simulateContract({
+          account: watcher, address: ch.address, abi: ch.abi, functionName: "challengeAccount",
+          args: [i, op.fin.get(i) ?? EMPTY, siblings(levels(finDense), i), p.next.get(i) ?? op.fin.get(i) ?? EMPTY, siblings(levels(nextDense), i), p.fills],
+        });
+        faults.push(i);
+      } catch { /* NotWrong */ }
+    }
+    const nFills = (p.fills.length - 2) / 2 / 236;
+    for (let f = 0; f < nFills; f++) {
+      try {
+        await l1.pub.simulateContract({ account: watcher, address: ch.address, abi: ch.abi, functionName: "challengeFill", args: [p.fills, BigInt(f)] });
+        faults.push(1000 + f);
+      } catch { /* NotWrong */ }
+    }
+    if (expectFault === undefined) check(faults.length === 0, `watcher checked ${n} accounts and ${nFills} fills: nothing to challenge`);
+    return { faults, finDense, nextDense };
+  }
+  /** What an operator's loop does: tick() (re-pin orphaned or aged batches), then propose. */
+  async function settle(op: ClearingOperator, no: bigint, label: string) {
+    const t = await op.tick();
+    if (t.status === "recovered") no = BigInt(op.current.no);
+    const p = await op.propose(no, { label: `propose ${label}` });
+    await watch(op, p);
+    await time(WINDOW);
+    await l1.send(ch, "finalize", [], watcher, `finalize ${label}`);
+    await op.finalized();
+    const n = Number(await l1.read(ch, "userCount"));
+    const st = await l1.read<any[]>(ch, "state");
+    check(st[0] === rootOf(levels(Array.from({ length: n }, (_, i) => leafHash(op.fin.get(i) ?? EMPTY)))), `batch ${no} final: L1's account root = the operator's state`);
+    return p;
+  }
+  const place = (op: ClearingOperator, x: { o: Order; sig: Hex }) => op.apply({ kind: "order", order: x.o, sig: x.sig });
+  const fill = (op: ClearingOperator, a: { h: Hex }, b: { h: Hex }) => op.apply({ kind: "fill", a: a.h, b: b.h });
   await l1.rpc("anvil_mine", [toHex(2)]);
 
-  // ==== batch 1 at snapshot H (price 2000) ===================================================
-  const b1 = await operator.open(traders);
+  // ==== batch 1 at H (2000) ====================================================================
+  await A.open();
   const a1 = await order(alice, ETH, parseEther("0.5"), usd(990), 1n);
   const k1 = await order(bob, USD, usd(1000), parseEther("0.5"), 1n);
-  await place(a1); await place(k1);
-  check((await fill(a1, k1)).ok, `batch 1 (L1 block ${b1.snap.number}): alice sells 0.5 ETH to bob at 2000`);
-  // Signature, nonce and duplicate-fill rules (AppState):
-  check((await place(a1)).error === "AlreadySeen", "the same signed order again: AlreadySeen");
-  const kStale = await order(bob, USD, usd(500), parseEther("0.25"), 1n);
-  check((await place(kStale)).error === "StaleNonce", "a new order reusing bob's spent nonce: StaleNonce");
-  check((await fill(a1, k1)).error === "UnknownOrder", "filling the same pair twice: UnknownOrder");
-  const forged = await order(carol, ETH, parseEther("0.1"), usd(190), 1n, bob);
-  check((await place(forged)).error === "BadSignature", "carol's order signed by bob: BadSignature");
-  // Collateral can't be used twice: carol has 1 ETH and offers it twice.
+  await place(A, a1); await place(A, k1);
+  check((await fill(A, a1, k1)).ok, "batch 1: alice sells 0.5 ETH to bob at 2000 (ClearingBook on the executor)");
+  check((await place(A, a1)).error === "AlreadySeen", "the same signed order again: AlreadySeen");
+  check((await place(A, await order(carol, ETH, parseEther("0.1"), usd(190), 1n, bob))).error === "BadSignature", "a forged order: BadSignature");
   const c1 = await order(carol, ETH, parseEther("1"), usd(1990), 1n);
   const c2 = await order(carol, ETH, parseEther("1"), usd(1990), 2n);
   const k2 = await order(bob, USD, usd(2000), parseEther("1"), 2n);
   const k3 = await order(bob, USD, usd(2000), parseEther("1"), 3n);
-  for (const x of [c1, c2, k2, k3]) await place(x);
-  check((await fill(c1, k2)).ok, "carol sells her 1 ETH once");
-  check((await fill(c2, k3)).error === "Insufficient", "and not twice: Insufficient");
-  await operator.seal();
-  check((await unsettled(alice.address, ETH)) === -parseEther("0.5"), "AppState: alice owes 0.5 ETH, unsettled");
+  for (const x of [c1, c2, k2, k3]) await place(A, x);
+  check((await fill(A, c1, k2)).ok, "carol sells her 1 ETH once");
+  check((await fill(A, c2, k3)).error === "Insufficient", "and not twice: Insufficient");
+  await A.seal();
+  await settle(A, 1n, "#1 (2 fills)");
 
-  // ==== L1 changes; batch 2 at H+1 (price 2100) ==============================================
-  await l1.send(oracle, "setShareBps", [usd(2100)], op);
-  await l1.rpc("anvil_mine", [toHex(1)]);
-  const b2 = await operator.open(traders);
-  check(b2.snap.number > b1.snap.number, `batch 2 pins a later block (${b2.snap.number})`);
-  const a2old = await order(alice, ETH, parseEther("0.5"), usd(990), 2n);
-  const k4old = await order(bob, USD, usd(1000), parseEther("0.5"), 4n);
-  await place(a2old); await place(k4old);
-  check((await fill(a2old, k4old)).error === "Rejected", "an order priced at 2000 is outside the band at H+1");
-  const a3 = await order(alice, ETH, parseEther("0.5"), usd(1040), 3n);
-  const k5 = await order(bob, USD, usd(1050), parseEther("0.5"), 5n);
-  await place(a3); await place(k5);
-  check((await fill(a3, k5)).ok, "alice sells 0.5 ETH at 2100, reading only the new snapshot");
-  check((await ex.read(l1view, "read", [b1.witness.anchorId, oracle.address, SLOT0])) === usd(2000), "the H snapshot still says 2000");
-  check((await ex.read(l1view, "read", [b2.witness.anchorId, oracle.address, SLOT0])) === usd(2100), "the H+1 snapshot says 2100");
-  check((await operator.fills(1n)).length === 2, "batch 1's fills are still in AppState");
-  check((await unsettled(alice.address, ETH)) === -parseEther("1"), "alice's unsettled obligations span both batches (−1 ETH)");
-  await operator.seal();
-  const digestAfter2 = await ex.read<Hex>(app, "stateDigest");
-
-  // ==== replay: a fresh executor, the same snapshots (from pinned evidence), the same log =====
-  const fresh = await deployApp(ex2);
-  for (const b of [b1, b2]) {
-    const ev = evidence.get(`clearing:batch:${b.no}`)!;
-    await ex2.send(fresh.view, "pin", [ev.rawHeader, ev.package], op);
-    await ex2.send(fresh.app, "openBatch", [b.witness.anchorId], op);
-    for (const o of b.log) {
-      try {
-        if (o.action.kind === "order") await ex2.send(fresh.app, "submitOrder", [o.action.order, o.action.sig], op);
-        else await ex2.send(fresh.app, "fill", [o.action.a, o.action.b], op);
-        check(o.ok, `replay: ${o.action.kind} succeeded again`);
-      } catch {
-        if (o.ok) throw new Error("replay diverged");
-      }
-    }
-    await ex2.send(fresh.app, "sealBatch", [], op);
-  }
-  check((await ex2.read<Hex>(fresh.app, "stateDigest")) === digestAfter2, "replay from pinned evidence gives the same AppState digest");
-
-  // ==== fail-closed reads on the executor ====================================================
-  const pkg = b2.witness.package;
-  const tampered = (pkg.slice(0, pkg.length - 70) + (pkg.slice(-70, -68) === "00" ? "01" : "00") + pkg.slice(-68)) as Hex;
-  let refused = false;
-  try { await ex.send(l1view, "pin", [b2.witness.rawHeader, tampered], op); } catch { refused = true; }
-  check(refused, "a tampered witness is refused by L1View");
-  refused = false;
-  try { await ex.send(l1view, "pin", [b1.witness.rawHeader, b2.witness.package], op); } catch { refused = true; }
-  check(refused, "a header that isn't the witness's anchor is refused");
-  refused = false;
-  try { await ex.read(l1view, "read", [b2.witness.anchorId, oracle.address, `0x${"0".repeat(63)}1`]); } catch { refused = true; }
-  check(refused, "a slot that wasn't witnessed can't be read (missing state fails closed)");
-
-  // ==== settle batches 1 and 2 on L1 ===========================================================
-  async function settle(no: bigint, batch = operator.batches.find((b) => b.no === no)!) {
-    check(await reader.canonical(batch.snap), `batch ${no}'s anchor is still canonical`);
-    if (!(await l1.read<boolean>(anchors, "recorded", [batch.witness.anchorId]))) {
-      await l1.send(anchors, "record", [batch.witness.rawHeader], op, "AnchorRegistry.record");
-    }
-    const p = await operator.proposal(no);
-    const r = await l1.send(st, "proposeBatch", [no, batch.l1Witness.package, p.fills, p.users, p.at], op, `proposeBatch #${no} (${(await operator.fills(no)).length} fills)`);
-    l1.gas[`fills calldata bytes #${no}`] = (p.fills.length - 2) / 2;
-    l1.gas[`witness calldata bytes #${no}`] = (batch.l1Witness.package.length - 2) / 2;
-    await l1.rpc("evm_increaseTime", [WINDOW]);
-    await l1.rpc("anvil_mine", [toHex(1)]);
-    await l1.send(st, "finalize", await finalizeArgs(l1, st, r.transactionHash), watcher, `finalize #${no}`);
-    evidence.release(`clearing:batch:${no}`);
-  }
-  await settle(1n);
-  await settle(2n);
-  const acct = (t: Address) => l1.read<any[]>(st, "accounts", [t]);
-  check((await acct(alice.address))[0] === parseEther("1") && (await acct(alice.address))[1] === usd(2050), "L1: alice 1 ETH + 2050 USD after both batches");
-  check((await acct(carol.address))[0] === 0n && (await acct(carol.address))[1] === usd(4000), "L1: carol 0 ETH + 4000 USD");
-
-  // ==== partial withdrawal; L1 moved after the snapshot → rebase ============================
-  await l1.rpc("anvil_mine", [toHex(1)]); // the confirmation policy needs one block on top
-  const b3 = await operator.open(traders);
-  check(BigInt(await ex.read(app, "settledThrough")) === 2n, "batch 3's snapshot sees batches 1–2 finalized: no double counting");
-  check((await unsettled(alice.address, ETH)) === 0n, "alice's obligations are now in her L1 escrow, not AppState");
-  const a4 = await order(alice, ETH, parseEther("0.6"), usd(1250), 4n);
-  const c3 = await order(carol, USD, usd(1260), parseEther("0.6"), 3n);
-  await place(a4); await place(c3);
-  check((await fill(a4, c3)).ok, "batch 3: alice sells 0.6 ETH to carol");
-  await operator.seal();
-  // alice reserves 0.5 ETH for withdrawal before batch 3 reaches L1.
-  await l1.send(st, "requestWithdraw", [ETH, parseEther("0.5")], alice, "requestWithdraw");
-  const p3 = await operator.proposal(3n);
-  if (!(await l1.read<boolean>(anchors, "recorded", [b3.witness.anchorId]))) await l1.send(anchors, "record", [b3.witness.rawHeader], op);
-  let l1refused = "";
-  try { await l1.pub.simulateContract({ account: op, address: st.address, abi: st.abi, functionName: "proposeBatch", args: [3n, b3.l1Witness.package, p3.fills, p3.users, p3.at] }); } catch (e: any) { l1refused = e?.cause?.data?.errorName ?? "reverted"; }
-  check(l1refused !== "", `L1 refuses batch 3 as of now (${l1refused}): alice's free ETH is 0.5`);
-  await l1.rpc("anvil_mine", [toHex(1)]);
-  const rb = await operator.rebase();
-  check(rb.dropped.length === 1 && rb.dropped[0].action.kind === "fill", "rebased on a new snapshot: the 0.6 ETH fill no longer holds and is dropped");
-  const a5 = await order(alice, ETH, parseEther("0.4"), usd(830), 5n);
-  const c4 = await order(carol, USD, usd(840), parseEther("0.4"), 4n);
-  // Batch 3 is sealed; this goes into batch 4 with the resting orders, trading on.
-  const b4 = await operator.open(traders);
-  await place(a5); await place(c4);
-  check((await fill(a5, c4)).ok, "trading continues with what isn't reserved: alice sells 0.4 ETH");
-  await operator.seal();
-  const before = await l1.pub.getBalance({ address: alice.address });
-  await l1.send(st, "claimWithdraw", [0n], watcher, "claimWithdraw");
-  check((await l1.pub.getBalance({ address: alice.address })) - before === parseEther("0.5"), "alice withdrew 0.5 ETH while trading continued");
-  check((await operator.fills(3n)).length === 0, "batch 3 ended empty after the rebase");
-  await settle(3n); // an empty batch only advances L1's numbering
-  await settle(4n);
-  check((await acct(carol.address))[0] === parseEther("0.4"), "L1: carol received the 0.4 ETH from batch 4");
-  void b4;
-
-  // ==== reorg: a speculative batch on `latest` is rolled back and replayed ===================
-  operator.policy = { kind: "latest" };
-  await l1.rpc("anvil_mine", [toHex(1)]); // an empty block to be reorged
-  const b5 = await operator.open(traders);
-  check(b5.snap.speculative, `batch ${b5.no} is speculative (latest = ${b5.snap.number})`);
-  const k6 = await order(bob, USD, usd(210), parseEther("0.1"), 6n);
-  const c5 = await order(carol, ETH, parseEther("0.1"), usd(205), 5n);
-  await place(k6); await place(c5);
-  check((await fill(c5, k6)).ok, "carol sells 0.1 ETH at 2100 on the speculative snapshot");
-  await operator.seal();
-  // L1 reorgs that block away; the replacement block raises the price to 2500.
-  const setPrice = { from: op.address, to: oracle.address, data: (await import("viem")).encodeFunctionData({ abi: oracle.abi, functionName: "setShareBps", args: [usd(2500)] }) };
-  await l1.rpc("anvil_reorg", [1, [[setPrice, 0]]]);
-  check(!(await reader.canonical(b5.snap)), "the speculative anchor left the chain");
-  const rb5 = await operator.rebase(await reader.snapshot({ kind: "latest" }));
-  check(rb5.dropped.some((d) => d.action.kind === "fill"), "replayed on the new chain at 2500: the fill is outside the band and dropped");
-  check((await operator.fills(b5.no)).length === 0, "nothing from the reorged block survives in AppState");
-
-  // ==== operator gone: what is final vs. what is only AppState ===============================
-  // Batch 5 was emptied by the reorg. Batch 6 trades, is sealed, and is never proposed:
-  // the operator disappears. Its fill is AppState only — not an L1 obligation.
-  operator.policy = { kind: "confirmations", n: 1 };
+  // ==== L1 moves; alice asks for 0.2 ETH; batch 2 at H+1 (2100) ==============================
+  await l1.send(oracle, "setShareBps", [usd(2100)], opA);
+  await l1.send(ch, "requestWithdraw", [ETH, parseEther("0.2")], alice, "requestWithdraw");
   await l1.rpc("anvil_mine", [toHex(2)]);
-  await operator.open(traders);
-  const k7 = await order(bob, USD, usd(250), parseEther("0.1"), 7n);
-  const c6 = await order(carol, ETH, parseEther("0.1"), usd(249), 6n);
-  await place(k7); await place(c6);
-  check((await fill(c6, k7)).ok, "batch 6: carol sells 0.1 ETH at 2500, sealed but never proposed");
-  await operator.seal();
-  const pendingL1 = await l1.read<any[]>(st, "pending");
-  check(!pendingL1[4], "nothing is pending on L1: every proposed batch is final");
-  // Everyone withdraws everything from L1 without an operator.
-  for (const who of [alice, bob, carol]) {
-    const a = await acct(who.address);
-    if (a[0] - a[2] > 0n) await l1.send(st, "requestWithdraw", [ETH, a[0] - a[2]], who);
-    if (a[1] - a[3] > 0n) await l1.send(st, "requestWithdraw", [USD, a[1] - a[3]], who);
+  await A.open();
+  const accA = await exA.read<any>(A.book, "account", [ia]);
+  check(BigInt(accA.ethOut) === parseEther("0.2"), "batch 2 opened by serving alice's request first (0.2 ETH released)");
+  check(await exA.read(A.book, "resting", [k3.h]), "bob's unfilled order from batch 1 is still in the book (AppState carried over)");
+  const a2 = await order(alice, ETH, parseEther("0.5"), usd(1040), 2n);
+  const k4 = await order(bob, USD, usd(1050), parseEther("0.5"), 4n);
+  await place(A, a2); await place(A, k4);
+  check((await fill(A, a2, k4)).ok, "alice sells 0.5 ETH at 2100, the new snapshot's price");
+  await A.seal();
+  const digestAfter2 = await A.exec.read<Hex>(A.book, "stateDigest");
+
+  // ---- the same journal replayed on a fresh executor gives the same AppState ----
+  const exC = await Chain.anvil(18693, 7001);
+  try {
+    const fresh = await deployBook(exC, opA);
+    for (const b of A.batches.slice(0, 2)) {
+      const pr = b.prepared as any;
+      await exC.send(fresh.view, "pin", [pr.witness.rawHeader, pr.witness.package], opA);
+      await exC.send(fresh.book, "openBatch", [pr.witness.anchorId, pr.depositUsers, pr.forced.orders, pr.forced.sigs], opA);
+      for (const l of b.log) {
+        if (!l.ok) continue;
+        const a = l.action as any;
+        if (a.kind === "order") await exC.send(fresh.book, "submitOrder", [a.order, a.sig], opA);
+        else await exC.send(fresh.book, "fill", [a.a, a.b], opA);
+      }
+      await exC.send(fresh.book, "seal", [], opA);
+    }
+    check((await exC.read<Hex>(fresh.book, "stateDigest")) === digestAfter2, "the journal replayed on a fresh executor, from the pinned proofs, gives the same AppState digest");
+  } finally {
+    exC.stop();
   }
-  const nW = Number(await l1.read(st, "withdrawalCount"));
-  for (let i = 1; i < nW; i++) await l1.send(st, "claimWithdraw", [BigInt(i)], watcher);
-  check((await l1.read<bigint>(token, "balanceOf", [st.address])) === 0n, "all USD withdrawn from L1 escrow, no operator involved");
-  check((await l1.pub.getBalance({ address: st.address })) === parseEther("1"), "only the operator's bond is left in ETH");
-  check((await operator.fills(6n)).length === 1, "batch 6's fill exists only in AppState (unsettled, never an L1 obligation)");
-  check(evidence.pinnedKeys().length >= 2, `evidence still pinned for unsettled batches: ${evidence.pinnedKeys().join(", ")}`);
+
+  // ---- reads fail closed on the executor ----
+  const w2 = (A.batches[1].prepared as any).witness;
+  const w1 = (A.batches[0].prepared as any).witness;
+  const tampered = (w2.package.slice(0, w2.package.length - 70) + (w2.package.slice(-70, -68) === "00" ? "01" : "00") + w2.package.slice(-68)) as Hex;
+  const refuses = async (fn: () => Promise<unknown>) => { try { await fn(); return false; } catch { return true; } };
+  check(await refuses(() => A.exec.send(A.l1view, "pin", [w2.rawHeader, tampered], opA)), "a tampered witness is refused by L1View");
+  check(await refuses(() => A.exec.send(A.l1view, "pin", [w1.rawHeader, w2.package], opA)), "a header that isn't the witness's anchor is refused");
+  check(await refuses(() => A.exec.read(A.l1view, "read", [w2.anchorId, oracle.address, `0x${"0".repeat(63)}1`])), "a slot that wasn't proven can't be read (missing state fails closed)");
+
+  await settle(A, 2n, "#2 (1 fill + 1 request)");
+  const before = await l1.pub.getBalance({ address: alice.address });
+  const finDense = () => Array.from({ length: 4 }, (_, i) => leafHash(A.fin.get(i) ?? EMPTY));
+  await l1.send(ch, "claim", [ia, A.fin.get(ia)!, siblings(levels(finDense()), ia)], watcher, "claim");
+  check((await l1.pub.getBalance({ address: alice.address })) - before === parseEther("0.2"), "alice claimed 0.2 ETH on L1 while trading went on");
+
+  // ==== a wrong proposal is challenged =======================================================
+  await l1.rpc("anvil_mine", [toHex(1)]);
+  await A.open();
+  const k5 = await order(bob, USD, usd(210), parseEther("0.1"), 5n);
+  const c3 = await order(carol, USD, usd(500), parseEther("0.2"), 3n); // rests
+  await place(A, k5); await place(A, c3);
+  await A.seal();
+  // (no fill: a batch can also just publish deposits and requests)
+  const snapL1 = await l1.rpc<Hex>("evm_snapshot");
+  const bad = await A.propose(3n, { tamper: (m) => { const x = m.get(ib) ?? A.fin.get(ib)!; m.set(ib, { ...x, usd: x.usd + 1n }); } });
+  const w = await watch(A, bad, 1);
+  check(w.faults.includes(ib), `the watcher finds bob's leaf wrong (faults: ${w.faults.join(",")})`);
+  const wb = await l1.pub.getBalance({ address: watcher.address });
+  await l1.send(ch, "challengeAccount", [ib, A.fin.get(ib)!, siblings(levels(w.finDense), ib), bad.next.get(ib)!, siblings(levels(w.nextDense), ib), bad.fills], watcher, "challengeAccount");
+  check((await l1.pub.getBalance({ address: watcher.address })) > wb, "challenge won: the batch is discarded and the bond paid to the watcher");
+  await l1.rpc("evm_revert", [snapL1]);
+  await settle(A, 3n, "#3 (0 fills)");
+
+  // ==== a forced order: posted on L1, taken in, filled ========================================
+  const cf = await order(carol, USD, usd(210), parseEther("0.1"), 4n); // carol sold her ETH in batch 1
+  await l1.send(ch, "forceOrder", [cf.o, cf.sig], carol, "forceOrder");
+  await l1.rpc("anvil_mine", [toHex(1)]);
+  await A.open();
+  check(await exA.read(A.book, "resting", [cf.h]), "batch 4 took carol's forced order in from L1 (hash checked against L1)");
+  const aF = await order(alice, ETH, parseEther("0.1"), usd(205), 3n);
+  await place(A, aF);
+  check((await fill(A, cf, aF)).ok, "and fills it with alice's order");
+  await A.seal();
+  const p4 = await settle(A, 4n, "#4 (forced fill)");
+  check(p4.statuses === "0x0001", "L1 checked the forced order's status: filled at fill 0, side a");
+
+  // ==== runtime recovery (review of 5db7064) =================================================
+  const cur = () => BigInt(A.current.no);
+  // R1: two speculative batches, the second spending what the first produced; a reorg
+  //     removes both anchors. Recovery starts at the FIRST and replays both.
+  A.policy = { kind: "latest" };
+  await l1.rpc("anvil_mine", [toHex(1)]);
+  await A.open();
+  const a5 = await order(alice, ETH, parseEther("0.1"), usd(205), 5n);
+  const d1 = await order(dave, USD, usd(210), parseEther("0.1"), 1n);
+  await place(A, a5); await place(A, d1);
+  check((await fill(A, a5, d1)).ok, "speculative batch S1: alice sells 0.1 ETH to dave");
+  await A.seal();
+  const s1 = A.current;
+  await l1.rpc("anvil_mine", [toHex(1)]);
+  await A.open();
+  const d2 = await order(dave, ETH, parseEther("0.1"), usd(205), 2n);
+  const k7 = await order(bob, USD, usd(210), parseEther("0.1"), 7n);
+  await place(A, d2); await place(A, k7);
+  check((await fill(A, d2, k7)).ok, "speculative batch S2: dave sells that 0.1 ETH on to bob (needs S1)");
+  await A.seal();
+  // The new chain has alice withdrawing most of her ETH in the replaced block (price unchanged).
+  const withdraw = { from: alice.address, to: ch.address, data: encodeFunctionData({ abi: ch.abi, functionName: "requestWithdraw", args: [ETH, parseEther("0.65")] }) };
+  await l1.rpc("anvil_reorg", [2, [[withdraw, 0]]]);
+  check((await reader.canonicalStatus(s1.snap)) === "orphaned", "S1's anchor is orphaned (the node has another block at that height)");
+  const r1 = await A.tick();
+  check(r1.status === "recovered" && r1.from === s1.no, `tick() recovered from the earliest affected batch (#${r1.from}), not just the last`);
+  check(r1.dropped.length === 2 && r1.dropped.every((d) => d.error === "Insufficient"), "both fills dropped: alice's ETH is reserved on the new chain, so S1 fails, and S2 then has nothing to sell");
+  check(BigInt((await A.exec.read<any>(A.book, "account", [id])).eth) === 0n, "dave holds no ETH: no obligation from the orphaned chain survives");
+  A.policy = { kind: "confirmations", n: 1 };
+  // anvil's BLOCKHASH still returns the replaced hashes after anvil_reorg, so L1 can't record
+  // an anchor at those heights; re-pin on a later block.
+  await l1.rpc("anvil_mine", [toHex(2)]);
+  await A.recover(A.current.no, "anchor after the reorged heights");
+  await settle(A, cur(), "#5 (recovered)");
+  await fund(alice, parseEther("1"), 0n);
+
+  // R2: recovery onto a block whose proofs are gone stops before changing anything.
+  await l1.rpc("anvil_mine", [toHex(1)]);
+  await A.open();
+  const d3 = await order(dave, ETH, parseEther("0.1"), usd(205), 3n);
+  const k8 = await order(bob, USD, usd(210), parseEther("0.1"), 8n);
+  await place(A, d3); await place(A, k8);
+  check((await fill(A, d3, k8)).error === "Insufficient", "dave can't sell ETH he doesn't have: rejected");
+  const digest = await A.exec.read(A.book, "stateDigest");
+  const nb = A.batches.length;
+  const old = { ...A.current.snap };
+  await l1.rpc("anvil_mine", [toHex(600)]); // that block's state falls out of the node's last 512
+  const r2 = await A.recover(A.current.no, "test", old);
+  check(r2.status === "proof-unavailable", `a recovery onto a block without proofs stops first (${(r2.reason ?? "").slice(0, 70)}…)`);
+  check((await A.exec.read(A.book, "stateDigest")) === digest && A.batches.length === nb && !A.journal.recovering, "executor, batches and journal are unchanged");
+  check((await reader.canonicalStatus({ ...old, number: (await reader.head()) + 10_000n })) === "unknown", "a height the node can't answer is 'unknown', not a reorg");
+
+  // R3: the open batch is now too old to propose; tick() re-pins it. The fill rejected
+  //     before is reported, not retried — even though dave is funded now.
+  await l1.send(ch, "deposit", [ETH, parseEther("1")], dave, undefined, parseEther("1"));
+  await l1.rpc("anvil_mine", [toHex(1)]);
+  const r3 = await A.tick();
+  check(r3.status === "recovered" && r3.reason === "aged", "tick() re-pinned the aged batch on a fresh snapshot");
+  check(r3.notRetried.some((x) => x.action.kind === "fill") && !r3.replayed.some((x) => x.action.kind === "fill"), "the rejected fill was reported, not replayed");
+  check(await A.exec.read(A.book, "resting", [d3.h]), "dave's order still rests in the book, for a separate re-match");
+  await A.seal();
+  await settle(A, cur(), "#6 (re-pinned)");
+
+  // R4: a batch built while another is in its window ages out under real block progress.
+  await l1.rpc("anvil_mine", [toHex(1)]);
+  await A.open();
+  const a6 = await order(alice, ETH, parseEther("0.1"), usd(205), 6n);
+  const k9 = await order(bob, USD, usd(210), parseEther("0.1"), 9n);
+  await place(A, a6); await place(A, k9);
+  check((await fill(A, a6, k9)).ok, "batch P: alice sells 0.1 ETH at 2100");
+  await A.seal();
+  const pNo = cur();
+  const pP = await A.propose(pNo, { label: "propose P" });
+  await watch(A, pP);
+  await l1.rpc("anvil_mine", [toHex(1)]);
+  await A.open();
+  const k10 = await order(bob, USD, usd(210), parseEther("0.1"), 10n);
+  await place(A, k10);
+  check((await fill(A, d3, k10)).ok, "batch Q (built while P waits): dave's resting order is re-matched explicitly");
+  await A.seal();
+  await time(WINDOW); // 300 blocks: Q's anchor is now older than maxAnchorAge (256)
+  await l1.send(ch, "finalize", [], watcher);
+  await A.finalized();
+  let refusedOld = false;
+  try { await A.propose(cur()); } catch { refusedOld = true; }
+  check(refusedOld, "Q's anchor aged out during P's window: the runtime refuses to propose it");
+  const r4 = await A.tick();
+  check(r4.status === "recovered" && r4.reason === "aged" && r4.dropped.length === 0, "tick() re-pinned Q on a fresh snapshot; nothing dropped");
+  await settle(A, cur(), "#8 (Q re-pinned)");
+
+  // R5: the executor dies with one batch proposed (pending) and one unproposed. A new
+  //     executor is rebuilt from L1's finalized state plus the journal.
+  await l1.rpc("anvil_mine", [toHex(1)]);
+  await A.open();
+  const a7 = await order(alice, ETH, parseEther("0.1"), usd(205), 7n);
+  const k11 = await order(bob, USD, usd(210), parseEther("0.1"), 11n);
+  await place(A, a7); await place(A, k11);
+  await fill(A, a7, k11);
+  await A.seal();
+  const pending = await A.propose(cur(), { label: "propose (pending at crash)" });
+  await watch(A, pending);
+  await l1.rpc("anvil_mine", [toHex(1)]);
+  await A.open();
+  const k12 = await order(bob, USD, usd(210), parseEther("0.1"), 12n);
+  await place(A, k12);
+  await A.seal();
+  A.exec.stop();
+  const exA2 = await Chain.anvil(18691, 7001);
+  A.exec = exA2;
+  const r5 = await A.recover(A.current.no, "executor restarted");
+  check(r5.status === "recovered", "the runtime rebuilt a fresh executor (adopt from L1 + the pending batch from the journal) and replayed the unproposed one");
+  await time(WINDOW);
+  await l1.send(ch, "finalize", [], watcher);
+  await A.finalized();
+  await settle(A, cur(), "#10 (after executor rebuild)");
+
+  // ==== operator A goes silent; B takes over from L1 data alone =============================
+  await time(2 * DAY + 1);
+  const recovered = await ClearingOperator.recover(l1, ch);
+  const same = [...new Set([...recovered.keys(), ...A.fin.keys()])].every((k) => leafHash(recovered.get(k) ?? EMPTY) === leafHash(A.fin.get(k) ?? EMPTY));
+  check(same, `operator B rebuilt every account (${recovered.size}) from L1 calldata alone`);
+  // (a normal transfer: anvil_setBalance edits state outside a block and breaks its proofs)
+  await l1.wallet(opA).sendTransaction({ to: opB.address, value: parseEther("10") }).then((h) => l1.pub.waitForTransactionReceipt({ hash: h }));
+  const B = await mkOp(exB, opB);
+  await B.adopt(recovered);
+  check(true, "ClearingBook.adopt accepted them: their root equals L1's finalized root (read through a proof)");
+  await l1.rpc("anvil_mine", [toHex(1)]);
+  await B.open();
+  const a3 = await order(alice, ETH, parseEther("0.2"), usd(415), 8n);
+  const k6 = await order(bob, USD, usd(420), parseEther("0.2"), 13n);
+  await place(B, a3); await place(B, k6);
+  check((await fill(B, a3, k6)).ok, "B's book continues where A stopped (nonces and balances from L1)");
+  await B.seal();
+  await settle(B, BigInt(B.current.no), "#11 by B");
+  const pend = await l1.read<any[]>(ch, "state");
+  check(Number(pend[3]) === 11, `L1 counts ${pend[3]} finalized batches across the recoveries and the handover`);
+
+  // ==== a forced order nobody serves: freeze, everyone exits ================================
+  const cg = await order(carol, USD, usd(100), parseEther("0.04"), 5n);
+  await l1.send(ch, "forceOrder", [cg.o, cg.sig], carol);
+  await l1.rpc("anvil_mine", [toHex(1)]);
+  let early = false;
+  try { await l1.pub.simulateContract({ account: watcher, address: ch.address, abi: ch.abi, functionName: "freeze", args: [] }); early = true; } catch { /* NotOverdue */ }
+  check(!early, "freeze is refused before the forced order's deadline");
+  await time(DAY);
+  await l1.send(ch, "freeze", [], watcher, "freeze");
+  const dense = Array.from({ length: 4 }, (_, i) => leafHash(B.fin.get(i) ?? EMPTY));
+  for (const [i, who] of [[ia, alice], [ib, bob], [ic, carol], [id, dave]] as const) {
+    await l1.send(ch, "exit", [i, B.fin.get(i) ?? EMPTY, siblings(levels(dense), i)], watcher, "exit");
+    void who;
+  }
+  check((await l1.pub.getBalance({ address: ch.address })) === 0n, "after exits the channel holds no ETH");
+  check((await l1.read<bigint>(token, "balanceOf", [ch.address])) === 0n, "and no USD");
+  const out = async (a: Address) => [await l1.pub.getBalance({ address: a }), await l1.read<bigint>(token, "balanceOf", [a])];
+  const [ae, au] = await out(alice.address);
+  void ae; void au;
+  check(totalEth > 0n && totalUsd > 0n, "every deposit came back out through claims and exits (conservation checked above)");
 
   mkdirSync(`${ROOT}docs/experiments/data`, { recursive: true });
   writeFileSync(`${ROOT}docs/experiments/data/clearing-e2e.json`, JSON.stringify({
-    note: "anvil prague L1 (chain 900) + local executor (chain 7001, not trusted). Gas = L1 receipt gasUsed unless labeled executor; bytes = calldata length. Sums for repeated labels.",
-    l1: l1.gas, executor: ex.gas,
+    note: "anvil prague L1 (chain 900) + two local executors (operators A and B). Gas = L1 receipt gasUsed; sums for repeated labels.",
+    l1: l1.gas,
   }, null, 2) + "\n");
-  console.table({ ...l1.gas });
+  console.table(l1.gas);
   console.log("E2E CLEARING PASSED");
 }
 

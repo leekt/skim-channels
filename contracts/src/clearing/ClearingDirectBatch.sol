@@ -8,10 +8,11 @@ import {WitnessVerifier} from "../verifiers/WitnessVerifier.sol";
 import {WitnessLib} from "../libraries/WitnessLib.sol";
 import {ChannelTypes} from "../libraries/ChannelTypes.sol";
 
-/// @notice Cost control for the clearing designs: the same batches as ClearingSettlement (v1),
-///         with the same netting, calldata and storage, but L1 verifies everything at once —
-///         every signature included — and applies the batch immediately. No challenge window,
-///         no bond, no watcher. Only what the comparison needs: deposits and batches.
+/// @notice Cost control for ClearingChannel: the same fills settled as one L1 batch that L1
+///         verifies completely and at once — every signature, price band, limit, nonce and
+///         collateral check (ClearingChecker) — then applies immediately. Netting and one
+///         transaction per batch, but no challenge window, no bond, no watcher. Only what the
+///         comparison needs: deposits and batches.
 contract ClearingDirectBatch {
     struct Account {
         uint128 ethBal;
@@ -71,7 +72,7 @@ contract ClearingDirectBatch {
         }
     }
 
-    /// Same inputs as ClearingSettlement.proposeBatch; settled in this transaction.
+    /// The batch: price witness, ABI-encoded fills, sorted traders, each fill's trader indices.
     function settle(bytes calldata witness, bytes calldata fills, address[] calldata users, uint16[] calldata at)
         external
     {

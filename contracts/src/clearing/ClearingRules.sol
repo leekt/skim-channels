@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8.28;
 
-/// @notice The one set of clearing rules, used by the app (ClearingApp, on the local
-///         executor) and by L1 settlement (ClearingSettlement). Pure: same inputs, same answer
-///         on either chain.
+/// @notice The one set of clearing rules, used by the app (ClearingBook, on the local
+///         executor) and by L1 (ClearingCodec in disputes; ClearingChecker in the cost
+///         control). Pure: same inputs, same answer on either chain.
 ///
 /// Two assets: token 0 is ETH (wei), token 1 is USD (6 decimals). An order sells
 /// `sellAmount` of `sellToken` for at least `buyAmount` of the other. A fill matches two

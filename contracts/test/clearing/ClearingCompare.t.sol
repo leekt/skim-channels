@@ -11,7 +11,6 @@ import {ClearingChannel} from "../../src/clearing/ClearingChannel.sol";
 import {ClearingDisputes} from "../../src/clearing/ClearingDisputes.sol";
 import {ClearingStorage, IERC20Lite} from "../../src/clearing/ClearingStorage.sol";
 import {ClearingCodec} from "../../src/clearing/ClearingCodec.sol";
-import {ClearingSettlement, IERC20Min} from "../../src/clearing/ClearingSettlement.sol";
 import {ClearingChecker} from "../../src/clearing/ClearingChecker.sol";
 import {ClearingL1, IPriceFeed} from "../../src/clearing/ClearingL1.sol";
 import {ClearingDirectBatch} from "../../src/clearing/ClearingDirectBatch.sol";
@@ -21,15 +20,14 @@ import {WitnessVerifier} from "../../src/verifiers/WitnessVerifier.sol";
 
 /// The same fills settled three ways, priced as L1 transactions (as PredictionCost.t.sol:
 /// 21,000 + calldata incl. the EIP-7623 floor + cooled execution − capped refund):
-/// - v2 ClearingChannel: optimistic; publishes packed fills and changed accounts.
-/// - v1 ClearingSettlement: L1 re-checks every fill.
+/// - ClearingChannel: optimistic; publishes packed fills and changed accounts.
+/// - ClearingDirectBatch: the same fills as one batch, verified completely on L1 at once.
 /// - ClearingL1: one L1 transaction per fill (taker submits the maker's signed order).
 /// Steady state: measured on a second batch (accounts exist, deposits applied).
 /// Prints `compare,<system>,<scenario>,<fills>,<users>,<gas>`.
 contract ClearingCompareTest is Test {
-    ClearingChannel v2;
-    ClearingDisputes D2;
-    ClearingSettlement v1;
+    ClearingChannel chn;
+    ClearingDisputes D;
     ClearingL1 l1;
     ClearingDirectBatch direct;
     AnchorRegistry anchors;
@@ -59,7 +57,7 @@ contract ClearingCompareTest is Test {
         vm.roll(200);
         vm.setBlockhash(101, keccak256(raw1));
         anchors.record(raw1);
-        v2 = new ClearingChannel(
+        chn = new ClearingChannel(
             new ClearingDisputes(
                 ClearingStorage.Config({
                     operator: op,
@@ -78,28 +76,11 @@ contract ClearingCompareTest is Test {
                 })
             )
         );
-        D2 = ClearingDisputes(address(v2));
-        v1 = new ClearingSettlement(
-            ClearingSettlement.Config({
-                operator: op,
-                usd: IERC20Min(address(usd)),
-                anchors: anchors,
-                witnessVerifier: wv,
-                priceFeed: oracle,
-                priceSlot: bytes32(0),
-                bandBps: 100,
-                challengeWindow: 1 hours,
-                maxAnchorAge: 8191,
-                minBond: 1 ether,
-                checker: checker
-            })
-        );
+        D = ClearingDisputes(address(chn));
         feed = address(new AllocationFixture(7000)); // the direct-L1 baseline reads the feed itself
         l1 = new ClearingL1(IPriceFeed(feed), 100, address(usd));
         direct = new ClearingDirectBatch(op, anchors, wv, checker, oracle, bytes32(0), 100, 8191, address(usd));
         vm.deal(op, 100 ether);
-        vm.prank(op);
-        v1.postBond{value: 1 ether}();
     }
 
     function _txGas(address from, address to, bytes memory data, uint256 value) internal returns (uint256) {
@@ -110,7 +91,7 @@ contract ClearingCompareTest is Test {
         vm.cool(address(anchors));
         vm.cool(address(usd));
         vm.cool(feed);
-        vm.cool(address(v2.disputes()));
+        vm.cool(address(chn.disputes()));
         vm.cool(from);
         vm.prank(from, from);
         (bool ok, bytes memory ret) = to.call{value: value}(data);
@@ -149,16 +130,13 @@ contract ClearingCompareTest is Test {
             vm.deal(a, 400 ether);
             usd.mint(a, 4_000_000);
             vm.startPrank(a);
-            usd.approve(address(v2), type(uint256).max);
-            usd.approve(address(v1), type(uint256).max);
+            usd.approve(address(chn), type(uint256).max);
             usd.approve(address(l1), type(uint256).max);
             usd.approve(address(direct), type(uint256).max);
             direct.deposit{value: 100 ether}(R.ETH, 100 ether);
             direct.deposit(R.USD, 1_000_000);
-            v2.deposit{value: 100 ether}(R.ETH, 100 ether);
-            v2.deposit(R.USD, 1_000_000);
-            v1.deposit{value: 100 ether}(R.ETH, 100 ether);
-            v1.deposit(R.USD, 1_000_000);
+            chn.deposit{value: 100 ether}(R.ETH, 100 ether);
+            chn.deposit(R.USD, 1_000_000);
             l1.deposit{value: 100 ether}(R.ETH, 100 ether);
             l1.deposit(R.USD, 1_000_000);
             vm.stopPrank();
@@ -194,13 +172,13 @@ contract ClearingCompareTest is Test {
         sig = abi.encodePacked(r, s, v);
     }
 
-    // ---- v2 ----------------------------------------------------------------------------------
+    // ---- the channel ----------------------------------------------------------------------------------
 
-    function _v2batch(F[] memory p)
+    function _channelBatch(F[] memory p)
         internal
         returns (bytes memory fills, bytes memory u, bytes32[] memory proof, L.Account[] memory next)
     {
-        bytes32 dom = v2.domain();
+        bytes32 dom = chn.domain();
         next = new L.Account[](fin.length);
         bool[] memory touched = new bool[](fin.length);
         for (uint256 i; i < fin.length; ++i) {
@@ -236,32 +214,32 @@ contract ClearingCompareTest is Test {
         proof = Tree.multiproof(h, idx);
     }
 
-    function _v2run(F[] memory p, string memory label, bool measure) internal returns (bytes memory fills) {
+    function _channelRun(F[] memory p, string memory label, bool measure) internal returns (bytes memory fills) {
         bytes memory u;
         bytes32[] memory proof;
         L.Account[] memory next;
-        (fills, u, proof, next) = _v2batch(p);
-        uint256 g = _txGas(op, address(v2), abi.encodeCall(v2.propose, (pkg1, fills, u, proof, 0, 0, "")), 1 ether);
+        (fills, u, proof, next) = _channelBatch(p);
+        uint256 g = _txGas(op, address(chn), abi.encodeCall(chn.propose, (pkg1, fills, u, proof, 0, 0, "")), 1 ether);
         vm.warp(block.timestamp + 1 hours);
-        uint256 g2 = _txGas(address(0x5EE), address(v2), abi.encodeCall(v2.finalize, ()), 0);
+        uint256 g2 = _txGas(address(0x5EE), address(chn), abi.encodeCall(chn.finalize, ()), 0);
         for (uint256 i; i < next.length; ++i) {
             fin[i] = next[i];
         }
         if (measure) {
-            _log("v2", label, p.length, g + g2);
-            _log("v2.calldata", label, p.length, fills.length + u.length + proof.length * 32);
+            _log("channel", label, p.length, g + g2);
+            _log("channel.calldata", label, p.length, fills.length + u.length + proof.length * 32);
         }
     }
 
     // ---- the same batch, verified at once on L1 (control) ----------------------------------
 
     function _directRun(F[] memory p, string memory label, bool measure) internal {
-        (R.Fill[] memory fs, address[] memory users, uint16[] memory at) = _v1shape(p, direct.domain());
+        (R.Fill[] memory fs, address[] memory users, uint16[] memory at) = _batchShape(p, direct.domain());
         uint256 g = _txGas(op, address(direct), abi.encodeCall(direct.settle, (pkg1, abi.encode(fs), users, at)), 0);
         if (measure) _log("direct", label, p.length, g);
     }
 
-    function _v1shape(F[] memory p, bytes32 dom)
+    function _batchShape(F[] memory p, bytes32 dom)
         internal
         view
         returns (R.Fill[] memory fs, address[] memory users, uint16[] memory at)
@@ -288,43 +266,7 @@ contract ClearingCompareTest is Test {
         }
     }
 
-    // ---- v1 ----------------------------------------------------------------------------------
-
-    function _v1run(F[] memory p, string memory label, bool measure) internal {
-        bytes32 dom = v1.domain();
-        R.Fill[] memory fs = new R.Fill[](p.length);
-        address[] memory users = new address[](nUsers);
-        for (uint256 i; i < nUsers; ++i) {
-            users[i] = _who(i);
-        }
-        for (uint256 i; i < nUsers; ++i) {
-            for (uint256 j = i + 1; j < nUsers; ++j) {
-                if (users[j] < users[i]) (users[i], users[j]) = (users[j], users[i]);
-            }
-        }
-        uint16[] memory at = new uint16[](2 * p.length);
-        for (uint256 k; k < p.length; ++k) {
-            (R.Order memory a, bytes memory sa) = _signed(p[k].s, R.ETH, 0.01 ether, 69, p[k].ns, dom);
-            (R.Order memory b, bytes memory sb) = _signed(p[k].b, R.USD, 70, 0.01 ether, p[k].nb, dom);
-            fs[k] = R.Fill(a, b, sa, sb);
-            for (uint16 i; i < users.length; ++i) {
-                if (users[i] == a.trader) at[2 * k] = i;
-                if (users[i] == b.trader) at[2 * k + 1] = i;
-            }
-        }
-        uint64 batchNo = uint64(v1.finalizedBatches() + 1);
-        vm.recordLogs();
-        uint256 g =
-            _txGas(op, address(v1), abi.encodeCall(v1.proposeBatch, (batchNo, pkg1, abi.encode(fs), users, at)), 0);
-        Vm.Log[] memory logs = vm.getRecordedLogs();
-        (,,, address[] memory us, int256[] memory dEth, int256[] memory dUsd, uint64[] memory nonces) =
-            abi.decode(logs[0].data, (bytes32, bytes32, uint256, address[], int256[], int256[], uint64[]));
-        vm.warp(block.timestamp + 1 hours);
-        uint256 g2 = _txGas(address(0x5EE), address(v1), abi.encodeCall(v1.finalize, (us, dEth, dUsd, nonces)), 0);
-        if (measure) _log("v1", label, p.length, g + g2);
-    }
-
-    // ---- direct L1 ---------------------------------------------------------------------------
+    // ---- one L1 transaction per fill ---------------------------------------------------------------------------
 
     function _l1run(F[] memory p, string memory label, bool measure) internal {
         uint256 total;
@@ -348,18 +290,16 @@ contract ClearingCompareTest is Test {
         );
     }
 
-    function _scenario(string memory label, uint256 f, uint256 u, bool withV1) internal {
+    function _scenario(string memory label, uint256 f, uint256 u, bool withDirect) internal {
         _users(u);
         // Batch 1 onboards everyone (deposits applied); batch 2 is measured.
         uint256 warm = u / 2;
-        _v2run(_plan(warm, u, 1), label, false);
-        if (withV1) _v1run(_plan(warm, u, 1), label, false);
-        if (withV1) _directRun(_plan(warm, u, 1), label, false);
+        _channelRun(_plan(warm, u, 1), label, false);
+        if (withDirect) _directRun(_plan(warm, u, 1), label, false);
         _l1run(_plan(warm, u, 1), label, false);
         F[] memory p = _plan(f, u, 2);
-        bytes memory fills = _v2run(p, label, true);
-        if (withV1) _v1run(p, label, true);
-        if (withV1) _directRun(p, label, true);
+        bytes memory fills = _channelRun(p, label, true);
+        if (withDirect) _directRun(p, label, true);
         _l1run(p, label, true);
         fills;
     }
@@ -372,16 +312,16 @@ contract ClearingCompareTest is Test {
         _scenario("dense", 128, 16, true);
     }
 
-    function test_compare_v2_256_fills_32_users() public {
+    function test_compare_256_fills_32_users() public {
         _scenario("big", 256, 32, false);
     }
 
-    /// Worst-case v2 disputes on a 256-fill batch: the last fill, and an account in 16 fills.
-    function test_v2_dispute_gas() public {
+    /// Worst-case chn disputes on a 256-fill batch: the last fill, and an account in 16 fills.
+    function test_dispute_gas() public {
         _users(32);
-        _v2run(_plan(16, 32, 1), "warm", false);
+        _channelRun(_plan(16, 32, 1), "warm", false);
         F[] memory p = _plan(256, 32, 2);
-        (bytes memory fills, bytes memory u, bytes32[] memory proof, L.Account[] memory next) = _v2batch(p);
+        (bytes memory fills, bytes memory u, bytes32[] memory proof, L.Account[] memory next) = _channelBatch(p);
         next[0].usd += 1; // user 0's leaf is wrong
         // re-encode the updates with the wrong leaf
         u = "";
@@ -394,7 +334,7 @@ contract ClearingCompareTest is Test {
         }
         proof = Tree.multiproof(h, idx);
         vm.prank(op);
-        v2.propose{value: 1 ether}(pkg1, fills, u, proof, 0, 0, "");
+        chn.propose{value: 1 ether}(pkg1, fills, u, proof, 0, 0, "");
         uint256 snap = vm.snapshotState();
         bytes32[] memory nh = new bytes32[](fin.length);
         for (uint256 i; i < fin.length; ++i) {
@@ -402,17 +342,17 @@ contract ClearingCompareTest is Test {
         }
         uint256 g = _txGas(
             address(0x5EE),
-            address(v2),
-            abi.encodeCall(D2.challengeAccount, (0, fin[0], Tree.siblings(h, 0), next[0], Tree.siblings(nh, 0), fills)),
+            address(chn),
+            abi.encodeCall(D.challengeAccount, (0, fin[0], Tree.siblings(h, 0), next[0], Tree.siblings(nh, 0), fills)),
             0
         );
-        _log("v2.challengeAccount", "16-fills-of-256", 256, g);
+        _log("channel.challengeAccount", "16-fills-of-256", 256, g);
         vm.revertToState(snap);
         // A forged last signature, measured the same way.
         fills[fills.length - 1] = bytes1(uint8(fills[fills.length - 1]) ^ 1);
-        vm.store(address(v2), bytes32(uint256(_pendingSlot()) + 1), keccak256(fills)); // fillsHash
-        g = _txGas(address(0x5EE), address(v2), abi.encodeCall(D2.challengeFill, (fills, 255)), 0);
-        _log("v2.challengeFill", "last-of-256", 256, g);
+        vm.store(address(chn), bytes32(uint256(_pendingSlot()) + 1), keccak256(fills)); // fillsHash
+        g = _txGas(address(0x5EE), address(chn), abi.encodeCall(D.challengeFill, (fills, 255)), 0);
+        _log("channel.challengeFill", "last-of-256", 256, g);
     }
 
     /// Storage slot of ClearingStorage._pending (forge inspect ClearingChannel storage).

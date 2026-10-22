@@ -7,21 +7,15 @@
      - blob DA for tickets and leaves (disputes need the data within the window);
      - cheaper first deposits (119k now);
      - batching beyond ~1,800 users per commit or proposal transaction.
-   - **Stateful clearing: runtime and L1 settlement built** ([log](experiments/clearing-runtime.md)); **v2 optimistic settlement built** ([log](experiments/clearing-v2.md)).
-   - **Next, runtime recovery** (review of 5db7064):
-     - batch states and multi-batch rollback/replay;
-     - new proofs before rollback, with a persistent journal;
-     - replay only accepted actions;
-     - consume skim rewinds;
-     - canonical / orphaned / unknown;
-     - anchor ageing under real block progress.
+   - **Stateful clearing: built** (optimistic settlement, account root on L1, handover, forced orders, runtime recovery; [log](experiments/clearing.md)).
    - **Next for clearing:**
-     - forced inclusion or another censorship answer for orders;
+     - matching guarantees for forced orders (they must be published, not yet matched);
+     - automatic rebuild after a discarded proposal;
      - partial fills;
      - more assets;
      - blob DA for fills;
      - settlement through skim on a Glamsterdam network;
-     - a direct-L1 cost baseline.
+
 
 1. **EIP-8288 proof dependencies** (blocked; owner accepted 2026-10-22): when EIP-8288 defines
    `get_deps_hash` for STARKs and a network carries it, implement `IDependencySource` over
