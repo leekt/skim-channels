@@ -97,11 +97,11 @@ contract EncodingsTest is Test {
     function test_channelIdAndParticipantsMatchRust() public view {
         uint256 chainId = vm.parseJsonUint(json, ".l1ChainId");
         address settlement = vm.parseJsonAddress(json, ".settlement");
-        bytes32 cid = ChannelTypes.channelId(
-            chainId, settlement, vm.parseJsonAddress(json, ".opener"), _b32(".salt")
-        );
+        bytes32 cid = ChannelTypes.channelId(chainId, settlement, vm.parseJsonAddress(json, ".opener"), _b32(".salt"));
         assertEq(cid, _b32(".channelId"));
-        assertEq(ChannelTypes.participantRoot(vm.parseJsonAddressArray(json, ".participants")), _b32(".participantRoot"));
+        assertEq(
+            ChannelTypes.participantRoot(vm.parseJsonAddressArray(json, ".participants")), _b32(".participantRoot")
+        );
     }
 
     function test_requestMatchesRust() public view {
@@ -117,7 +117,8 @@ contract EncodingsTest is Test {
     }
 
     function test_malformedRequestsRejected() public {
-        string[3] memory keys = [".malformedRequests.truncated", ".malformedRequests.trailingByte", ".malformedRequests.dirtyNoncePadding"];
+        string[3] memory keys =
+            [".malformedRequests.truncated", ".malformedRequests.trailingByte", ".malformedRequests.dirtyNoncePadding"];
         for (uint256 i; i < keys.length; ++i) {
             bytes memory bad = vm.parseJsonBytes(json, keys[i]);
             (bool ok,) = address(dec).call(abi.encodeCall(Decoder.decodeRequest, (bad)));

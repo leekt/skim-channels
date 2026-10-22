@@ -129,9 +129,7 @@ library ChannelTypes {
     }
 
     function domainSeparator(uint256 chainId, address settlement) internal pure returns (bytes32) {
-        return keccak256(
-            abi.encode(DOMAIN_TYPEHASH, keccak256("SkimChannels"), keccak256("0"), chainId, settlement)
-        );
+        return keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256("SkimChannels"), keccak256("0"), chainId, settlement));
     }
 
     /// @notice The digest every participant signs.

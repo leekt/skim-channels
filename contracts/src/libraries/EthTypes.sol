@@ -45,7 +45,11 @@ library EthTypes {
     /// @notice (type, success, logs) of a consensus-encoded receipt. Typed receipts keep
     ///         their EIP-2718 type byte; only types 1..4 are known. Pre-Byzantium state roots
     ///         are rejected.
-    function decodeReceipt(bytes memory enc) internal pure returns (uint8 txType, bool success, RLP.Item[] memory logs) {
+    function decodeReceipt(bytes memory enc)
+        internal
+        pure
+        returns (uint8 txType, bool success, RLP.Item[] memory logs)
+    {
         if (enc.length == 0) revert BadReceipt();
         uint8 b0 = uint8(enc[0]);
         RLP.Item memory body;

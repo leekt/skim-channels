@@ -63,7 +63,8 @@ library WitnessLib {
         for (uint256 i; i < p.accounts.length; ++i) {
             AccountWitness memory w = p.accounts[i];
             if (i > 0 && p.accounts[i - 1].account >= w.account) revert NonCanonicalPackage();
-            (bool found, bytes memory leaf) = MerklePatricia.get(stateRoot, abi.encodePacked(keccak256(abi.encodePacked(w.account))), w.proof);
+            (bool found, bytes memory leaf) =
+                MerklePatricia.get(stateRoot, abi.encodePacked(keccak256(abi.encodePacked(w.account))), w.proof);
             if (w.exists) {
                 if (!found) revert BadAccountProof(w.account);
                 EthTypes.Account memory acct = EthTypes.decodeAccount(leaf);
@@ -101,7 +102,8 @@ library WitnessLib {
             if (sroot == MerklePatricia.EMPTY_ROOT) {
                 if (s.value != 0 || s.proof.length != 0) revert BadStorageProof(s.account, s.slot);
             } else {
-                (bool found, bytes memory leaf) = MerklePatricia.get(sroot, abi.encodePacked(keccak256(abi.encodePacked(s.slot))), s.proof);
+                (bool found, bytes memory leaf) =
+                    MerklePatricia.get(sroot, abi.encodePacked(keccak256(abi.encodePacked(s.slot))), s.proof);
                 if (s.value == 0 ? found : (!found || EthTypes.decodeSlotValue(leaf) != s.value)) {
                     revert BadStorageProof(s.account, s.slot);
                 }

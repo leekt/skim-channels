@@ -10,7 +10,10 @@ use std::collections::BTreeMap;
 use alloy_primitives::{Address, B256, hex};
 use alloy_sol_types::SolValue;
 use channel_runner::{Rpc, anchor_of, fetch_header, receipt_evidence};
-use channel_witness::{package_hash, source::{SkimRpc, collect_witness}};
+use channel_witness::{
+    package_hash,
+    source::{SkimRpc, collect_witness},
+};
 use clap::{Parser, Subcommand};
 use serde_json::json;
 
@@ -60,12 +63,22 @@ fn main() {
 
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let out = match cli.cmd {
-        Cmd::Header { rpc, block, chain_id } => {
+        Cmd::Header {
+            rpc,
+            block,
+            chain_id,
+        } => {
             let h = fetch_header(&Rpc::new(rpc), &block)?;
             let a = anchor_of(chain_id, &h);
             json!({ "raw": h.raw, "hash": h.hash, "number": h.header.number, "stateRoot": h.header.state_root, "anchorId": a.id() })
         }
-        Cmd::Witness { rpc, block_hash, chain_id, read, code } => {
+        Cmd::Witness {
+            rpc,
+            block_hash,
+            chain_id,
+            read,
+            code,
+        } => {
             let h = fetch_header(&Rpc::new(rpc.clone()), &block_hash.to_string())?;
             let anchor = anchor_of(chain_id, &h);
             let mut reads: BTreeMap<Address, (Vec<B256>, bool)> = BTreeMap::new();

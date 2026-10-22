@@ -27,13 +27,15 @@ contract L1StateReader {
     ) external view returns (bytes32) {
         bytes32 root = inbox.stateRootOf(anchorId);
         if (root == 0) revert UnknownAnchor(anchorId);
-        (bool found, bytes memory leaf) = MerklePatricia.get(root, abi.encodePacked(keccak256(abi.encodePacked(account))), accountProof);
+        (bool found, bytes memory leaf) =
+            MerklePatricia.get(root, abi.encodePacked(keccak256(abi.encodePacked(account))), accountProof);
         if (!found) {
             if (storageProof.length != 0) revert BadProof();
             return 0;
         }
         bytes32 sroot = EthTypes.decodeAccount(leaf).storageRoot;
-        (bool sfound, bytes memory sleaf) = MerklePatricia.get(sroot, abi.encodePacked(keccak256(abi.encodePacked(slot))), storageProof);
+        (bool sfound, bytes memory sleaf) =
+            MerklePatricia.get(sroot, abi.encodePacked(keccak256(abi.encodePacked(slot))), storageProof);
         return sfound ? bytes32(EthTypes.decodeSlotValue(sleaf)) : bytes32(0);
     }
 }

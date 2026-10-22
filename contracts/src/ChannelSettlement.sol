@@ -58,8 +58,7 @@ contract ChannelSettlement {
         bytes outcome;
     }
 
-    bytes32 public constant OUTCOME_TOPIC =
-        keccak256("ChannelOutcome(bytes32,bytes32,bytes32,bytes32,bytes32)");
+    bytes32 public constant OUTCOME_TOPIC = keccak256("ChannelOutcome(bytes32,bytes32,bytes32,bytes32,bytes32)");
 
     bytes32 public immutable rollupId;
     bytes32 public immutable profileHash;

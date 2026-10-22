@@ -12,6 +12,8 @@ import {ChannelExecutor} from "../src/ChannelExecutor.sol";
 import {L2AnchorInbox} from "../src/L2AnchorInbox.sol";
 import {SplitModule} from "../src/examples/SplitModule.sol";
 import {RLPEncode} from "./helpers/RLPEncode.sol";
+import {CanonicalBlockRegistry} from "../src/CanonicalBlockRegistry.sol";
+import {MockTransitionVerifier} from "../src/mocks/MockTransitionVerifier.sol";
 
 /// Tries to write state from compute(). Approved by code hash, so only STATICCALL stops it.
 contract WritingModule {
@@ -46,7 +48,11 @@ contract RogueModule {
 /// Emits a ChannelOutcome-shaped log from the wrong contract.
 contract Impostor {
     event ChannelOutcome(
-        bytes32 indexed channelId, bytes32 indexed requestHash, bytes32 anchorId, bytes32 policyHash, bytes32 outcomeHash
+        bytes32 indexed channelId,
+        bytes32 indexed requestHash,
+        bytes32 anchorId,
+        bytes32 policyHash,
+        bytes32 outcomeHash
     );
 
     function emitOutcome(bytes32 c, bytes32 r, bytes32 a, bytes32 p, bytes32 o) external {
@@ -94,9 +100,8 @@ contract ChannelTest is Test {
 
         alice = vm.addr(aliceKey);
         bob = vm.addr(bobKey);
-        (participants, keys) = alice < bob
-            ? (_pair(alice, bob), _pairU(aliceKey, bobKey))
-            : (_pair(bob, alice), _pairU(bobKey, aliceKey));
+        (participants, keys) =
+            alice < bob ? (_pair(alice, bob), _pairU(aliceKey, bobKey)) : (_pair(bob, alice), _pairU(bobKey, aliceKey));
 
         registry = new MockAcceptedBlockRegistry(address(this));
         anchors = new AnchorRegistry();
@@ -121,8 +126,7 @@ contract ChannelTest is Test {
         mods[1] = address(writer);
         mods[2] = address(greedy);
         executor = new ChannelExecutor(profileHash, L1, inbox, mods);
-        settlement =
-            new ChannelSettlement(ROLLUP, profileHash, ChannelTypes.PROFILE_MOCK_LOCAL, registry, anchors);
+        settlement = new ChannelSettlement(ROLLUP, profileHash, ChannelTypes.PROFILE_MOCK_LOCAL, registry, anchors);
         policy = ChannelTypes.ChannelPolicy({anchorConfirmation: 2, maxAnchorLag: 64});
 
         // L1 anchors H0 (100) and H1 (101): posted to L2, authenticated on L1 by blockhash.
@@ -204,7 +208,11 @@ contract ChannelTest is Test {
         });
     }
 
-    function _sign(ChannelTypes.FinalRequest memory r, uint256[] memory ks) internal view returns (bytes[] memory sigs) {
+    function _sign(ChannelTypes.FinalRequest memory r, uint256[] memory ks)
+        internal
+        view
+        returns (bytes[] memory sigs)
+    {
         bytes32 digest = ChannelTypes.requestSigningHash(r, L1, address(settlement));
         sigs = new bytes[](ks.length);
         for (uint256 i; i < ks.length; ++i) {
@@ -245,7 +253,9 @@ contract ChannelTest is Test {
         bytes[] memory encLogs = new bytes[](logs.length);
         for (uint256 i; i < logs.length; ++i) {
             bytes[] memory topics = new bytes[](logs[i].topics.length);
-            for (uint256 j; j < topics.length; ++j) topics[j] = RLPEncode.str(abi.encodePacked(logs[i].topics[j]));
+            for (uint256 j; j < topics.length; ++j) {
+                topics[j] = RLPEncode.str(abi.encodePacked(logs[i].topics[j]));
+            }
             bytes[] memory f = new bytes[](3);
             f[0] = RLPEncode.str(abi.encodePacked(logs[i].emitter));
             f[1] = RLPEncode.list(topics);
@@ -300,10 +310,12 @@ contract ChannelTest is Test {
     }
 
     uint256 headerSalt;
+    bytes32 l2Parent = keccak256("l2-parent");
+    uint256 l2Number = 1;
 
     function _l2Header(bytes32 receiptsRoot) internal returns (bytes memory) {
         bytes[] memory f = new bytes[](15);
-        f[0] = RLPEncode.str(abi.encodePacked(keccak256("l2-parent")));
+        f[0] = RLPEncode.str(abi.encodePacked(l2Parent));
         f[1] = RLPEncode.str(abi.encodePacked(bytes32(0)));
         f[2] = RLPEncode.str(abi.encodePacked(address(0)));
         f[3] = RLPEncode.str(abi.encodePacked(keccak256("l2-state")));
@@ -311,7 +323,7 @@ contract ChannelTest is Test {
         f[5] = RLPEncode.str(abi.encodePacked(receiptsRoot));
         f[6] = RLPEncode.str(new bytes(256));
         f[7] = RLPEncode.num(0);
-        f[8] = RLPEncode.num(1);
+        f[8] = RLPEncode.num(l2Number);
         f[9] = RLPEncode.num(30_000_000);
         f[10] = RLPEncode.num(100_000);
         f[11] = RLPEncode.num(1_700_000_000 + headerSalt++);
@@ -352,9 +364,13 @@ contract ChannelTest is Test {
         assertEq(settlement.withdrawable(participants[0]), 1.4 ether);
         assertEq(settlement.withdrawable(participants[1]), 0.6 ether);
 
-        vm.expectRevert(abi.encodeWithSelector(ChannelSettlement.WrongStatus.selector, ChannelSettlement.Status.Settled));
+        vm.expectRevert(
+            abi.encodeWithSelector(ChannelSettlement.WrongStatus.selector, ChannelSettlement.Status.Settled)
+        );
         settlement.settle(t.channelId, evidence);
-        vm.expectRevert(abi.encodeWithSelector(ChannelSettlement.WrongStatus.selector, ChannelSettlement.Status.Settled));
+        vm.expectRevert(
+            abi.encodeWithSelector(ChannelSettlement.WrongStatus.selector, ChannelSettlement.Status.Settled)
+        );
         vm.warp(DEADLINE);
         settlement.refund(t.channelId);
 
@@ -541,6 +557,42 @@ contract ChannelTest is Test {
         settlement.settle(t.channelId, evidence);
     }
 
+    CanonicalBlockRegistry canon;
+    MockTransitionVerifier mockVerifier;
+
+    function _canonicalSettlement() internal returns (ChannelSettlement s2) {
+        mockVerifier = new MockTransitionVerifier();
+        uint256 n = l2Number;
+        (l2Parent, l2Number) = (bytes32(0), 0);
+        bytes memory genesis = _l2Header(bytes32(0));
+        // Blocks built from here on extend this genesis.
+        (l2Parent, l2Number) = (keccak256(genesis), n);
+        canon = new CanonicalBlockRegistry(ROLLUP, profileHash, mockVerifier, anchors, genesis);
+        s2 = new ChannelSettlement(ROLLUP, profileHash, ChannelTypes.PROFILE_MOCK_LOCAL, canon, anchors);
+    }
+
+    function test_settlesThroughCanonicalRegistry() public {
+        // Same flow, but the L2 block is accepted by lineage + L1 anchor + blob DA + verifier
+        // (here the labeled MOCK verifier) instead of an operator assertion.
+        settlement = _canonicalSettlement(); // _terms/_call/_sign bind to `settlement`
+        ChannelTypes.ChannelTerms memory t = _openAndFund("canon", address(split));
+        (ChannelExecutor.Call memory c, ChannelTypes.FinalRequest memory r) = _call(t, ".h1", _input());
+        bytes memory evidence = _executeAndProve(c, r, false);
+        vm.expectRevert(abi.encodeWithSelector(ChannelSettlement.Invalid.selector, "block not accepted"));
+        settlement.settle(t.channelId, evidence);
+        _submitCanonical(evidence, r.anchorId);
+        settlement.settle(t.channelId, evidence);
+        assertEq(settlement.withdrawable(participants[0]), 1.4 ether);
+    }
+
+    function _submitCanonical(bytes memory evidence, bytes32 anchorId) internal {
+        ChannelSettlement.Evidence memory e = abi.decode(evidence, (ChannelSettlement.Evidence));
+        bytes32[] memory blobs = new bytes32[](1);
+        blobs[0] = bytes32(uint256(0x01) << 248 | 0x1);
+        vm.blobhashes(blobs);
+        assertEq(canon.submit(e.l2Header, anchorId, abi.encodePacked(mockVerifier.MOCK_PROOF())), e.l2BlockHash);
+    }
+
     function test_crossChannelReuseRejected() public {
         ChannelTypes.ChannelTerms memory ta = _openAndFund("A", address(split));
         ChannelTypes.ChannelTerms memory tb = _openAndFund("B", address(split));
@@ -581,7 +633,9 @@ contract ChannelTest is Test {
         vm.expectRevert(ChannelSettlement.Deadline.selector);
         settlement.settle(t.channelId, evidence);
         settlement.refund(t.channelId);
-        vm.expectRevert(abi.encodeWithSelector(ChannelSettlement.WrongStatus.selector, ChannelSettlement.Status.Refunded));
+        vm.expectRevert(
+            abi.encodeWithSelector(ChannelSettlement.WrongStatus.selector, ChannelSettlement.Status.Refunded)
+        );
         settlement.settle(t.channelId, evidence);
     }
 
@@ -592,7 +646,9 @@ contract ChannelTest is Test {
         settlement.refund(t.channelId);
         assertEq(settlement.withdrawable(alice), 1 ether);
         assertEq(settlement.withdrawable(bob), 1 ether);
-        vm.expectRevert(abi.encodeWithSelector(ChannelSettlement.WrongStatus.selector, ChannelSettlement.Status.Refunded));
+        vm.expectRevert(
+            abi.encodeWithSelector(ChannelSettlement.WrongStatus.selector, ChannelSettlement.Status.Refunded)
+        );
         settlement.refund(t.channelId);
         vm.prank(bob);
         settlement.withdraw();
@@ -621,7 +677,9 @@ contract ChannelTest is Test {
         vm.prank(alice);
         settlement.open(abi.encode(t), participants, d, "ov");
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(ChannelSettlement.WrongStatus.selector, ChannelSettlement.Status.Funding));
+        vm.expectRevert(
+            abi.encodeWithSelector(ChannelSettlement.WrongStatus.selector, ChannelSettlement.Status.Funding)
+        );
         settlement.open(abi.encode(t), participants, d, "ov");
         vm.deal(bob, 2 ether);
         vm.prank(bob);
@@ -635,7 +693,8 @@ contract ChannelTest is Test {
         bps = uint16(bound(bps, 0, 10_000));
         WitnessLib.Read[] memory reads = new WitnessLib.Read[](1);
         reads[0] = WitnessLib.Read(fixture, shareSlot, bps);
-        uint256[] memory p = abi.decode(split.compute(abi.encode(fixture, shareSlot, uint256(total)), reads, 2), (uint256[]));
+        uint256[] memory p =
+            abi.decode(split.compute(abi.encode(fixture, shareSlot, uint256(total)), reads, 2), (uint256[]));
         assertEq(p[0] + p[1], total);
         assertEq(p[0], uint256(total) * bps / 10_000);
     }

@@ -309,6 +309,22 @@ impl AnchorBook {
         best
     }
 
+    /// Drops every anchor below `number` (with its witnesses): retention is the caller's
+    /// policy, e.g. below the oldest anchor any open channel may still use.
+    pub fn prune_below(&mut self, number: u64) {
+        self.entries.retain(|_, e| e.anchor.blockNumber >= number);
+        let entries = &self.entries;
+        self.by_id.retain(|_, h| entries.contains_key(h));
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     pub fn block_hash_of(&self, anchor_id: B256) -> Option<B256> {
         self.by_id.get(&anchor_id).copied()
     }

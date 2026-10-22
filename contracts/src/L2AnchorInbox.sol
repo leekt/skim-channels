@@ -11,7 +11,8 @@ import {EthTypes} from "./libraries/EthTypes.sol";
 ///         roots. L1 settlement re-authenticates every anchor against L1 itself
 ///         (AnchorRegistry), so a lying feed cannot get an outcome settled.
 contract L2AnchorInbox {
-    string public constant SECURITY_LABEL = "MOCK FEED: L1 headers posted by a system key, re-checked on L1 at settlement";
+    string public constant SECURITY_LABEL =
+        "MOCK FEED: L1 headers posted by a system key, re-checked on L1 at settlement";
 
     address public immutable system;
     uint256 public immutable l1ChainId;

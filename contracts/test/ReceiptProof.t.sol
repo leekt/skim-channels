@@ -109,11 +109,15 @@ contract ReceiptProofTest is Test {
     function test_truncatedAndPaddedProofsRevert() public {
         (uint256 index,, bytes[] memory proof) = _case(5);
         bytes[] memory short = new bytes[](proof.length - 1);
-        for (uint256 i; i < short.length; ++i) short[i] = proof[i];
+        for (uint256 i; i < short.length; ++i) {
+            short[i] = proof[i];
+        }
         vm.expectRevert(MerklePatricia.InvalidProof.selector);
         h.get(root, MerklePatricia.indexKey(index), short);
         bytes[] memory long = new bytes[](proof.length + 1);
-        for (uint256 i; i < proof.length; ++i) long[i] = proof[i];
+        for (uint256 i; i < proof.length; ++i) {
+            long[i] = proof[i];
+        }
         long[proof.length] = proof[0];
         vm.expectRevert(MerklePatricia.InvalidProof.selector);
         h.get(root, MerklePatricia.indexKey(index), long);
@@ -164,22 +168,28 @@ contract ReceiptProofTest is Test {
     }
 
     function testFuzz_rlpNeverPanics(bytes memory b) public view {
-        try this.decodeUint(b) {} catch (bytes memory err) {
+        try this.decodeUint(b) {}
+        catch (bytes memory err) {
             // Only our error (or a Solidity error from bounds), never a panic from overflow.
             assertTrue(err.length != 36 || bytes4(err) != bytes4(0x4e487b71));
         }
-        try h.receipt(b) {} catch (bytes memory err) {
+        try h.receipt(b) {}
+        catch (bytes memory err) {
             assertTrue(err.length != 36 || bytes4(err) != bytes4(0x4e487b71));
         }
     }
 
     function _copy(bytes[] memory a) internal pure returns (bytes[] memory b) {
         b = new bytes[](a.length);
-        for (uint256 i; i < a.length; ++i) b[i] = bytes.concat(a[i]);
+        for (uint256 i; i < a.length; ++i) {
+            b[i] = bytes.concat(a[i]);
+        }
     }
 
     function _slice(bytes memory b, uint256 from) internal pure returns (bytes memory out) {
         out = new bytes(b.length - from);
-        for (uint256 i; i < out.length; ++i) out[i] = b[from + i];
+        for (uint256 i; i < out.length; ++i) {
+            out[i] = b[from + i];
+        }
     }
 }

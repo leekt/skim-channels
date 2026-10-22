@@ -15,7 +15,11 @@ import {L2AnchorInbox} from "./L2AnchorInbox.sol";
 ///           holds is fixed at construction.
 contract ChannelExecutor {
     event ChannelOutcome(
-        bytes32 indexed channelId, bytes32 indexed requestHash, bytes32 anchorId, bytes32 policyHash, bytes32 outcomeHash
+        bytes32 indexed channelId,
+        bytes32 indexed requestHash,
+        bytes32 anchorId,
+        bytes32 policyHash,
+        bytes32 outcomeHash
     );
 
     bytes32 public immutable profileHash;

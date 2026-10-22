@@ -39,7 +39,12 @@ pub struct Rpc {
 
 impl Rpc {
     pub fn new(url: impl Into<String>) -> Self {
-        Self { url: url.into(), agent: ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(30)).build() }
+        Self {
+            url: url.into(),
+            agent: ureq::AgentBuilder::new()
+                .timeout(std::time::Duration::from_secs(30))
+                .build(),
+        }
     }
 
     pub fn url(&self) -> &str {
@@ -81,19 +86,33 @@ pub fn fetch_header(rpc: &Rpc, id: &str) -> Result<VerifiedHeader, RunnerError> 
     if v.is_null() {
         return Err(RunnerError::Other(format!("no block {id}")));
     }
-    let h: alloy_rpc_types_eth::Header =
-        serde_json::from_value(v).map_err(|e| RunnerError::Other(format!("bad header json: {e}")))?;
+    let h: alloy_rpc_types_eth::Header = serde_json::from_value(v)
+        .map_err(|e| RunnerError::Other(format!("bad header json: {e}")))?;
     let raw = Bytes::from(alloy_rlp::encode(&h.inner));
     let hash = keccak256(&raw);
-    let claimed = if by_hash { id.parse::<B256>().map_err(|e| RunnerError::Other(e.to_string()))? } else { h.hash };
+    let claimed = if by_hash {
+        id.parse::<B256>()
+            .map_err(|e| RunnerError::Other(e.to_string()))?
+    } else {
+        h.hash
+    };
     if hash != claimed {
         return Err(RunnerError::HeaderHash(claimed));
     }
-    Ok(VerifiedHeader { hash, raw, header: h.inner })
+    Ok(VerifiedHeader {
+        hash,
+        raw,
+        header: h.inner,
+    })
 }
 
 pub fn anchor_of(chain_id: u64, h: &VerifiedHeader) -> L1Anchor {
-    L1Anchor { chainId: U256::from(chain_id), blockNumber: h.header.number, blockHash: h.hash, stateRoot: h.header.state_root }
+    L1Anchor {
+        chainId: U256::from(chain_id),
+        blockNumber: h.header.number,
+        blockHash: h.hash,
+        stateRoot: h.header.state_root,
+    }
 }
 
 /// Settlement evidence for the receipt of `tx` (PROJECT.md §7.3): everything but the request
@@ -109,16 +128,25 @@ pub struct ReceiptEvidence {
 }
 
 pub fn receipt_evidence(rpc: &Rpc, tx: B256) -> Result<ReceiptEvidence, RunnerError> {
-    let r: TransactionReceipt = serde_json::from_value(rpc.call("eth_getTransactionReceipt", json!([tx]))?)
-        .map_err(|e| RunnerError::Other(format!("bad receipt json: {e}")))?;
-    let block_hash = r.block_hash.ok_or_else(|| RunnerError::Other("receipt not in a block".into()))?;
-    let tx_index = r.transaction_index.ok_or_else(|| RunnerError::Other("no transaction index".into()))? as usize;
+    let r: TransactionReceipt =
+        serde_json::from_value(rpc.call("eth_getTransactionReceipt", json!([tx]))?)
+            .map_err(|e| RunnerError::Other(format!("bad receipt json: {e}")))?;
+    let block_hash = r
+        .block_hash
+        .ok_or_else(|| RunnerError::Other("receipt not in a block".into()))?;
+    let tx_index =
+        r.transaction_index
+            .ok_or_else(|| RunnerError::Other("no transaction index".into()))? as usize;
     let header = fetch_header(rpc, &block_hash.to_string())?;
-    let all: Vec<TransactionReceipt> = serde_json::from_value(rpc.call("eth_getBlockReceipts", json!([block_hash]))?)
-        .map_err(|e| RunnerError::Other(format!("bad receipts json: {e}")))?;
+    let all: Vec<TransactionReceipt> =
+        serde_json::from_value(rpc.call("eth_getBlockReceipts", json!([block_hash]))?)
+            .map_err(|e| RunnerError::Other(format!("bad receipts json: {e}")))?;
     let mut encoded = vec![Bytes::new(); all.len()];
     for rc in all {
-        let i = rc.transaction_index.ok_or_else(|| RunnerError::Other("no transaction index".into()))? as usize;
+        let i = rc
+            .transaction_index
+            .ok_or_else(|| RunnerError::Other("no transaction index".into()))?
+            as usize;
         if rc.block_hash != Some(block_hash) || i >= encoded.len() || !encoded[i].is_empty() {
             return Err(RunnerError::Other("inconsistent block receipts".into()));
         }
@@ -128,8 +156,10 @@ pub fn receipt_evidence(rpc: &Rpc, tx: B256) -> Result<ReceiptEvidence, RunnerEr
     if root != header.header.receipts_root {
         return Err(RunnerError::ReceiptsRoot(block_hash));
     }
-    let proof = channel_receipts::receipt_proof(&encoded, tx_index).map_err(|e| RunnerError::Other(e.to_string()))?;
-    channel_receipts::verify_receipt(root, tx_index, &encoded[tx_index], &proof).map_err(|e| RunnerError::Other(e.to_string()))?;
+    let proof = channel_receipts::receipt_proof(&encoded, tx_index)
+        .map_err(|e| RunnerError::Other(e.to_string()))?;
+    channel_receipts::verify_receipt(root, tx_index, &encoded[tx_index], &proof)
+        .map_err(|e| RunnerError::Other(e.to_string()))?;
     Ok(ReceiptEvidence {
         block_hash,
         header: header.raw,
@@ -139,4 +169,83 @@ pub fn receipt_evidence(rpc: &Rpc, tx: B256) -> Result<ReceiptEvidence, RunnerEr
         receipts_root: root,
         block_number: header.header.number,
     })
+}
+
+/// Confirmation evidence from an RPC node's `safe` / `finalized` tags.
+///
+/// skim answers these tags only with light-client-authenticated execution hashes
+/// (`-32002 not_verified` until then), so [`RpcConfirmations::skim`] marks them authenticated:
+/// that trusts the local skim's light client, which is the trust-minimized component this
+/// project builds on. Any other node (anvil, a provider) is [`RpcConfirmations::unauthenticated`]
+/// and never promotes an anchor under [`channel_witness::anchor::Mode::Authenticated`].
+/// Each head's header is hash-checked; FCR is never reported.
+pub struct RpcConfirmations {
+    rpc: Rpc,
+    authenticated: bool,
+}
+
+impl RpcConfirmations {
+    pub fn skim(url: impl Into<String>) -> Self {
+        Self {
+            rpc: Rpc::new(url),
+            authenticated: true,
+        }
+    }
+
+    pub fn unauthenticated(url: impl Into<String>) -> Self {
+        Self {
+            rpc: Rpc::new(url),
+            authenticated: false,
+        }
+    }
+
+    pub fn rpc(&self) -> &Rpc {
+        &self.rpc
+    }
+}
+
+impl channel_witness::anchor::ConfirmationSource for RpcConfirmations {
+    fn head(
+        &self,
+        level: channel_types::ConfirmationPolicy,
+    ) -> Option<channel_witness::anchor::Confirmation> {
+        use channel_types::ConfirmationPolicy as P;
+        let (tag, authenticated) = match level {
+            P::Latest => ("latest", false),
+            P::Safe => ("safe", self.authenticated),
+            P::Finalized => ("finalized", self.authenticated),
+            P::FcrConfirmed => return None,
+        };
+        let h = fetch_header(&self.rpc, tag).ok()?;
+        Some(channel_witness::anchor::Confirmation {
+            level,
+            number: h.header.number,
+            hash: h.hash,
+            authenticated,
+        })
+    }
+}
+
+/// Observes `count` headers into `book`, walking back by parent hash from `from` (so that a
+/// confirmed head links to the anchors below it). Every header is hash-checked.
+pub fn observe_back(
+    book: &mut channel_witness::anchor::AnchorBook,
+    rpc: &Rpc,
+    from: B256,
+    count: usize,
+) -> Result<Vec<L1Anchor>, RunnerError> {
+    let mut out = Vec::with_capacity(count);
+    let mut cur = from;
+    for _ in 0..count {
+        let h = fetch_header(rpc, &cur.to_string())?;
+        out.push(
+            book.observe(&h.raw)
+                .map_err(|e| RunnerError::Other(e.to_string()))?,
+        );
+        if h.header.number == 0 {
+            break;
+        }
+        cur = h.header.parent_hash;
+    }
+    Ok(out)
 }
