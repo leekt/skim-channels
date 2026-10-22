@@ -9,7 +9,8 @@
 //!   authenticated `safe` / `finalized`). An anchor is executable only if the confirmed head
 //!   links back to it through headers the book holds; an unknown link fails closed.
 //! - `Latest` is optimistic and needs [`Mode::OptimisticExperiment`]. `Safe` is never taken
-//!   as `FcrConfirmed`, and `FcrConfirmed` is refused until a real evidence source exists.
+//!   as `FcrConfirmed`: promotion requires evidence at exactly the policy's level, and only an
+//!   FCR source (the beacon `fast_confirmation` event) reports `FcrConfirmed` heads.
 //! - A reorged block (and its descendants) is invalidated for good, and its witnesses are
 //!   dropped; a replacement block is a different anchor and needs its own witnesses.
 //! - Promotion is recomputed from the current evidence each time, so an anchor that stops
@@ -102,10 +103,12 @@ pub struct AnchorBook {
 impl AnchorBook {
     pub fn new(chain_id: u64, policy: ConfirmationPolicy, mode: Mode) -> Result<Self, AnchorError> {
         match (policy, mode) {
-            (ConfirmationPolicy::FcrConfirmed, _) => {
+            // FCR is promoted only by a source reporting `FcrConfirmed` heads (channel-runner's
+            // `FcrConfirmations`: the beacon `fast_confirmation` event). Others report none.
+            (ConfirmationPolicy::FcrConfirmed, Mode::OptimisticExperiment) => {
                 return Err(AnchorError::Unsupported(
                     policy,
-                    "no FCR confirmation-evidence source is integrated (M4)",
+                    "FCR is an authenticated policy",
                 ));
             }
             (ConfirmationPolicy::Latest, Mode::Authenticated) => {

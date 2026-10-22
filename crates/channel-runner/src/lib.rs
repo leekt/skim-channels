@@ -249,3 +249,111 @@ pub fn observe_back(
     }
     Ok(out)
 }
+
+/// Fast Confirmation Rule evidence (PROJECT.md §3.3) from a beacon node's standard
+/// `fast_confirmation` SSE event (`GET /eth/v1/events?topics=fast_confirmation`, beacon-APIs
+/// #598; Lighthouse `--enable-fast-confirmation`, Lodestar `--chain.fastConfirmation`).
+///
+/// Trust: FCR needs the full fork-choice view (every validator's latest vote), which light-client
+/// data doesn't carry, so this trusts the configured **full beacon node**, typically the
+/// operator's own. The event gives a beacon block root; the execution block hash is read from
+/// that beacon block (pre-ePBS `execution_payload.block_hash`, ePBS
+/// `signed_execution_payload_bid.message.block_hash`) and its header is hash-checked on the EL
+/// endpoint. This is never derived from `safe`: a node may feed FCR into `safe`, but the
+/// evidence used here is the explicit event.
+pub struct FcrConfirmations {
+    beacon: String,
+    el: Rpc,
+    agent: ureq::Agent,
+}
+
+impl FcrConfirmations {
+    pub fn new(beacon_url: impl Into<String>, el_url: impl Into<String>) -> Self {
+        Self {
+            beacon: beacon_url.into().trim_end_matches('/').to_string(),
+            el: Rpc::new(el_url),
+            agent: ureq::AgentBuilder::new()
+                .timeout(std::time::Duration::from_secs(30))
+                .build(),
+        }
+    }
+
+    /// Waits for the next `fast_confirmation` event and returns its beacon block root.
+    pub fn next_confirmed_root(&self) -> Result<B256, RunnerError> {
+        use std::io::BufRead;
+        let resp = self
+            .agent
+            .get(&format!(
+                "{}/eth/v1/events?topics=fast_confirmation",
+                self.beacon
+            ))
+            .set("accept", "text/event-stream")
+            .call()
+            .map_err(|e| RunnerError::Rpc("events".into(), e.to_string()))?;
+        let mut event = String::new();
+        for line in std::io::BufReader::new(resp.into_reader()).lines() {
+            let line = line.map_err(|e| RunnerError::Rpc("events".into(), e.to_string()))?;
+            if let Some(e) = line.strip_prefix("event:") {
+                event = e.trim().to_string();
+            } else if let Some(d) = line.strip_prefix("data:")
+                && event == "fast_confirmation"
+            {
+                let v: Value = serde_json::from_str(d.trim())
+                    .map_err(|e| RunnerError::Other(e.to_string()))?;
+                return v["block"]
+                    .as_str()
+                    .and_then(|s| s.parse().ok())
+                    .ok_or_else(|| RunnerError::Other("fast_confirmation without block".into()));
+            }
+        }
+        Err(RunnerError::Other("event stream ended".into()))
+    }
+
+    /// The execution block a beacon block commits to, hash-checked against the EL.
+    pub fn execution_header(&self, beacon_root: B256) -> Result<VerifiedHeader, RunnerError> {
+        let v: Value = self
+            .agent
+            .get(&format!(
+                "{}/eth/v2/beacon/blocks/{beacon_root}",
+                self.beacon
+            ))
+            .call()
+            .map_err(|e| RunnerError::Rpc("beacon block".into(), e.to_string()))?
+            .into_json()
+            .map_err(|e| RunnerError::Rpc("beacon block".into(), e.to_string()))?;
+        let body = &v["data"]["message"]["body"];
+        let hash = body["execution_payload"]["block_hash"]
+            .as_str()
+            .or_else(|| body["signed_execution_payload_bid"]["message"]["block_hash"].as_str())
+            .ok_or_else(|| {
+                RunnerError::Other("beacon block without an execution block hash".into())
+            })?;
+        fetch_header(&self.el, hash)
+    }
+
+    /// One confirmation from the next event.
+    pub fn next(&self) -> Result<channel_witness::anchor::Confirmation, RunnerError> {
+        let h = self.execution_header(self.next_confirmed_root()?)?;
+        Ok(channel_witness::anchor::Confirmation {
+            level: channel_types::ConfirmationPolicy::FcrConfirmed,
+            number: h.header.number,
+            hash: h.hash,
+            authenticated: true,
+        })
+    }
+}
+
+/// The latest FCR confirmation seen, as a [`ConfirmationSource`](channel_witness::anchor::ConfirmationSource)
+/// for `FcrConfirmed` only (every other level: none).
+pub struct FcrHead(pub Option<channel_witness::anchor::Confirmation>);
+
+impl channel_witness::anchor::ConfirmationSource for FcrHead {
+    fn head(
+        &self,
+        level: channel_types::ConfirmationPolicy,
+    ) -> Option<channel_witness::anchor::Confirmation> {
+        (level == channel_types::ConfirmationPolicy::FcrConfirmed)
+            .then_some(self.0)
+            .flatten()
+    }
+}

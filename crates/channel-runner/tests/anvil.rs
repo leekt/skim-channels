@@ -184,3 +184,101 @@ fn a_header_with_a_swapped_state_root_is_refused() {
         Err(RunnerError::HeaderHash(_))
     ));
 }
+
+/// A scripted beacon node: the standard `fast_confirmation` SSE event, and a beacon block in
+/// the ePBS shape whose bid commits to `el_hash`.
+fn fake_beacon(root: B256, el_hash: String) -> String {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for s in l.incoming().take(4) {
+            let Ok(mut s) = s else { continue };
+            let mut r = BufReader::new(s.try_clone().unwrap());
+            let mut first = String::new();
+            r.read_line(&mut first).unwrap();
+            loop {
+                let mut line = String::new();
+                r.read_line(&mut line).unwrap();
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+            }
+            let path = first.split_whitespace().nth(1).unwrap_or("").to_string();
+            if path.starts_with("/eth/v1/events") {
+                let body = format!(
+                    "event: head\ndata: {{\"slot\":\"1\",\"block\":\"{}\"}}\n\nevent: fast_confirmation\ndata: {{\"slot\":\"2\",\"block\":\"{root}\"}}\n\n",
+                    B256::repeat_byte(9)
+                );
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+            } else if path == format!("/eth/v2/beacon/blocks/{root}") {
+                let body = json!({"version": "gloas", "data": {"message": {"body": {
+                    "signed_execution_payload_bid": {"message": {"block_hash": el_hash}}
+                }}}})
+                .to_string();
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+            } else {
+                let _ = write!(s, "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n");
+            }
+        }
+    });
+    url
+}
+
+#[test]
+fn fcr_event_promotes_an_fcr_anchor() {
+    use channel_runner::{FcrConfirmations, FcrHead};
+    let Some(node) = anvil(18747) else {
+        eprintln!("skipped: anvil not available");
+        return;
+    };
+    let rpc = Rpc::new(node.1.clone());
+    send_value(&rpc);
+    let head = fetch_header(&rpc, "latest").unwrap();
+    let anchor = anchor_of(31337, &head);
+    let root = B256::repeat_byte(0xfc);
+
+    let fcr = FcrConfirmations::new(fake_beacon(root, head.hash.to_string()), node.1.clone());
+    let c = fcr.next().unwrap();
+    assert_eq!(
+        (c.level, c.hash, c.number, c.authenticated),
+        (
+            ConfirmationPolicy::FcrConfirmed,
+            head.hash,
+            head.header.number,
+            true
+        )
+    );
+
+    let pkg = collect_witness(
+        &SkimRpc::new(node.1.clone()),
+        &anchor,
+        &reads(&[(DEV, &[B256::ZERO], false)]),
+    )
+    .unwrap();
+    let mut book =
+        AnchorBook::new(31337, ConfirmationPolicy::FcrConfirmed, Mode::Authenticated).unwrap();
+    observe_back(&mut book, &rpc, head.hash, 2).unwrap();
+    book.attach(head.hash, &pkg).unwrap();
+    let keys = [ReadKey::Storage(DEV, B256::ZERO)];
+    // skim-style sources never report FCR ...
+    book.promote(&RpcConfirmations::skim(node.1.clone()));
+    assert!(book.executable(anchor.id(), &keys).is_err());
+    // ... the beacon event does.
+    book.promote(&FcrHead(Some(c)));
+    assert!(book.executable(anchor.id(), &keys).is_ok());
+
+    // A beacon node pointing at an execution block the EL doesn't have: no confirmation.
+    let liar = FcrConfirmations::new(
+        fake_beacon(root, B256::repeat_byte(0x77).to_string()),
+        node.1.clone(),
+    );
+    assert!(liar.next().is_err());
+}

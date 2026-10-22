@@ -353,10 +353,6 @@ fn unknown_links_and_weaker_evidence_fail_closed() {
 #[test]
 fn policies_without_evidence_sources_are_refused() {
     assert!(matches!(
-        AnchorBook::new(CHAIN, ConfirmationPolicy::FcrConfirmed, Mode::Authenticated),
-        Err(AnchorError::Unsupported(..))
-    ));
-    assert!(matches!(
         AnchorBook::new(
             CHAIN,
             ConfirmationPolicy::FcrConfirmed,
@@ -382,6 +378,45 @@ fn policies_without_evidence_sources_are_refused() {
     book.attach(a.blockHash, &s.package(&a, &split_reads()))
         .unwrap();
     book.promote(&Evidence::at(ConfirmationPolicy::Latest, &a, false));
+    assert!(book.executable(a.id(), &SPLIT_KEYS).is_ok());
+}
+
+#[test]
+fn fcr_needs_fcr_evidence_never_safe_or_finalized() {
+    let mut book =
+        AnchorBook::new(CHAIN, ConfirmationPolicy::FcrConfirmed, Mode::Authenticated).unwrap();
+    let s = state(6000);
+    let (raw, a) = s.header(CHAIN, 100, B256::ZERO);
+    book.observe(&raw).unwrap();
+    book.attach(a.blockHash, &s.package(&a, &split_reads()))
+        .unwrap();
+    let mut strong = Evidence::finalized(&a);
+    strong.0.insert(
+        ConfirmationPolicy::Safe,
+        Confirmation {
+            level: ConfirmationPolicy::Safe,
+            number: a.blockNumber,
+            hash: a.blockHash,
+            authenticated: true,
+        },
+    );
+    book.promote(&strong);
+    assert_eq!(
+        book.status(a.id()),
+        Some(Status::Candidate),
+        "safe/finalized are not FCR evidence"
+    );
+    book.promote(&Evidence::at(ConfirmationPolicy::FcrConfirmed, &a, false));
+    assert_eq!(
+        book.status(a.id()),
+        Some(Status::Candidate),
+        "unauthenticated FCR evidence"
+    );
+    book.promote(&Evidence::at(ConfirmationPolicy::FcrConfirmed, &a, true));
+    assert_eq!(
+        book.status(a.id()),
+        Some(Status::Executable(ConfirmationPolicy::FcrConfirmed))
+    );
     assert!(book.executable(a.id(), &SPLIT_KEYS).is_ok());
 }
 
