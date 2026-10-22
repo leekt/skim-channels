@@ -80,9 +80,48 @@ It does **not** remove the cost of proving existing L1 state (witnesses) or the 
 
 **Measured on anvil:** `finalizeExit` costs 295k gas; receipt-based `settle` costs 306k.
 
-**Not yet:** 30-day governance exit window (no upgradeability exists, so there is nothing to
-govern yet), forced inclusion of L2 transactions, data-withholding handling in
-`CanonicalBlockRegistry` beyond the blob requirement.
+## Governance and censorship resistance (implemented 2026-10-22)
+- **One upgrade path.** `RollupGovernance` is the only thing that can change the block
+  registry's verifier. Settlement, anchors, escrow and exits have no admin at all.
+  - The owner schedules a replacement that takes effect only after `EXIT_WINDOW = 30 days`.
+    Users who disagree leave first: normal settle, or the operator-free exit.
+  - Anyone may execute a matured upgrade.
+- **Security Council, restricted.** It can act without delay only after a fault was proven
+  on chain. `CanonicalBlockRegistry.proveConflict` lets anyone show two verifier-accepted
+  transitions with identical inputs (parent state, DA, anchor, forced transactions, profile)
+  and different results. That freezes the registry:
+  - no new blocks;
+  - no block is reported accepted, so receipt settlement halts;
+  - the L1 re-execution exit keeps working, because it never touches the verifier.
+
+  Only then may the council replace the verifier, which unfreezes the registry.
+- **Forced inclusion.** `forceInclude(signedTx)` queues a transaction on L1. Every block must
+  consume all entries older than `FORCE_DELAY` (1 day). The verifier is given the rolling
+  accumulator of the consumed entries, so a block can't claim inclusion it didn't do.
+- **Permissionless.** Anyone may submit blocks, prove conflicts, force-include and execute
+  matured upgrades.
+
+## Native execution verification (implemented 2026-10-22)
+`NativeRollupRegistry` accepts L2 blocks only from state roots that L1 verified by
+re-executing them with the EXECUTE precompile. It reads ethrex's `NativeRollup.sol`
+(lambdaclass/ethrex PR #6418, an EIP-8079 PoC).
+- A block's raw header is accepted if keccak(header) is the verified tip, or if the L2's
+  EIP-2935 history contract holds it in a later verified, final state (MPT proof).
+- The header's state root must equal the verified root at its height.
+- Measured end to end (`ts/e2e-native.ts`). Profile: `native-reexecution-devnet`.
+
+**Limits of that PoC, outside this repo:**
+- ethrex's `advance()` is restricted to a single advancer, so it is not permissionless.
+- Its L2 DA is the SSZ stateless input in `advance()` calldata, not blobs.
+- EIP-8288 / EIP-8357 proof verification (`native-proof-dependencies`) has no reference
+  implementation; L2BEAT's demo uses a mock verifier. That profile stays unimplemented.
+
+**Still open:**
+- Data-withholding handling beyond `CanonicalBlockRegistry`'s blob requirement.
+- A permissionless advancer for the native path.
+- Combining `CanonicalBlockRegistry`'s governance with a real EXECUTE-backed
+  `IStateTransitionVerifier`. That needs an EXECUTE ABI stable enough to call directly;
+  ethrex's is SSZ with fixed offsets, called brittle in its own review.
 
 ## Effect on what is built now (M0/M1)
 
