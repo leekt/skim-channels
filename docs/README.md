@@ -48,4 +48,5 @@ Measurements of the builds named in each log. Use the guides for current behavio
 | [App channels: accounting](experiments/app-channels-accounting.md) | experiments 1, 2 and 4: operator death, adversarial accounting, the one-day fence |
 | [Prediction round cost](experiments/prediction-round-cost.md) | optimistic prediction rounds: safety tests, dispute gas, cost vs. the same game on L1 |
 | [Prediction review fixes](experiments/prediction-review-fixes.md) | f4aab62 review: challenge-period floors, request coverage, request queue deadlines, exits without a witness |
-| [Clearing runtime](experiments/clearing-runtime.md) | skim → stateful Solidity → L1 net settlement: deterministic e2e, live skim reads, costs by category |
+| [Clearing runtime](experiments/clearing-runtime.md) | skim → stateful Solidity → L1 net settlement (v1): deterministic e2e, live skim reads, costs by category |
+| [Clearing v2](experiments/clearing-v2.md) | optimistic settlement with the account root on L1, handover, forced orders; cost against batched and per-transaction controls |

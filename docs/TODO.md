@@ -7,7 +7,14 @@
      - blob DA for tickets and leaves (disputes need the data within the window);
      - cheaper first deposits (119k now);
      - batching beyond ~1,800 users per commit or proposal transaction.
-   - **Stateful clearing: runtime and L1 settlement built** ([log](experiments/clearing-runtime.md)).
+   - **Stateful clearing: runtime and L1 settlement built** ([log](experiments/clearing-runtime.md)); **v2 optimistic settlement built** ([log](experiments/clearing-v2.md)).
+   - **Next, runtime recovery** (review of 5db7064):
+     - batch states and multi-batch rollback/replay;
+     - new proofs before rollback, with a persistent journal;
+     - replay only accepted actions;
+     - consume skim rewinds;
+     - canonical / orphaned / unknown;
+     - anchor ageing under real block progress.
    - **Next for clearing:**
      - forced inclusion or another censorship answer for orders;
      - partial fills;

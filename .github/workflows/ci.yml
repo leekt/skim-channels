@@ -88,3 +88,6 @@ jobs:
       - name: e2e stateful clearing (anvil L1 + local executor)
         working-directory: ts
         run: npm run -s e2e-clearing
+      - name: e2e clearing v2 (optimistic, handover, forced orders)
+        working-directory: ts
+        run: npm run -s e2e-clearing-v2

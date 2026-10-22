@@ -69,6 +69,8 @@ Run against a skim node at Sepolia head 11,970,156. Data: [`data/live-skim-clear
 | | L1 price witness | 1.8 KB (anvil), 6.2 KB (fixture), 13.2 KB for two accounts on Sepolia via skim | |
 | **Dispute** | `challengeSignature`, batch of 1 / 8 / 32 fills | 78,880 / 192,726 / 622,524 (the whole batch is resubmitted) | forge |
 
+**Later finding:** [clearing v2](clearing-v2.md#cost-against-batched-and-per-transaction-controls) added a control: the same batch with every signature verified at once and no window. v1's optimistic-signature design saves at most about 10k per fill against it, and costs more for sparse batches. v1 is kept only as a baseline.
+
 **Reading the numbers:**
 - **L1 cost scales with fills.** A batch pays the witness verification once (300k–800k, depending on trie depth), plus ≈ 50k gas and ≈ 740 B of calldata per fill.
 - **L1 re-checks each fill rather than trusting the executor.** That is the price of not trusting it.

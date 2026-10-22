@@ -13,7 +13,7 @@ git diff --exit-code -- fixtures/
 (cd ts && npm ci --silent && npm run -s check-encodings)
 if command -v anvil >/dev/null; then
   cargo build -q -p channel-runner
-  (cd ts && npm run -s e2e && npm run -s e2e-app && npm run -s e2e-predict && npm run -s e2e-clearing)
+  (cd ts && npm run -s e2e && npm run -s e2e-app && npm run -s e2e-predict && npm run -s e2e-clearing && npm run -s e2e-clearing-v2)
 else
   echo "skipped e2e: anvil not installed"
 fi

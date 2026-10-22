@@ -53,6 +53,16 @@ governance, forced inclusion). Read first: [PROJECT](../PROJECT.md) (spec v0.1),
   - a live settlement through skim (no escrow on a Glamsterdam network yet);
   - a cost comparison with clearing directly on L1.
 
+## Clearing v2 (2026-10-23)
+- **Design:** [clearing v2](experiments/clearing-v2.md).
+  - Optimistic: L1 checks nothing per fill.
+  - Each batch publishes packed fills and changed account leaves, and L1 commits the account root.
+  - `challengeFill` and `challengeAccount` replay the shared `ClearingLedger`.
+  - Anyone can propose after `takeoverDelay`; forced orders and freeze are in.
+- **Verified:** 28 forge tests; 40 mutants (one equivalent); anvil e2e with a challenge, a forced order, a handover rebuilt from L1 alone, and a freeze with exits.
+- **Cost:** 14.6k gas per fill dense vs 45.5k (direct batch) vs 67.4k (per-transaction L1). Sparse (each account once): about break-even with per-transaction L1. v1's optimistic signatures don't pay against the direct batch.
+- **Open:** the runtime recovery issues from the 5db7064 review (multi-batch recovery, proof failure during rebase, replaying rejected actions, rewind consumption, a three-valued canonical check, anchor ageing under real block progress).
+
 ## Baseline
 - **skim** `df686b70cd567210860582097e25a3f8b3fe6616`, used over JSON-RPC with no crate
   dependency. The live run used `../skim/target/release/skim`, built from that commit plus the

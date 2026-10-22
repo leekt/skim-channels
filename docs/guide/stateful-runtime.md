@@ -2,6 +2,13 @@
 
 The computation channels in [how it works](how-it-works.md) keep no application state on L2: an outcome is a pure function of a signed request, an input and L1 state at one anchor. This page covers the second path, for apps that **keep their own state across many interactions**. It is built and tested for one app: **clearing** (`contracts/src/clearing`, `ts/runtime`, `ts/e2e-clearing.ts`).
 
+> **Update (2026-10-23): [clearing v2](../experiments/clearing-v2.md) supersedes the settlement described below.**
+> - L1 commits an account root, and nothing per fill is checked unless challenged.
+> - Another operator can take over from L1 data alone.
+> - Forced orders and freeze are in.
+>
+> The measured control showed that v1's "economics on L1, signatures optimistic" doesn't pay against verifying everything at once. The model below (three kinds of state, untrusted executor, snapshots) still holds, and so do the runtime limits [found in review](../experiments/clearing-v2.md#open-see-also-the-runtime-review-below).
+
 The two paths are separate:
 - `ChannelExecutor` keeps its STATICCALL-only modules.
 - The stateful app runs its own contracts on its own executor.

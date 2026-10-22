@@ -82,6 +82,16 @@ contract ClearingChecker {
         _covered(free[ub], dEth[ub], dUsd[ub], x.b, f);
     }
 
+    /// @notice Whether every order in `fills` is signed by its trader (decoded once).
+    function allSigned(bytes32 domain, bytes calldata fills) external pure returns (bool) {
+        R.Fill[] memory fs = abi.decode(fills, (R.Fill[]));
+        for (uint256 f; f < fs.length; ++f) {
+            if (ChannelTypes.recoverSigner(R.orderDigest(domain, fs[f].a), fs[f].sigA) != fs[f].a.trader) return false;
+            if (ChannelTypes.recoverSigner(R.orderDigest(domain, fs[f].b), fs[f].sigB) != fs[f].b.trader) return false;
+        }
+        return true;
+    }
+
     /// @notice Whether order `sideB ? b : a` of fill `f` isn't signed by its trader.
     function badSignature(bytes32 domain, bytes calldata fills, uint256 f, bool sideB) external pure returns (bool) {
         R.Fill memory fill = abi.decode(fills, (R.Fill[]))[f];

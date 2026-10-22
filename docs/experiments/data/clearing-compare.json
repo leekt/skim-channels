@@ -1,0 +1,30 @@
+{
+  "note": "forge model (contracts/test/clearing/ClearingCompare.t.sol): one measured batch in steady state (accounts exist, deposits applied), priced as L1 transactions. v2 = ClearingChannel (propose + finalize); v1 = ClearingSettlement (proposeBatch + finalize); direct = ClearingDirectBatch.settle (everything verified at once, no window); l1 = ClearingL1, one fill transaction each. Witness: fixture h1 (6.2 KB). v2.calldata in bytes.",
+  "cases": {
+    "dense: 128 fills, 16 users": {
+      "v2": 1868854,
+      "v2.calldata": 34112,
+      "v1": 4563155,
+      "direct": 5822912,
+      "l1": 8628028
+    },
+    "sparse: 32 fills, 64 users": {
+      "v2": 1921215,
+      "v2.calldata": 21952,
+      "v1": 3354686,
+      "direct": 2894710,
+      "l1": 2156950
+    },
+    "big: 256 fills, 32 users": {
+      "v2": 2957422,
+      "v2.calldata": 67808,
+      "l1": 17255890
+    },
+    "16-fills-of-256: 256 fills, 32 users": {
+      "v2.challengeAccount": 2711848
+    },
+    "last-of-256: 256 fills, 32 users": {
+      "v2.challengeFill": 2485350
+    }
+  }
+}
