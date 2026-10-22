@@ -166,6 +166,11 @@ header. It is tested with labeled stubs only. Why no real instance exists, check
 
 Wiring a stub source in would be a mock under a native name, which the spec forbids.
 
+**Owner decision (2026-10-22): accepted as blocked.** Keep the adapter ready behind
+governance, and revisit when EIP-8288 defines `get_deps_hash` for STARKs and a network carries
+it. Rejected alternatives: a non-native zkVM verifier profile, and a client patched to an
+invented EIP-8288 variant.
+
 ## Effect on what is built now (M0/M1)
 
 - `ExecutionProfile` commits to `daSchemaHash`. A request signed under one DA scheme cannot
