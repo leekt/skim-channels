@@ -304,6 +304,43 @@ impl AnchorBook {
         best
     }
 
+    /// Witness prefetching (M4): for every non-invalidated anchor whose witnesses don't cover
+    /// `reads`, collects them from `src` at that anchor's root and attaches them, so promotion
+    /// doesn't wait on proof fetching. Returns (anchor id, outcome) per anchor tried; a failure
+    /// leaves the anchor without that witness (fail closed) and is retried on the next call.
+    pub fn prefetch(
+        &mut self,
+        src: &impl crate::source::ProofSource,
+        reads: &std::collections::BTreeMap<alloy_primitives::Address, (Vec<B256>, bool)>,
+    ) -> Vec<(B256, Result<B256, String>)> {
+        let keys: Vec<ReadKey> = reads
+            .iter()
+            .flat_map(|(a, (slots, code))| {
+                slots
+                    .iter()
+                    .map(|s| ReadKey::Storage(*a, *s))
+                    .chain(code.then_some(ReadKey::Code(*a)))
+                    .chain(std::iter::once(ReadKey::Account(*a)))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let todo: Vec<(B256, L1Anchor)> = self
+            .entries
+            .iter()
+            .filter(|(_, e)| !matches!(e.status, Status::Invalidated(_)))
+            .filter(|(_, e)| !e.witnesses.iter().any(|w| keys.iter().all(|k| w.covers(k))))
+            .map(|(h, e)| (*h, e.anchor.clone()))
+            .collect();
+        todo.into_iter()
+            .map(|(hash, anchor)| {
+                let r = crate::source::collect_witness(src, &anchor, reads)
+                    .map_err(|e| e.to_string())
+                    .and_then(|pkg| self.attach(hash, &pkg).map_err(|e| e.to_string()));
+                (anchor.id(), r)
+            })
+            .collect()
+    }
+
     /// Drops every anchor below `number` (with its witnesses): retention is the caller's
     /// policy, e.g. below the oldest anchor any open channel may still use.
     pub fn prune_below(&mut self, number: u64) {

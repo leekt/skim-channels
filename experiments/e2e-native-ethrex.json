@@ -3,8 +3,8 @@
   "measurements": {
     "L1 AnchorSender.send": 829633,
     "L2 inbox postFromL1 (proven)": 295909,
-    "L2 execute (ethrex native)": 317355,
-    "L1 CanonicalBlockRegistry.submit (EXECUTE), mean": 16049990,
-    "L1 settle (canonical registry, EXECUTE)": 501113
+    "L2 execute (ethrex native)": 317343,
+    "L1 CanonicalBlockRegistry.submit (EXECUTE), mean": 16049894,
+    "L1 settle (canonical registry, EXECUTE)": 501125
   }
 }

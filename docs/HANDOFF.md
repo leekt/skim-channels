@@ -106,7 +106,9 @@ Added since:
 | | L1 `AnchorSender.send` (record and L1 message) / L2 `postFromL1` (proof) | 829,633 / 295,909 gas |
 | | L2 `execute`; L1 `settle` (canonical registry) | 317,050; 501,125 gas |
 | | L1 `NativeRollupRegistry.acceptHistorical` (earlier run) | 892,971 gas |
-| anvil (Prague) | L2 `execute`; L1 `settle` (31-tx L2 block); `finalizeExit`; `startExit` | see `experiments/e2e-mock-local.json` |
+| anvil (Prague) | L1 `settle` vs. L2 block size (receipt mid-block): 1 / 31 / 127 / 255 txs | 314,895 / 375,460 / 389,695 / 389,683 gas; evidence 2,528 / 3,296 / 3,520 / 3,520 B; proof 1 / 3 / 3 / 3 nodes. Cost follows trie depth (base 16), so it flattens (`experiments/e2e-mock-local-fill*.json`) |
+| forge | `BatchSettler.settleAll`, 4 channels, 2 failing on purpose | 243,866 gas per attempted channel |
+| anvil (Prague) | L2 `execute`; `finalizeExit`; `startExit` | see `experiments/e2e-mock-local.json` |
 
 Gas on the ethrex chains is higher across the board, because Amsterdam reprices state access
 and creation; compare `record`, 285k vs. 111k on anvil. Not measured: settlement versus L2 block
@@ -134,5 +136,9 @@ size beyond 31 transactions; FCR lag once finality is running normally.
 
 ## Next tasks
 1. When EIP-8288 gets a prover: a `ProofDependencyVerifier` behind the same governance path.
-2. M4 leftovers: settlement gas versus block size, witness prefetching, receipt batching across
-   channels, FCR lag with live finality.
+2. FCR lag versus finality on a devnet that finalizes (more validators / nodes).
+3. Batching that shares work across channels settled from the same L2 block (one header and
+   acceptance check for many receipts). `BatchSettler` amortizes only transaction overhead.
+
+M4 items done: FCR, witness prefetching (`AnchorBook::prefetch`), batched settlement
+(`BatchSettler`), cost and size measurements (above).

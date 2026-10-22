@@ -1,0 +1,29 @@
+{
+  "note": "anvil prague L1+L2, MOCK block acceptance, Latest anchors (optimistic). Gas = receipt gasUsed; bytes = encoded length.",
+  "measurements": {
+    "deploy AllocationFixture": 138897,
+    "deploy MockAcceptedBlockRegistry": 297636,
+    "deploy AnchorRegistry": 637226,
+    "deploy L2AnchorInbox": 952607,
+    "deploy SplitModule": 264685,
+    "deploy WitnessVerifier": 1418974,
+    "deploy ChannelExecutor": 1263445,
+    "deploy ReceiptVerifier": 1149270,
+    "deploy ChannelSettlement": 2164039,
+    "deploy EmergencyExit": 1583597,
+    "L1 open": 300830,
+    "L1 fund": 45666,
+    "L2 inbox post": 95080,
+    "witness package bytes (1 slot)": 1824,
+    "L2 execute": 286834,
+    "evidence bytes (255-tx L2 block)": 3520,
+    "receipt proof nodes": 3,
+    "L1 anchor record": 111941,
+    "L1 mockAccept": 159899,
+    "L1 settle (255-tx L2 block)": 389683,
+    "L1 withdraw": 28519,
+    "L1 refund": 71838,
+    "L1 startExit": 130408,
+    "L1 finalizeExit": 317699
+  }
+}

@@ -14,6 +14,7 @@ import {SplitModule} from "../src/examples/SplitModule.sol";
 import {RLPEncode} from "./helpers/RLPEncode.sol";
 import {WitnessVerifier} from "../src/verifiers/WitnessVerifier.sol";
 import {EmergencyExit} from "../src/EmergencyExit.sol";
+import {BatchSettler} from "../src/BatchSettler.sol";
 import {ReceiptVerifier} from "../src/verifiers/ReceiptVerifier.sol";
 import {CanonicalBlockRegistry} from "../src/CanonicalBlockRegistry.sol";
 import {MockTransitionVerifier} from "../src/mocks/MockTransitionVerifier.sol";
@@ -640,6 +641,32 @@ contract ChannelTest is Test {
         vm.warp(block.timestamp + WINDOW);
         exits.finalizeExit(t.channelId, req, _input(), vm.parseJsonBytes(wjson, ".h1.package"));
         assertEq(settlement.withdrawable(participants[0]), 1.4 ether);
+    }
+
+    function test_batchSettlementIsBestEffortAndAmortized() public {
+        uint256 n = 4;
+        bytes32[] memory ids = new bytes32[](n);
+        bytes[] memory evs = new bytes[](n);
+        for (uint256 i; i < n; ++i) {
+            ChannelTypes.ChannelTerms memory t = _openAndFund(bytes32(1000 + i), address(split));
+            (ChannelExecutor.Call memory c, ChannelTypes.FinalRequest memory r) = _call(t, ".h1", _input());
+            ids[i] = t.channelId;
+            evs[i] = _executeAndProve(c, r, true);
+        }
+        // Channel 2's evidence is swapped with channel 3's: only that one fails.
+        (evs[2], evs[3]) = (evs[3], evs[2]);
+        BatchSettler b = new BatchSettler();
+        uint256 g = gasleft();
+        uint256 settled = b.settleAll(settlement, ids, evs);
+        uint256 used = g - gasleft();
+        assertEq(settled, 0x3, "0 and 1 settled; 2 and 3 got each other's evidence");
+        assertEq(uint8(settlement.channel(ids[2]).status), uint8(ChannelSettlement.Status.Open));
+        emit log_named_uint("batch settleAll, gas per attempted channel", used / n);
+        // The failed ones can still settle with their own evidence.
+        bytes32[] memory rest = new bytes32[](2);
+        bytes[] memory restEv = new bytes[](2);
+        (rest[0], rest[1], restEv[0], restEv[1]) = (ids[2], ids[3], evs[3], evs[2]);
+        assertEq(b.settleAll(settlement, rest, restEv), 0x3);
     }
 
     function test_crossChannelReuseRejected() public {

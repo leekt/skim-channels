@@ -927,3 +927,52 @@ fn history_fixture_is_current() {
         "stale fixture"
     );
 }
+
+#[test]
+fn prefetch_witnesses_new_anchors_and_skips_covered_or_invalid() {
+    let mut book =
+        AnchorBook::new(CHAIN, ConfirmationPolicy::Finalized, Mode::Authenticated).unwrap();
+    let s0 = state(6000);
+    let (raw0, a0) = s0.header(CHAIN, 100, B256::repeat_byte(0x99));
+    let s1 = state(7000);
+    let (raw1, a1) = s1.header(CHAIN, 101, a0.blockHash);
+    let s2 = state(7100);
+    let (raw2, a2) = s2.header(CHAIN, 102, a1.blockHash);
+    for r in [&raw0, &raw1, &raw2] {
+        book.observe(r).unwrap();
+    }
+    book.reorged(a2.blockHash);
+    let rpc = MockRpc {
+        states: HashMap::from([
+            (a0.blockHash, (s0.clone(), a0.clone())),
+            (a1.blockHash, (s1.clone(), a1.clone())),
+            (a2.blockHash, (s2.clone(), a2.clone())),
+        ]),
+        lie: None,
+    };
+    let r = split_reads();
+    let done = book.prefetch(&rpc, &r);
+    assert_eq!(done.len(), 2, "the invalidated anchor is skipped");
+    assert!(done.iter().all(|(_, res)| res.is_ok()));
+    assert!(book.proof_ready(a0.id(), &SPLIT_KEYS).is_ok());
+    assert!(book.proof_ready(a1.id(), &SPLIT_KEYS).is_ok());
+    // Nothing left to do.
+    assert!(book.prefetch(&rpc, &r).is_empty());
+    // A lying source attaches nothing (fail closed), and is retried next time.
+    let s3 = state(7200);
+    let (raw3, a3) = s3.header(CHAIN, 102, a1.blockHash);
+    book.observe(&raw3).unwrap();
+    let liar = MockRpc {
+        states: HashMap::from([(a3.blockHash, (s3.clone(), a3.clone()))]),
+        lie: Some(|r| r.storage_proof[0].value = U256::from(1)),
+    };
+    let done = book.prefetch(&liar, &r);
+    assert_eq!(done.len(), 1);
+    assert!(done[0].1.is_err());
+    assert!(book.proof_ready(a3.id(), &SPLIT_KEYS).is_err());
+    let honest = MockRpc {
+        states: HashMap::from([(a3.blockHash, (s3, a3.clone()))]),
+        lie: None,
+    };
+    assert!(book.prefetch(&honest, &r)[0].1.is_ok());
+}
