@@ -28,8 +28,8 @@ governance, forced inclusion). Read first: [PROJECT](../PROJECT.md) (spec v0.1),
   - `contracts/src/predict`: `PredictionChannel`, `PredictionRules`, `PredictionTypes`, `SparseTree16`;
   - `PredictionL1`, the same game run directly on L1, as the cost baseline;
   - `ts/e2e-predict.ts`, with a real witness and no mocks.
-- **Tests:** 34 forge tests with fuzzing. 36 mutants, all caught except one equivalent.
-- **Cost:** a round costs 4–15× less per user than on L1 at 100 users. Entry and exit cost ~200k more, recovered after ~3 rounds at 1 stake per user. Disputes are under 150k gas each ([log](experiments/prediction-round-cost.md)).
+- **Tests:** 53 forge tests with fuzzing, including 19 regressions for the f4aab62 review ([fixes](experiments/prediction-review-fixes.md)): challenge-period floors, requests that must pay what they cover, a request queue with fixed deadlines, and exits without a resolution witness. 46 mutants, all caught.
+- **Cost:** a round costs 4–15× less per user than on L1 at 100 users. Entry and exit cost ~265k more, recovered after ~3.5 rounds at 1 stake per user. Disputes are about 150k gas each ([log](experiments/prediction-round-cost.md)).
 - **Next:** the OTC and AMM rules (apps 3 and 4) on the same optimistic layer; blob DA for tickets and leaves; deposit cost.
 
 ## Baseline
@@ -128,8 +128,8 @@ The logs in [docs/experiments](experiments) are the source. Headline numbers:
 | anvil | `settle` for 1 / 31 / 127 / 255-tx L2 blocks | 320,486 / 392,090 / 396,307 / 396,343 gas ([M4 cost](experiments/m4-settlement-cost.md)) |
 | forge | `settle` vs. `settleFromBlock` (2 in one block) | 315,124 vs. 280,975 gas per channel |
 | anvil | `startExit` / `finalizeExit` | 130,364 / 317,643 gas ([M2](experiments/m2-anvil-e2e.md)) |
-| forge model | prediction round per user, 100 users × 1 stake: channel vs. directly on L1 | 25,368 vs. 101,409 gas ([prediction](experiments/prediction-round-cost.md)) |
-| forge model | `challengeCommit` / `challengeUpdate` / `exit` | 116,653 / 142,601 / 143,849 gas |
+| forge model | prediction round per user, 100 users × 1 stake: channel vs. directly on L1 | 25,593 vs. 101,408 gas ([prediction](experiments/prediction-round-cost.md)) |
+| forge model | `challengeCommit` / `challengeUpdate` / `exit` | 120,909 / 149,539 / 145,710 gas |
 
 ## Known limitations
 - **`native-proof-dependencies`:** `ProofDependencyVerifier` exists, but no network can carry a

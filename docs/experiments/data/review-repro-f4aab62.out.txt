@@ -1,0 +1,10 @@
+$ git checkout f4aab6287b9d0814a8832ec09209a6ea59388493
+$ (cd contracts && forge test --match-contract ReviewReproTest)   # with review-repro-f4aab62.sol.txt as test/predict/ReviewRepro.t.sol
+[FAIL: WrongState()] test_A1_forgedCommitChallengeableNextBlock()
+[FAIL: next call did not revert as expected] test_A1_zeroWindowRejected()
+[FAIL: NotOverdue()] test_A2_consumedRequestBlocksFreeze()
+[FAIL: NotWrong()] test_A2_requestConsumedWithoutPayment()
+[FAIL: BadProof()] test_A3_freezeEvidenceInvalidatedByOtherLeaf()
+[FAIL: next call did not revert as expected] test_A3_newRoundWithOverdueRequest()
+[FAIL: WrongState()] test_A4_nonParticipantExitBlockedByUnresolvedRound()
+Suite result: FAILED. 0 passed; 7 failed; 0 skipped

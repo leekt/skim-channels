@@ -3,6 +3,8 @@ pragma solidity ^0.8.28;
 
 import {PredictionBase, Tree} from "./PredictionBase.sol";
 import {PredictionChannel} from "../../src/predict/PredictionChannel.sol";
+import {PredictionStorage} from "../../src/predict/PredictionStorage.sol";
+import {PredictionDisputes} from "../../src/predict/PredictionDisputes.sol";
 import {PredictionTypes as T} from "../../src/predict/PredictionTypes.sol";
 import {PredictionRules} from "../../src/predict/PredictionRules.sol";
 import {SparseTree16} from "../../src/predict/SparseTree16.sol";
@@ -39,13 +41,14 @@ contract PredictionChannelTest is PredictionBase {
         e = _roundOneEntries(r);
         _commit(r, e);
         _recordResolution();
-        ch.resolve(r, package1);
+        D.resolve(r, package1);
     }
 
     function _challengeUpdate(uint32 idx, T.Leaf memory newLeaf, T.Leaf[] memory proposed, Tk[] memory e) internal {
         vm.prank(watcher);
-        ch.challengeUpdate(
+        D.challengeUpdate(
             idx,
+            newLeaf.requestsApplied,
             abi.encode(
                 fin[idx],
                 _finSiblings(idx),
@@ -72,12 +75,12 @@ contract PredictionChannelTest is PredictionBase {
         _propose(r, n);
         // An honest proposal survives every challenge.
         for (uint32 i; i < 3; ++i) {
-            vm.expectRevert(PredictionChannel.NotWrong.selector);
+            vm.expectRevert(PredictionStorage.NotWrong.selector);
             _challengeUpdate(i, n[i], n, e);
         }
         _finalize(n);
-        (PredictionChannel.Status st,,,,,,,,,,,,) = ch.rounds(r);
-        assertEq(uint8(st), uint8(PredictionChannel.Status.Settled));
+        (PredictionStorage.Status st,,,,,,,,,,,,) = ch.rounds(r);
+        assertEq(uint8(st), uint8(PredictionStorage.Status.Settled));
 
         // A withdraws everything.
         vm.prank(who[A]);
@@ -89,7 +92,7 @@ contract PredictionChannelTest is PredictionBase {
         uint256 before = who[A].balance;
         ch.claim(A, fin[A], _finSiblings(A));
         assertEq(who[A].balance - before, 12 ether);
-        vm.expectRevert(PredictionChannel.WrongState.selector);
+        vm.expectRevert(PredictionStorage.WrongState.selector);
         ch.claim(A, fin[A], _finSiblings(A));
     }
 
@@ -102,11 +105,11 @@ contract PredictionChannelTest is PredictionBase {
         ch.deposit{value: 5 ether}();
         assertEq(ch.depositsAtCommit(B, r), 10 ether);
         _recordResolution();
-        ch.resolve(r, package1);
+        D.resolve(r, package1);
         T.Leaf[] memory n = _roundOneResult();
         n[B] = T.Leaf(12 ether, 0, 15 ether, 0); // 15 − 3
         _propose(r, n);
-        vm.expectRevert(PredictionChannel.NotWrong.selector);
+        vm.expectRevert(PredictionStorage.NotWrong.selector);
         _challengeUpdate(B, n[B], n, e);
         // Applying only the deposits from before the commit is also correct.
         vm.warp(block.timestamp + WINDOW);
@@ -122,14 +125,14 @@ contract PredictionChannelTest is PredictionBase {
         _commit(r, e);
         uint256 before = watcher.balance;
         vm.prank(watcher);
-        ch.challengeCommit(r, B, abi.encode(e[1].t), Tree.siblings(_partLeaves(e), B), fin[B], _finSiblings(B));
+        D.challengeCommit(r, B, abi.encode(e[1].t), Tree.siblings(_partLeaves(e), B), fin[B], _finSiblings(B));
         assertEq(watcher.balance - before, BOND, "bond to challenger");
-        (PredictionChannel.Status st,,,,,,,,,,,,) = ch.rounds(r);
-        assertEq(uint8(st), uint8(PredictionChannel.Status.Void));
+        (PredictionStorage.Status st,,,,,,,,,,,,) = ch.rounds(r);
+        assertEq(uint8(st), uint8(PredictionStorage.Status.Void));
         // The void round settles with balances unchanged; the operator must rebond first.
         T.Leaf[] memory n = _copyFin();
-        vm.expectRevert(PredictionChannel.WrongState.selector);
-        _propose(r, n);
+        vm.expectRevert(PredictionStorage.WrongState.selector);
+        _propose(r, n, 0);
         vm.prank(op);
         ch.postBond{value: BOND}();
         _propose(r, n);
@@ -142,7 +145,7 @@ contract PredictionChannelTest is PredictionBase {
         e[1].t = _ticket(keys[B], r, 0, 11 ether, 1); // has 10
         _commit(r, e);
         vm.prank(watcher);
-        ch.challengeCommit(r, B, abi.encode(e[1].t), Tree.siblings(_partLeaves(e), B), fin[B], _finSiblings(B));
+        D.challengeCommit(r, B, abi.encode(e[1].t), Tree.siblings(_partLeaves(e), B), fin[B], _finSiblings(B));
         assertEq(ch.bond(), 0);
     }
 
@@ -152,42 +155,42 @@ contract PredictionChannelTest is PredictionBase {
         _commit(r, e);
         bytes32[16] memory ps = Tree.siblings(_partLeaves(e), B);
         bytes memory ticket = abi.encode(e[1].t);
-        vm.expectRevert(PredictionChannel.NotWrong.selector);
-        ch.challengeCommit(r, B, ticket, ps, fin[B], _finSiblings(B));
+        vm.expectRevert(PredictionStorage.NotWrong.selector);
+        D.challengeCommit(r, B, ticket, ps, fin[B], _finSiblings(B));
         // A ticket that isn't the committed one (an earlier, smaller one B also signed).
         bytes memory other = abi.encode(_ticket(keys[B], r, 0, 2 ether, 0));
         vm.expectRevert(PredictionRules.BadProof.selector);
-        ch.challengeCommit(r, B, other, ps, fin[B], _finSiblings(B));
+        D.challengeCommit(r, B, other, ps, fin[B], _finSiblings(B));
         // A balance leaf that isn't finalized.
         vm.expectRevert(PredictionRules.BadProof.selector);
-        ch.challengeCommit(r, B, ticket, ps, T.Leaf(1, 0, 0, 0), _finSiblings(B));
+        D.challengeCommit(r, B, ticket, ps, T.Leaf(1, 0, 0, 0), _finSiblings(B));
         vm.roll(CHALLENGE_END);
-        vm.expectRevert(PredictionChannel.WrongState.selector);
-        ch.challengeCommit(r, B, ticket, ps, fin[B], _finSiblings(B));
+        vm.expectRevert(PredictionStorage.WrongState.selector);
+        D.challengeCommit(r, B, ticket, ps, fin[B], _finSiblings(B));
     }
 
     function test_commit_rules() public {
         uint256 r = _open(6500);
         Tk[] memory e = _roundOneEntries(r);
-        vm.expectRevert(PredictionChannel.NotOperator.selector);
-        ch.commit(r, _pack(e));
+        vm.expectRevert(PredictionStorage.NotOperator.selector);
+        D.commit(r, _pack(e));
         // Unsorted indices.
         Tk[] memory bad = new Tk[](2);
         (bad[0], bad[1]) = (e[1], e[0]);
         vm.prank(op);
         vm.expectRevert(SparseTree16.NotSorted.selector);
-        ch.commit(r, _pack(bad));
+        D.commit(r, _pack(bad));
         // Unregistered user index.
         bad = new Tk[](1);
         bad[0] = Tk(3, e[0].t);
         vm.prank(op);
-        vm.expectRevert(PredictionChannel.BadUpdate.selector);
-        ch.commit(r, _pack(bad));
+        vm.expectRevert(PredictionStorage.BadUpdate.selector);
+        D.commit(r, _pack(bad));
         // An empty ticket.
         bad[0] = Tk(A, _ticket(keys[A], r, 0, 0, 1));
         vm.prank(op);
         vm.expectRevert(PredictionRules.BadTicket.selector);
-        ch.commit(r, _pack(bad));
+        D.commit(r, _pack(bad));
         // Truncated encoding.
         bytes memory packed = _pack(e);
         assembly {
@@ -195,11 +198,11 @@ contract PredictionChannelTest is PredictionBase {
         }
         vm.prank(op);
         vm.expectRevert(PredictionRules.BadEncoding.selector);
-        ch.commit(r, packed);
+        D.commit(r, packed);
         vm.roll(DEADLINE + 1);
         vm.prank(op);
-        vm.expectRevert(PredictionChannel.WrongState.selector);
-        ch.commit(r, _pack(e));
+        vm.expectRevert(PredictionStorage.WrongState.selector);
+        D.commit(r, _pack(e));
     }
 
     // ---- resolution -------------------------------------------------------------------------
@@ -209,11 +212,11 @@ contract PredictionChannelTest is PredictionBase {
         _commit(r, _roundOneEntries(r));
         vm.roll(200);
         vm.expectRevert(); // not recorded
-        ch.resolve(r, package1);
+        D.resolve(r, package1);
         _recordResolution();
-        ch.resolve(r, package1);
-        vm.expectRevert(PredictionChannel.WrongState.selector);
-        ch.resolve(r, package1);
+        D.resolve(r, package1);
+        vm.expectRevert(PredictionStorage.WrongState.selector);
+        D.resolve(r, package1);
     }
 
     function test_no_winning_stake_refunds() public {
@@ -222,22 +225,22 @@ contract PredictionChannelTest is PredictionBase {
         e[0] = Tk(A, _ticket(keys[A], r, 2 ether, 0, 1));
         _commit(r, e);
         _recordResolution();
-        ch.resolve(r, package1);
+        D.resolve(r, package1);
         (, uint8 outcome,,,,,,,,,,,) = ch.rounds(r);
         assertEq(outcome, 0);
         T.Leaf[] memory n = _copyFin();
         n[A] = T.Leaf(10 ether, 0, 10 ether, 0);
         _propose(r, n);
-        vm.expectRevert(PredictionChannel.NotWrong.selector);
+        vm.expectRevert(PredictionStorage.NotWrong.selector);
         _challengeUpdate(A, n[A], n, e);
     }
 
     function test_void_rules_are_outcome_independent() public {
         uint256 r = _open(6500);
-        vm.expectRevert(PredictionChannel.WrongState.selector);
-        ch.voidRound(r);
+        vm.expectRevert(PredictionStorage.WrongState.selector);
+        D.voidRound(r);
         vm.roll(DEADLINE + 1);
-        ch.voidRound(r); // never committed
+        D.voidRound(r); // never committed
 
         // A committed round can't be voided while its anchor is recordable, nor once recorded.
         T.Leaf[] memory n = _copyFin();
@@ -245,13 +248,13 @@ contract PredictionChannelTest is PredictionBase {
         _finalize(n);
         vm.roll(300);
         vm.prank(op);
-        r = ch.openRound(6500, oracle, oracleSlot, 0, 256, 300, 301, 302);
+        r = ch.openRound(6500, oracle, oracleSlot, 0, 256, 300, 364, 365);
         _commit(r, new Tk[](0));
-        vm.roll(302 + 8191);
-        vm.expectRevert(PredictionChannel.WrongState.selector);
-        ch.voidRound(r);
-        vm.roll(302 + 8192);
-        ch.voidRound(r);
+        vm.roll(365 + 8191);
+        vm.expectRevert(PredictionStorage.WrongState.selector);
+        D.voidRound(r);
+        vm.roll(365 + 8192);
+        D.voidRound(r);
     }
 
     // ---- settlement challenges --------------------------------------------------------------
@@ -261,13 +264,13 @@ contract PredictionChannelTest is PredictionBase {
         T.Leaf[] memory n = _roundOneResult();
         n[A].balance += 1 ether;
         _propose(r, n);
-        vm.expectRevert(PredictionChannel.NotWrong.selector);
+        vm.expectRevert(PredictionStorage.NotWrong.selector);
         _challengeUpdate(B, n[B], n, e);
         uint256 before = watcher.balance;
         _challengeUpdate(A, n[A], n, e);
         assertEq(watcher.balance - before, BOND);
         assertEq(ch.pendingAt(), 0, "proposal discarded");
-        vm.expectRevert(PredictionChannel.WrongState.selector);
+        vm.expectRevert(PredictionStorage.WrongState.selector);
         ch.finalize();
     }
 
@@ -303,42 +306,42 @@ contract PredictionChannelTest is PredictionBase {
         forged.up += 1;
         bytes32[16] memory os = _finSiblings(A);
         vm.expectRevert(PredictionRules.BadProof.selector);
-        ch.challengeUpdate(A, abi.encode(fin[A], os, n[A], ns, forged, ps));
+        D.challengeUpdate(A, 0, abi.encode(fin[A], os, n[A], ns, forged, ps));
         // A leaf that isn't in the proposal.
         vm.expectRevert(PredictionRules.BadProof.selector);
-        ch.challengeUpdate(A, abi.encode(fin[A], os, _roundOneResult()[A], ns, p, ps));
+        D.challengeUpdate(A, 0, abi.encode(fin[A], os, _roundOneResult()[A], ns, p, ps));
         // An old leaf that isn't finalized.
         vm.expectRevert(PredictionRules.BadProof.selector);
-        ch.challengeUpdate(A, abi.encode(n[A], os, n[A], ns, p, ps));
+        D.challengeUpdate(A, 0, abi.encode(n[A], os, n[A], ns, p, ps));
         vm.warp(block.timestamp + WINDOW);
-        vm.expectRevert(PredictionChannel.WrongState.selector);
-        ch.challengeUpdate(A, abi.encode(fin[A], os, n[A], ns, p, ps));
+        vm.expectRevert(PredictionStorage.WrongState.selector);
+        D.challengeUpdate(A, 0, abi.encode(fin[A], os, n[A], ns, p, ps));
     }
 
     function test_propose_rules() public {
         uint256 r = _open(6500);
         T.Leaf[] memory n = _copyFin();
-        vm.expectRevert(PredictionChannel.WrongState.selector); // round open: no proposals
-        _propose(0, n);
+        vm.expectRevert(PredictionStorage.WrongState.selector); // round open: no proposals
+        _propose(0, n, 0);
         _commit(r, _roundOneEntries(r));
-        vm.expectRevert(PredictionChannel.WrongState.selector);
-        _propose(r, n); // not resolved yet
+        vm.expectRevert(PredictionStorage.WrongState.selector);
+        _propose(r, n, 0); // not resolved yet
         _recordResolution();
-        ch.resolve(r, package1);
-        vm.expectRevert(PredictionChannel.WrongState.selector);
-        _propose(0, n); // must settle the round
+        D.resolve(r, package1);
+        vm.expectRevert(PredictionStorage.WrongState.selector);
+        _propose(0, n, 0); // must settle the round
         // An old leaf that isn't finalized.
         (bytes memory u, bytes32[] memory proof) = _updates(_roundOneResult());
         u[19] = bytes1(uint8(u[19]) ^ 1); // the low byte of the first old balance
         vm.prank(op);
-        vm.expectRevert(PredictionChannel.BadProof.selector);
-        ch.propose(r, u, proof);
+        vm.expectRevert(PredictionStorage.BadProof.selector);
+        ch.propose(r, u, proof, 0);
         // A tampered multiproof.
         (u, proof) = _updates(_roundOneResult());
         proof[proof.length - 1] ^= bytes32(uint256(1));
         vm.prank(op);
-        vm.expectRevert(PredictionChannel.BadProof.selector);
-        ch.propose(r, u, proof);
+        vm.expectRevert(PredictionStorage.BadProof.selector);
+        ch.propose(r, u, proof, 0);
         // A truncated multiproof.
         (u, proof) = _updates(_roundOneResult());
         bytes32[] memory short = new bytes32[](proof.length - 1);
@@ -347,7 +350,7 @@ contract PredictionChannelTest is PredictionBase {
         }
         vm.prank(op);
         vm.expectRevert();
-        ch.propose(r, u, short);
+        ch.propose(r, u, short, 0);
     }
 
     /// Counters aren't checked at proposal time (that would cost two cold reads per user on
@@ -373,23 +376,23 @@ contract PredictionChannelTest is PredictionBase {
         r;
         vm.prank(who[A]);
         ch.requestWithdraw();
-        vm.expectRevert(PredictionChannel.NotOverdue.selector);
-        ch.freeze(A, fin[A], _finSiblings(A));
+        vm.expectRevert(PredictionStorage.NotOverdue.selector);
+        D.freeze();
         vm.warp(block.timestamp + 1 days);
-        ch.freeze(A, fin[A], _finSiblings(A));
+        D.freeze();
         assertTrue(ch.frozen());
-        vm.expectRevert(PredictionChannel.WrongState.selector);
-        _propose(r, _roundOneResult());
+        vm.expectRevert(PredictionStorage.WrongState.selector);
+        _propose(r, _roundOneResult(), 0);
 
         uint256[3] memory want = [uint256(12 ether), 7 ether, 11 ether];
         for (uint32 i; i < 3; ++i) {
             uint256 before = who[i].balance;
-            ch.exit(i, fin[i], _finSiblings(i), _partOf(e, i), Tree.siblings(_partLeaves(e), i));
+            D.exit(i, fin[i], _finSiblings(i), _partOf(e, i), Tree.siblings(_partLeaves(e), i));
             assertEq(who[i].balance - before, want[i]);
         }
         assertEq(address(ch).balance, BOND, "only the bond is left");
-        vm.expectRevert(PredictionChannel.WrongState.selector);
-        ch.exit(A, fin[A], _finSiblings(A), _partOf(e, A), Tree.siblings(_partLeaves(e), A));
+        vm.expectRevert(PredictionStorage.WrongState.selector);
+        D.exit(A, fin[A], _finSiblings(A), _partOf(e, A), Tree.siblings(_partLeaves(e), A));
     }
 
     function test_operator_gone_before_resolution_resolve_then_exit() public {
@@ -399,18 +402,23 @@ contract PredictionChannelTest is PredictionBase {
         vm.prank(who[B]);
         ch.requestWithdraw();
         vm.warp(block.timestamp + 1 days);
-        ch.freeze(B, fin[B], _finSiblings(B));
+        D.freeze();
         bytes32[16] memory ps = Tree.siblings(_partLeaves(e), B);
-        vm.expectRevert(PredictionChannel.WrongState.selector);
-        ch.exit(B, fin[B], _finSiblings(B), _partOf(e, B), ps);
+        // Unresolved: everything but B's 3 ETH stake now (the rest after resolution).
+        uint256 first = who[B].balance;
+        D.exit(B, fin[B], _finSiblings(B), _partOf(e, B), ps);
+        assertEq(who[B].balance - first, 7 ether);
         _recordResolution();
-        ch.resolve(r, package1); // anyone
+        D.resolve(r, package1); // anyone
         // A lie about the round leaf is caught.
         vm.expectRevert(PredictionRules.BadProof.selector);
-        ch.exit(B, fin[B], _finSiblings(B), T.PartLeaf(0, 0, 0), ps);
-        uint256 before = who[B].balance;
-        ch.exit(B, fin[B], _finSiblings(B), _partOf(e, B), ps);
-        assertEq(who[B].balance - before, 7 ether);
+        D.exit(B, fin[B], _finSiblings(B), T.PartLeaf(0, 0, 0), ps);
+        // B lost: the 3 ETH stake is gone and nothing more is owed.
+        vm.expectRevert(PredictionStorage.WrongState.selector);
+        D.exit(B, fin[B], _finSiblings(B), _partOf(e, B), ps);
+        uint256 before = who[A].balance;
+        D.exit(A, fin[A], _finSiblings(A), _partOf(e, A), Tree.siblings(_partLeaves(e), A));
+        assertEq(who[A].balance - before, 12 ether);
     }
 
     function test_exit_after_settled_rounds_and_partial_claims() public {
@@ -434,21 +442,21 @@ contract PredictionChannelTest is PredictionBase {
         vm.prank(who[C]);
         ch.requestWithdraw();
         vm.warp(block.timestamp + 1 days);
-        ch.freeze(C, fin[C], _finSiblings(C));
+        D.freeze();
         T.PartLeaf memory none;
         bytes32[16] memory z;
         uint256[3] memory want = [uint256(4 ether), 7 ether, 11 ether];
         for (uint32 i; i < 3; ++i) {
             uint256 before = who[i].balance;
-            ch.exit(i, fin[i], _finSiblings(i), none, z);
+            D.exit(i, fin[i], _finSiblings(i), none, z);
             assertEq(who[i].balance - before, want[i]);
         }
         assertEq(address(ch).balance, BOND);
     }
 
     function test_freeze_needs_an_unapplied_overdue_request() public {
-        vm.expectRevert(PredictionChannel.NotOverdue.selector);
-        ch.freeze(A, fin[A], _finSiblings(A));
+        vm.expectRevert(PredictionStorage.NotOverdue.selector);
+        D.freeze();
         vm.prank(who[A]);
         ch.requestWithdraw();
         T.Leaf[] memory w = _copyFin();
@@ -456,24 +464,22 @@ contract PredictionChannelTest is PredictionBase {
         _propose(0, w);
         _finalize(w);
         vm.warp(block.timestamp + 2 days);
-        vm.expectRevert(PredictionChannel.NotOverdue.selector);
-        ch.freeze(A, fin[A], _finSiblings(A));
+        vm.expectRevert(PredictionStorage.NotOverdue.selector);
+        D.freeze();
     }
 
     function test_schedule_bounds() public {
         vm.startPrank(op);
-        vm.expectRevert(PredictionChannel.BadSchedule.selector);
-        ch.openRound(1, oracle, oracleSlot, 0, 256, 95, 95, 101);
-        vm.expectRevert(PredictionChannel.BadSchedule.selector);
-        ch.openRound(1, oracle, oracleSlot, 0, 256, 95, 98, 90 + 1801);
-        vm.expectRevert(PredictionChannel.BadSchedule.selector);
-        ch.openRound(1, oracle, oracleSlot, 200, 57, 95, 98, 101);
-        ch.openRound(1, oracle, oracleSlot, 0, 256, 95, 98, 101);
-        vm.expectRevert(PredictionChannel.WrongState.selector);
-        ch.openRound(1, oracle, oracleSlot, 0, 256, 95, 98, 101);
+        vm.expectRevert(PredictionStorage.BadSchedule.selector); // fewer than 64 commit-challenge blocks
+        ch.openRound(1, oracle, oracleSlot, 0, 256, 30, 93, 101);
+        vm.expectRevert(PredictionStorage.BadSchedule.selector); // beyond maxRoundBlocks
+        ch.openRound(1, oracle, oracleSlot, 0, 256, 30, 95, 20 + 1801);
+        vm.expectRevert(PredictionStorage.BadSchedule.selector);
+        ch.openRound(1, oracle, oracleSlot, 200, 57, 30, 95, 101);
+        ch.openRound(1, oracle, oracleSlot, 0, 256, 30, 94, 101);
+        vm.expectRevert(PredictionStorage.WrongState.selector);
+        ch.openRound(1, oracle, oracleSlot, 0, 256, 30, 95, 101);
         vm.stopPrank();
-        vm.expectRevert(PredictionChannel.BadSchedule.selector);
-        new PredictionChannel(op, anchors, wv, rules, BOND, 6 hours + 1);
     }
 
     // ---- edges (each pinned by a mutation check) --------------------------------------------
@@ -485,14 +491,14 @@ contract PredictionChannelTest is PredictionBase {
         e[2] = Tk(C, _ticket(keys[C], r, 20 ether, 0, 1)); // C has 10
         _commit(r, e);
         _recordResolution();
-        ch.resolve(r, package1);
+        D.resolve(r, package1);
         // Pot 25, UP total 22: A wins 2 * 25 / 22.
         T.Leaf[] memory n = _roundOneResult();
         n[A].balance = 10 ether - 2 ether + uint256(2 ether) * 25 / 22;
         n[C] = T.Leaf(0, 0, 10 ether, 0);
         _propose(r, n);
         for (uint32 i; i < 3; ++i) {
-            vm.expectRevert(PredictionChannel.NotWrong.selector);
+            vm.expectRevert(PredictionStorage.NotWrong.selector);
             _challengeUpdate(i, n[i], n, e);
         }
     }
@@ -502,8 +508,8 @@ contract PredictionChannelTest is PredictionBase {
         Tk[] memory e = _roundOneEntries(r);
         e[1] = Tk(B, _ticket(keys[B], r, 0, 10 ether, 1));
         _commit(r, e);
-        vm.expectRevert(PredictionChannel.NotWrong.selector);
-        ch.challengeCommit(r, B, abi.encode(e[1].t), Tree.siblings(_partLeaves(e), B), fin[B], _finSiblings(B));
+        vm.expectRevert(PredictionStorage.NotWrong.selector);
+        D.challengeCommit(r, B, abi.encode(e[1].t), Tree.siblings(_partLeaves(e), B), fin[B], _finSiblings(B));
     }
 
     function test_withdrawal_amount_is_checked() public {
@@ -513,9 +519,9 @@ contract PredictionChannelTest is PredictionBase {
         w[A] = T.Leaf(0, 10 ether, 10 ether, 1);
         _propose(0, w);
         Tk[] memory none;
-        vm.expectRevert(PredictionChannel.NotWrong.selector);
+        vm.expectRevert(PredictionStorage.NotWrong.selector);
         _challengeUpdate(A, w[A], w, none);
-        vm.expectRevert(PredictionChannel.WrongState.selector);
+        vm.expectRevert(PredictionStorage.WrongState.selector);
         ch.finalize(); // window not over
         vm.warp(block.timestamp + WINDOW);
         ch.finalize();
@@ -532,7 +538,7 @@ contract PredictionChannelTest is PredictionBase {
         uint256 r = _open(7000);
         _commit(r, _roundOneEntries(r));
         _recordResolution();
-        ch.resolve(r, package1);
+        D.resolve(r, package1);
         (, uint8 outcome,,,,,,,,,,,) = ch.rounds(r);
         assertEq(outcome, T.UP, "7000 >= 7000");
 
@@ -550,7 +556,7 @@ contract PredictionChannelTest is PredictionBase {
         vm.setBlockhash(100, keccak256(raw0));
         anchors.record(raw0);
         vm.expectRevert(PredictionRules.BadAnchor.selector);
-        ch.resolve(r, vm.parseJsonBytes(j, ".h0.package"));
+        D.resolve(r, vm.parseJsonBytes(j, ".h0.package"));
     }
 
     function test_recorded_resolution_block_is_never_voided() public {
@@ -558,24 +564,24 @@ contract PredictionChannelTest is PredictionBase {
         _commit(r, _roundOneEntries(r));
         _recordResolution();
         vm.roll(RESOLUTION + 8192);
-        vm.expectRevert(PredictionChannel.WrongState.selector);
-        ch.voidRound(r);
-        ch.resolve(r, package1); // still resolvable: the state root is stored on L1
+        vm.expectRevert(PredictionStorage.WrongState.selector);
+        D.voidRound(r);
+        D.resolve(r, package1); // still resolvable: the state root is stored on L1
     }
 
     function test_no_round_effect_means_no_round_leaf() public {
         vm.prank(who[A]);
         ch.requestWithdraw();
         vm.warp(block.timestamp + 1 days);
-        ch.freeze(A, fin[A], _finSiblings(A));
+        D.freeze();
         bytes32[16] memory z;
         vm.expectRevert(PredictionRules.BadProof.selector);
-        ch.exit(A, fin[A], _finSiblings(A), T.PartLeaf(1, 0, 0), z);
+        D.exit(A, fin[A], _finSiblings(A), T.PartLeaf(1, 0, 0), z);
         // Indices beyond the tree don't alias real ones.
-        vm.expectRevert(PredictionChannel.WrongState.selector);
-        ch.exit(A + 65536, fin[A], _finSiblings(A), T.PartLeaf(0, 0, 0), z);
+        vm.expectRevert(PredictionStorage.WrongState.selector);
+        D.exit(A + 65536, fin[A], _finSiblings(A), T.PartLeaf(0, 0, 0), z);
         uint256 before = who[A].balance;
-        ch.exit(A, fin[A], _finSiblings(A), T.PartLeaf(0, 0, 0), z);
+        D.exit(A, fin[A], _finSiblings(A), T.PartLeaf(0, 0, 0), z);
         assertEq(who[A].balance - before, 10 ether);
     }
 
@@ -591,9 +597,9 @@ contract PredictionChannelTest is PredictionBase {
         bytes32[16] memory os = _finSiblings(A);
         vm.startPrank(watcher);
         vm.expectRevert(PredictionRules.BadProof.selector);
-        ch.challengeUpdate(A, abi.encode(T.Leaf(5 ether, 0, 0, 0), os, n[A], ns, p, ps));
+        D.challengeUpdate(A, 0, abi.encode(T.Leaf(5 ether, 0, 0, 0), os, n[A], ns, p, ps));
         vm.expectRevert(PredictionRules.BadProof.selector);
-        ch.challengeUpdate(A, abi.encode(fin[A], os, T.Leaf(13 ether, 0, 10 ether, 0), ns, p, ps));
+        D.challengeUpdate(A, 0, abi.encode(fin[A], os, T.Leaf(13 ether, 0, 10 ether, 0), ns, p, ps));
         vm.stopPrank();
     }
 
@@ -619,7 +625,7 @@ contract PredictionChannelTest is PredictionBase {
         bytes memory swapped = bytes.concat(_slice(u, 108, 216), _slice(u, 0, 108), _slice(u, 216, u.length));
         vm.prank(op);
         vm.expectRevert(SparseTree16.NotSorted.selector);
-        ch.propose(r, swapped, proof);
+        ch.propose(r, swapped, proof, 0);
         // A leaf for an index no one registered.
         fin.push(T.Leaf(0, 0, 0, 0));
         T.Leaf[] memory m = new T.Leaf[](4);
@@ -630,8 +636,8 @@ contract PredictionChannelTest is PredictionBase {
         (u, proof) = _updates(m);
         fin.pop();
         vm.prank(op);
-        vm.expectRevert(PredictionChannel.BadUpdate.selector);
-        ch.propose(r, u, proof);
+        vm.expectRevert(PredictionStorage.BadUpdate.selector);
+        ch.propose(r, u, proof, 0);
     }
 
     /// If no one challenges a bad root, payouts are still capped by the channel's own funds.
@@ -640,7 +646,7 @@ contract PredictionChannelTest is PredictionBase {
         w[A] = T.Leaf(0, 100 ether, 0, 0);
         _propose(0, w);
         _finalize(w);
-        vm.expectRevert(PredictionChannel.Insolvent.selector);
+        vm.expectRevert(PredictionStorage.Insolvent.selector);
         ch.claim(A, fin[A], _finSiblings(A));
     }
 
@@ -666,15 +672,15 @@ contract PredictionChannelTest is PredictionBase {
         }
         _commit(r, e);
         _recordResolution();
-        ch.resolve(r, package1);
+        D.resolve(r, package1);
         vm.prank(who[A]);
         ch.requestWithdraw();
         vm.warp(block.timestamp + 1 days);
-        ch.freeze(A, fin[A], _finSiblings(A));
+        D.freeze();
         uint256 total;
         for (uint32 i; i < 3; ++i) {
             uint256 before = who[i].balance;
-            ch.exit(i, fin[i], _finSiblings(i), _partOf(e, i), Tree.siblings(_partLeaves(e), i));
+            D.exit(i, fin[i], _finSiblings(i), _partOf(e, i), Tree.siblings(_partLeaves(e), i));
             total += who[i].balance - before;
         }
         assertLe(total, 30 ether);

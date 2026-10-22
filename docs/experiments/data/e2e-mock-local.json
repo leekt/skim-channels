@@ -15,15 +15,15 @@
     "L1 fund": 45644,
     "L2 inbox post": 95092,
     "witness package bytes (1 slot)": 1824,
-    "L2 execute": 286846,
+    "L2 execute": 286822,
     "evidence bytes (31-tx L2 block)": 3296,
     "receipt proof nodes": 3,
     "L1 anchor record": 134172,
-    "L1 mockAccept": 159935,
-    "L1 settle (31-tx L2 block)": 392090,
+    "L1 mockAccept": 159911,
+    "L1 settle (31-tx L2 block)": 392006,
     "L1 withdraw": 28519,
     "L1 refund": 71838,
-    "L1 startExit": 130388,
-    "L1 finalizeExit": 317689
+    "L1 startExit": 130352,
+    "L1 finalizeExit": 317665
   }
 }

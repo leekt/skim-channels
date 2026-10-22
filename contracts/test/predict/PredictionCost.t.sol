@@ -107,7 +107,7 @@ contract PredictionCostTest is PredictionBase {
                     watcher,
                     address(ch),
                     abi.encodeCall(
-                        ch.challengeCommit,
+                        D.challengeCommit,
                         (
                             r,
                             last,
@@ -122,22 +122,18 @@ contract PredictionCostTest is PredictionBase {
         }
         vm.revertToState(snap);
 
-        _log("channel", "commit", _txGas(op, address(ch), abi.encodeCall(ch.commit, (r, _pack(e)))));
+        _log("channel", "commit", _txGas(op, address(ch), abi.encodeCall(D.commit, (r, _pack(e)))));
         vm.roll(200);
         vm.setBlockhash(RESOLUTION, keccak256(raw1));
         _log("both", "recordAnchor", _txGas(watcher, address(anchors), abi.encodeCall(anchors.record, (raw1))));
-        _log("channel", "resolve", _txGas(watcher, address(ch), abi.encodeCall(ch.resolve, (r, package1))));
+        _log("channel", "resolve", _txGas(watcher, address(ch), abi.encodeCall(D.resolve, (r, package1))));
 
         // Worst-case exit: frozen with the round resolved but unsettled.
         snap = vm.snapshotState();
         vm.prank(who[last]);
         ch.requestWithdraw();
         vm.warp(block.timestamp + 1 days);
-        _log(
-            "channel",
-            "freeze",
-            _txGas(watcher, address(ch), abi.encodeCall(ch.freeze, (last, fin[last], _finSiblings(last))))
-        );
+        _log("channel", "freeze", _txGas(watcher, address(ch), abi.encodeCall(D.freeze, ())));
         _log(
             "channel",
             "exit",
@@ -145,8 +141,7 @@ contract PredictionCostTest is PredictionBase {
                 who[last],
                 address(ch),
                 abi.encodeCall(
-                    ch.exit,
-                    (last, fin[last], _finSiblings(last), _partOf(e, last), Tree.siblings(_partLeaves(e), last))
+                    D.exit, (last, fin[last], _finSiblings(last), _partOf(e, last), Tree.siblings(_partLeaves(e), last))
                 )
             )
         );
@@ -169,9 +164,10 @@ contract PredictionCostTest is PredictionBase {
                     watcher,
                     address(ch),
                     abi.encodeCall(
-                        ch.challengeUpdate,
+                        D.challengeUpdate,
                         (
                             last,
+                            uint256(0),
                             abi.encode(
                                 fin[last],
                                 _finSiblings(last),
@@ -188,7 +184,7 @@ contract PredictionCostTest is PredictionBase {
         vm.revertToState(snap);
 
         (bytes memory u, bytes32[] memory proof) = _updates(next);
-        _log("channel", "propose", _txGas(op, address(ch), abi.encodeCall(ch.propose, (r, u, proof))));
+        _log("channel", "propose", _txGas(op, address(ch), abi.encodeCall(ch.propose, (r, u, proof, 0))));
         vm.warp(block.timestamp + WINDOW);
         _log("channel", "finalize", _txGas(watcher, address(ch), abi.encodeCall(ch.finalize, ())));
         for (uint256 i; i < n; ++i) {
@@ -200,7 +196,7 @@ contract PredictionCostTest is PredictionBase {
         T.Leaf[] memory w = _copyFin();
         w[0] = T.Leaf(0, fin[0].balance, fin[0].depositsApplied, 1);
         (u, proof) = _updates(w);
-        _log("channel", "proposeOne", _txGas(op, address(ch), abi.encodeCall(ch.propose, (0, u, proof))));
+        _log("channel", "proposeOne", _txGas(op, address(ch), abi.encodeCall(ch.propose, (0, u, proof, 1))));
         vm.warp(block.timestamp + WINDOW);
         ch.finalize();
         fin[0] = w[0];
@@ -212,7 +208,7 @@ contract PredictionCostTest is PredictionBase {
             vm.prank(who[i]);
             l1.deposit{value: 10 ether}();
         }
-        vm.roll(90);
+        vm.roll(20);
         vm.prank(op);
         uint256 lr = l1.openRound(6500, oracle, oracleSlot, 0, 256, DEADLINE, RESOLUTION);
         uint256 stakeTotal;

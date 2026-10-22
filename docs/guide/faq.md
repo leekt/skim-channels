@@ -98,7 +98,7 @@ For prediction rounds, **yes, measured**: the same game, the same payout rule an
 
 | Per user, one round | Channel | Directly on L1 |
 |---|---|---|
-| 100 users × 1 stake | 25k gas | 101k gas |
+| 100 users × 1 stake | 26k gas | 101k gas |
 | 100 users × 8 stakes | 25k gas | 383k gas |
 | 1,000 users × 1 stake | 17k gas | 94k gas |
 
@@ -107,8 +107,8 @@ For prediction rounds, **yes, measured**: the same game, the same payout rule an
 - **Settlement:** L1 receives the changed balance leaves with a multiproof (~9k gas). No app execution runs on L1 unless someone challenges, and each challenge is one transaction under 150k gas.
 
 **What it costs instead:**
-- **Entry and exit:** about 200k more gas per user, recovered after ~3 rounds at 1 stake each.
-- **Latency:** settlement waits a challenge window of up to 6 hours.
+- **Entry and exit:** about 265k more gas per user, recovered after ~3.5 rounds at 1 stake each.
+- **Latency:** settlement waits a per-channel challenge window (at least 1 hour), and a forced withdrawal can take up to the channel's forced delay (at least 1 day).
 - **Watching:** someone must check each proposal within that window.
 
 ## What's the plan for apps (users join, lock assets on L1, use the app, withdraw any time)?

@@ -130,8 +130,10 @@ contract PredictionRules {
     }
 
     /// @notice Whether user `idx`'s leaf in `pending` is wrong: it claims more deposits or
-    ///         requests than L1 recorded, or isn't what PredictionTypes.next computes from the
-    ///         finalized leaf, the user's round leaf and the counters it carries.
+    ///         requests than L1 recorded, leaves a request before the proposal's cursor
+    ///         unapplied, or isn't what PredictionTypes.next computes from the finalized leaf,
+    ///         the user's round leaf and the counters it carries.
+    /// @param rec what L1 recorded for this user, for k = the new leaf's requestsApplied
     /// @param evidence abi.encode(Leaf old, bytes32[16] oldSiblings, Leaf new,
     ///        bytes32[16] newSiblings, PartLeaf roundLeaf, bytes32[16] roundSiblings)
     function updateFault(
@@ -141,8 +143,7 @@ contract PredictionRules {
         bytes32 pending,
         bytes32 partRoot,
         PredictionTypes.Effect calldata e,
-        uint256 deposits,
-        uint256 requests
+        PredictionTypes.UserRecord calldata rec
     ) external pure returns (bool) {
         (
             PredictionTypes.Leaf memory o,
@@ -165,9 +166,12 @@ contract PredictionRules {
         if (SparseTree16.rootFrom(PredictionTypes.leafHash(o), idx, os) != finalized) revert BadProof();
         if (SparseTree16.rootFrom(PredictionTypes.leafHash(n), idx, ns) != pending) revert BadProof();
         _checkRoundLeaf(idx, p, ps, partRoot, e.active);
-        if (n.depositsApplied > deposits || n.requestsApplied > requests) return true;
+        if (n.requestsApplied != rec.claimedRequests) revert BadProof();
+        if (n.depositsApplied > rec.deposits || n.requestsApplied > rec.requests || rec.nextRequestPos < rec.cursor) {
+            return true;
+        }
         (PredictionTypes.Leaf memory want, bool ok) =
-            PredictionTypes.next(o, p, e, n.depositsApplied, n.requestsApplied);
+            PredictionTypes.next(o, p, e, n.depositsApplied, n.requestsApplied, rec.requestDeposits);
         return !ok || PredictionTypes.leafHash(want) != PredictionTypes.leafHash(n);
     }
 
@@ -184,7 +188,7 @@ contract PredictionRules {
         uint256 requests
     ) external pure returns (PredictionTypes.Leaf memory, bool) {
         _checkRoundLeaf(idx, p, partSiblings, partRoot, e.active);
-        return PredictionTypes.next(old, p, e, deposits, requests);
+        return PredictionTypes.next(old, p, e, deposits, requests, 0);
     }
 
     function _checkRoundLeaf(

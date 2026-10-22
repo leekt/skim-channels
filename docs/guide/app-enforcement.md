@@ -43,7 +43,7 @@ The common pattern below: **the normal path posts results; L1 checks conditions 
 **Lifecycle on L1 (`PredictionChannel`):**
 1. **Round terms:** strike, oracle (account, slot, bit range), resolution block number, commit deadline, commit challenge window. Fixed when the operator opens the round.
 2. **Commit** (operator, by `commitDeadline`): each participant's latest ticket, signature included, packed in calldata. L1 builds the participation tree (a sparse tree indexed by user) and the side totals itself.
-   - *Challenge until `commitChallengeEnd`, a block before the resolution block:* a ticket with a bad signature, or stakes above what the user had at the commit (finalized balance plus unapplied deposits). A successful challenge **voids** the round (stakes simply stay with users) and pays the operator's bond to the challenger.
+   - *Challenge until `commitChallengeEnd`, at least `commitChallengeBlocks` (≥ 64) after the commit transaction and before the resolution block:* a ticket with a bad signature, or stakes above what the user had at the commit (finalized balance plus unapplied deposits). A successful challenge **voids** the round (stakes simply stay with users) and pays the operator's bond to the challenger.
    - An overdraft no one challenged in time forfeits what the user had; they win nothing. This keeps settlement total.
 3. **Resolve** (anyone): an L1 witness of the oracle slot at the recorded resolution block. The outcome is computed on L1.
 4. **Propose settlement** (operator): changed balance leaves `(balance, cumWithdrawn, depositsApplied, requestsApplied)`, old and new, with a multiproof of the unchanged subtrees. L1 computes the old root (it must be the finalized one) and the new root.
@@ -51,17 +51,22 @@ The common pattern below: **the normal path posts results; L1 checks conditions 
 5. **Finalize** (anyone): after the window. Withdrawals become claimable against the finalized root.
 
 **Withdrawal and the operator-free exit:**
-- **Normal withdrawal:** an L1 request to withdraw everything. The next finalized proposal must apply it, and then the payout is claimable.
-- **Deadline:** if a request is still unapplied one day after it was made, the channel **freezes**.
+- **Normal withdrawal:**
+  - The user makes an L1 request to withdraw everything.
+  - It records the user's deposits so far, and it covers exactly those deposits plus winnings. Later deposits aren't covered.
+  - It joins one channel-wide queue. A proposal's cursor says how far the queue is served.
+  - Applying a request without paying everything it covers loses a challenge, and so does skipping one before the cursor.
+- **Deadline:** each request's deadline is fixed when it's made (request time + `forceDelay`, at least one day). If the finalized cursor hasn't passed it by then, **anyone can freeze**. That needs no leaf evidence, and nothing the operator does restarts the deadline. An overdue request also blocks new rounds.
 - **Exit computed on L1, per user:**
   - the user's leaf in the **last finalized** balance root;
   - plus deposits not yet applied;
-  - plus, for a committed round not yet settled, the round's effect: payout − stake if resolved, nothing if void;
+  - plus, for a committed round not yet settled, the round's effect: payout − stake if resolved, nothing if void, and **only the stake held back** if not yet resolved (`exit` can be called again afterwards);
   - minus anything already paid.
+- **Resolution witness:** watchers and participants keep the resolution block's witness (`ts/runtime/evidence.ts`) while it's still served, and anyone records the anchor. A missing witness never voids a recorded round; only the stakes wait until someone resolves (an archive node can always produce the proof).
 
 **L1 checks:** one ticket signature; a storage witness for the oracle; one user's balance arithmetic. No app execution.
 
-**Implementation status (2026-10-22):** built as `contracts/src/predict/PredictionChannel.sol`, with forge tests, mutation checks and an anvil e2e. Measured against the same game run directly on L1: a round costs 4–15× less per user at 100 users, and each dispute is a single transaction under 150k gas. Details in [prediction round cost](../experiments/prediction-round-cost.md).
+**Implementation status (2026-10-22):** built as `contracts/src/predict/` (`PredictionChannel` with `PredictionDisputes`; per-channel policy with floors of a 1 h window, 64 commit-challenge blocks and a 1-day forced delay), with forge tests, mutation checks and an anvil e2e. Review fixes: [prediction review fixes](../experiments/prediction-review-fixes.md). Measured against the same game run directly on L1: a round costs 4–15× less per user at 100 users, and each dispute is a single transaction under 150k gas. Details in [prediction round cost](../experiments/prediction-round-cost.md).
 
 **Mechanism:** optimistic for balance settlement; participation and outcome are fixed on L1. The challenges are **non-interactive**: one transaction proves the violation, so there is a challenge-submission deadline but no response deadline. Bonds penalize invalid proposals. They don't replace the need for **someone watching**: users watch their own leaves, and any third party can.
 

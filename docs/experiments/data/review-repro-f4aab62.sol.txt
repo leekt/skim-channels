@@ -1,0 +1,99 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+pragma solidity ^0.8.28;
+
+import {PredictionBase, Tree} from "./PredictionBase.sol";
+import {PredictionChannel} from "../../src/predict/PredictionChannel.sol";
+import {PredictionTypes as T} from "../../src/predict/PredictionTypes.sol";
+
+/// Reproductions of the f4aab62 review findings against the code as it was. Each test
+/// asserts the SAFE behaviour, so on f4aab62 it fails; the failure is the reproduction.
+contract ReviewReproTest is PredictionBase {
+    function setUp() public override {
+        super.setUp();
+        _addUsers(3, 10 ether);
+    }
+
+    // A1: a zero challenge window is accepted.
+    function test_A1_zeroWindowRejected() public {
+        vm.expectRevert();
+        new PredictionChannel(op, anchors, wv, rules, BOND, 0);
+    }
+
+    // A1: open + commit in block N with (N, N+1, N+2); an honest watcher in N+1 can't challenge.
+    function test_A1_forgedCommitChallengeableNextBlock() public {
+        uint256 n = block.number;
+        vm.prank(op);
+        uint256 r = ch.openRound(6500, oracle, oracleSlot, 0, 256, uint64(n), uint64(n + 1), uint64(n + 2));
+        Tk[] memory e = new Tk[](1);
+        e[0] = Tk(0, _ticket(keys[1], r, 1 ether, 0, 1)); // user 1 signed user 0's ticket
+        _commit(r, e);
+        vm.roll(n + 1);
+        vm.prank(watcher);
+        ch.challengeCommit(r, 0, abi.encode(e[0].t), Tree.siblings(_partLeaves(e), 0), fin[0], _finSiblings(0));
+    }
+
+    // A2: Leaf(0,0,0,1) consumes a withdraw-all request while 10 ETH of deposits stay unpaid.
+    function test_A2_requestConsumedWithoutPayment() public {
+        vm.prank(who[0]);
+        ch.requestWithdraw();
+        T.Leaf[] memory w = _copyFin();
+        w[0] = T.Leaf(0, 0, 0, 1);
+        _propose(0, w);
+        Tk[] memory none;
+        vm.prank(watcher);
+        ch.challengeUpdate(
+            0,
+            abi.encode(fin[0], _finSiblings(0), w[0], Tree.siblings(_hashes(w), 0), _partOf(none, 0), Tree.siblings(_partLeaves(none), 0))
+        ); // safe behaviour: this is a fault
+    }
+
+    // A2 (continued): unchallenged, it finalizes; pays 0 and freeze is refused a day later.
+    function test_A2_consumedRequestBlocksFreeze() public {
+        vm.prank(who[0]);
+        ch.requestWithdraw();
+        T.Leaf[] memory w = _copyFin();
+        w[0] = T.Leaf(0, 0, 0, 1);
+        _propose(0, w);
+        _finalize(w);
+        vm.warp(block.timestamp + 1 days);
+        ch.freeze(0, fin[0], _finSiblings(0)); // safe behaviour: the user can still force an exit
+    }
+
+    // A3: another user's leaf update invalidates freeze evidence prepared for the finalized root.
+    function test_A3_freezeEvidenceInvalidatedByOtherLeaf() public {
+        vm.prank(who[0]);
+        ch.requestWithdraw();
+        vm.warp(block.timestamp + 1 days);
+        bytes32[16] memory sib = _finSiblings(0); // watcher prepares evidence
+        T.Leaf[] memory w = _copyFin();
+        w[1] = T.Leaf(10 ether, 0, 10 ether, 0); // operator touches only user 1
+        _propose(0, w);
+        _finalize(w);
+        ch.freeze(0, T.Leaf(0, 0, 0, 0), sib); // safe behaviour: still freezes
+    }
+
+    // A3: an overdue request doesn't stop the operator from opening a new round.
+    function test_A3_newRoundWithOverdueRequest() public {
+        vm.prank(who[0]);
+        ch.requestWithdraw();
+        vm.warp(block.timestamp + 1 days + 1);
+        vm.prank(op);
+        vm.expectRevert();
+        ch.openRound(6500, oracle, oracleSlot, 0, 256, 95, 98, 101);
+    }
+
+    // A4: anchor recorded, never resolved, operator gone: even a non-participant can't exit.
+    function test_A4_nonParticipantExitBlockedByUnresolvedRound() public {
+        uint256 r = _open(6500);
+        Tk[] memory e = new Tk[](1);
+        e[0] = Tk(0, _ticket(keys[0], r, 1 ether, 0, 1));
+        _commit(r, e);
+        _recordResolution(); // anchor recorded; nobody kept the witness
+        vm.prank(who[2]);
+        ch.requestWithdraw();
+        vm.warp(block.timestamp + 1 days);
+        ch.freeze(2, fin[2], _finSiblings(2));
+        bytes32[16] memory z;
+        ch.exit(2, fin[2], _finSiblings(2), T.PartLeaf(0, 0, 0), z); // safe: non-participant exits
+    }
+}

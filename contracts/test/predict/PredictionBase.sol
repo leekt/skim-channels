@@ -3,6 +3,8 @@ pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
 import {PredictionChannel} from "../../src/predict/PredictionChannel.sol";
+import {PredictionDisputes} from "../../src/predict/PredictionDisputes.sol";
+import {PredictionStorage} from "../../src/predict/PredictionStorage.sol";
 import {PredictionRules} from "../../src/predict/PredictionRules.sol";
 import {PredictionTypes as T} from "../../src/predict/PredictionTypes.sol";
 import {AnchorRegistry} from "../../src/AnchorRegistry.sol";
@@ -85,11 +87,13 @@ abstract contract PredictionBase is Test {
     uint256 constant L1 = 11155111;
     uint256 constant WINDOW = 1 hours;
     uint256 constant BOND = 1 ether;
-    uint64 constant DEADLINE = 95;
-    uint64 constant CHALLENGE_END = 98;
-    uint64 constant RESOLUTION = 101; // oracle reads 7000 here
+    uint64 constant DEADLINE = 30;
+    uint64 constant CHALLENGE_END = 95; // ≥ DEADLINE + 64 (MIN_COMMIT_CHALLENGE_BLOCKS)
+    uint64 constant RESOLUTION = 101; // oracle reads 7000 here (the fixture header's number)
 
     PredictionChannel ch;
+    /// The same address, typed for the functions the channel runs by delegatecall.
+    PredictionDisputes D;
     PredictionRules rules;
     AnchorRegistry anchors;
     WitnessVerifier wv;
@@ -108,7 +112,7 @@ abstract contract PredictionBase is Test {
     function setUp() public virtual {
         vm.chainId(L1);
         vm.warp(1_700_000_000);
-        vm.roll(90);
+        vm.roll(20);
         string memory j = vm.readFile(string.concat(vm.projectRoot(), "/../fixtures/witnesses/read-and-split.json"));
         oracle = vm.parseJsonAddress(j, ".fixture");
         oracleSlot = vm.parseJsonBytes32(j, ".shareSlot");
@@ -117,10 +121,26 @@ abstract contract PredictionBase is Test {
         anchors = new AnchorRegistry();
         wv = new WitnessVerifier();
         rules = new PredictionRules();
-        ch = new PredictionChannel(op, anchors, wv, rules, BOND, WINDOW);
+        ch = new PredictionChannel(new PredictionDisputes(_policy()));
+        D = PredictionDisputes(address(ch));
         vm.deal(op, 100 ether);
         vm.prank(op);
         ch.postBond{value: BOND}();
+    }
+
+    /// The production floors: 1 h challenge window, 1 day forced delay, 64 commit blocks.
+    function _policy() internal view returns (PredictionStorage.Config memory) {
+        return PredictionStorage.Config({
+            operator: op,
+            anchors: anchors,
+            witnessVerifier: wv,
+            rules: rules,
+            minBond: BOND,
+            challengeWindow: WINDOW,
+            forceDelay: 1 days,
+            commitChallengeBlocks: 64,
+            maxRoundBlocks: 1800
+        });
     }
 
     // ---- users ------------------------------------------------------------------------------
@@ -229,7 +249,7 @@ abstract contract PredictionBase is Test {
 
     function _commit(uint256 r, Tk[] memory e) internal {
         vm.prank(op);
-        ch.commit(r, _pack(e));
+        D.commit(r, _pack(e));
     }
 
     function _recordResolution() internal {
@@ -291,9 +311,25 @@ abstract contract PredictionBase is Test {
     }
 
     function _propose(uint256 r, T.Leaf[] memory next) internal {
+        _propose(r, next, _cursorFor(next));
+    }
+
+    function _propose(uint256 r, T.Leaf[] memory next, uint256 cursor) internal {
         (bytes memory u, bytes32[] memory proof) = _updates(next);
         vm.prank(op);
-        ch.propose(r, u, proof);
+        ch.propose(r, u, proof, cursor);
+    }
+
+    /// The queue prefix `next` serves: request number s of user i is served when
+    /// next[i].requestsApplied > s.
+    function _cursorFor(T.Leaf[] memory next) internal view returns (uint256 c) {
+        uint256 len = ch.queueLength();
+        uint256[] memory seen = new uint256[](next.length);
+        for (c = 0; c < len; ++c) {
+            (uint32 idx,,) = ch.queue(c);
+            if (idx >= next.length || next[idx].requestsApplied <= seen[idx]) break;
+            seen[idx]++;
+        }
     }
 
     function _finalize(T.Leaf[] memory next) internal {

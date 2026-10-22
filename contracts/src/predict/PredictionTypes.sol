@@ -44,10 +44,21 @@ library PredictionTypes {
     /// What the round did, as the balance rule needs it.
     struct Effect {
         bool active; // false: no round, or a void round
+        bool unresolved; // committed, outcome not yet on L1: only the stake is held back
         uint8 outcome; // 0: no winning stake, everyone refunded
         uint256 totalUp;
         uint256 totalDown;
         uint256 depositsAtCommit; // the user's cumulative deposits when the round committed
+    }
+
+    /// What L1 recorded about one user, to judge the leaf a proposal gives them.
+    struct UserRecord {
+        uint256 deposits; // cumulative deposits
+        uint256 requests; // withdraw-all requests made
+        uint256 claimedRequests; // the leaf's requestsApplied this record describes (k)
+        uint256 requestDeposits; // deposits made before request k (0 when k = 0)
+        uint256 nextRequestPos; // queue position of request k + 1 (max when there is none)
+        uint256 cursor; // the proposal's queue cursor: every request before it must be applied
     }
 
     function leafHash(Leaf memory l) internal pure returns (bytes32) {
@@ -67,12 +78,25 @@ library PredictionTypes {
     /// The stake is taken from what the user had when the round committed:
     /// old balance + deposits up to the commit. A stake above that is an overdraft that no
     /// one challenged in time; the user forfeits what they had and wins nothing.
-    function next(Leaf memory old, PartLeaf memory p, Effect memory e, uint256 deposits, uint256 requests)
-        internal
-        pure
-        returns (Leaf memory n, bool ok)
-    {
+    ///
+    /// Applying withdraw-all requests releases the whole balance, and requires every deposit
+    /// made before the last applied request (`requestDeposits`, recorded on L1 with the
+    /// request) to be applied first. So a request can't be consumed without paying what it
+    /// covers. Deposits after the request stay for later.
+    ///
+    /// With `e.unresolved` (exit while the round is committed but not resolved) only the
+    /// stake is held back. Every outcome pays at least that much, so the amount is final
+    /// for what it covers and later exits only add to it.
+    function next(
+        Leaf memory old,
+        PartLeaf memory p,
+        Effect memory e,
+        uint256 deposits,
+        uint256 requests,
+        uint256 requestDeposits
+    ) internal pure returns (Leaf memory n, bool ok) {
         if (deposits < old.depositsApplied || requests < old.requestsApplied) return (n, false);
+        if (requests > old.requestsApplied && deposits < requestDeposits) return (n, false);
         uint256 bal = old.balance + deposits - old.depositsApplied;
         uint256 stake = p.up + p.down;
         if (e.active && stake != 0) {
@@ -80,6 +104,8 @@ library PredictionTypes {
             uint256 had = old.balance + e.depositsAtCommit - old.depositsApplied;
             if (stake > had) {
                 bal -= had;
+            } else if (e.unresolved) {
+                bal -= stake;
             } else if (e.outcome != 0) {
                 uint256 pot = e.totalUp + e.totalDown;
                 uint256 won = e.outcome == UP ? p.up * pot / e.totalUp : p.down * pot / e.totalDown;
