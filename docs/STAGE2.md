@@ -148,12 +148,23 @@ re-executing them with the EXECUTE precompile. It reads ethrex's `NativeRollup.s
   16.0M gas per L2 block, which is the L2 gas limit. One block per L1 transaction is the
   ceiling under EIP-7825.
 
-**Not achievable today, with evidence:**
-- **`native-proof-dependencies` (EIP-8288 + EIP-8357).** EIP-8288's reference implementation
-  is listed as forthcoming. On L2BEAT's bogota devnet the rollup uses `MockDependencyVerifier`
-  (a trusted prover's signature) because LeanSTARK dependencies can't be proven yet. Any
-  verifier built against it here would be a mock under a native name, which the spec forbids.
-  The registry is ready for it: `IStateTransitionVerifier` behind the 30-day governance path.
+**`native-proof-dependencies` (EIP-8288 + EIP-8357): adapter built, not deployable.**
+`ProofDependencyVerifier` fixes the binding: verification key from the EIP-8357 registry (its
+exact call convention), and a dependency attestation (`IDependencySource`) for the
+transition's public input, which covers profile, parent state, DA, anchor, L1 messages and
+header. It is tested with labeled stubs only. Why no real instance exists, checked
+2026-10-22:
+- **EIP-8288** (eips.ethereum.org/EIPS/eip-8288): status Draft; Reference Implementation
+  "TBD"; `AGGREGATED_VK` and `DEPS_HASH` TBD. "`LEANSTARK_SCHEME` is reserved: a frame that
+  uses it is invalid until `get_deps_hash` is defined for it." So no network can carry a
+  STARK dependency at all.
+- **L2BEAT's frames devnet** (l2beat/native-rollups, contracts/frames/README.md): the
+  verifier is "a trusted signer instead of a zkVM proof", and the registry entry is "a
+  placeholder for the mock proofs".
+- **Public bogota-devnet-1** (rpc.bogota-devnet-1.ethpandaops.io, Geth v1.17.6): the EIP-8357
+  registry address `0x00005e9c…8357` has no code, and an `eth_call` returns `0x`.
+
+Wiring a stub source in would be a mock under a native name, which the spec forbids.
 
 ## Effect on what is built now (M0/M1)
 

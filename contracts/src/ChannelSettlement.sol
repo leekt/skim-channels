@@ -69,8 +69,6 @@ contract ChannelSettlement {
         bytes outcome;
     }
 
-    bytes32 public constant OUTCOME_TOPIC = keccak256("ChannelOutcome(bytes32,bytes32,bytes32,bytes32,bytes32)");
-
     bytes32 public immutable rollupId;
     bytes32 public immutable profileHash;
     uint8 public immutable profileKind;
@@ -166,47 +164,77 @@ contract ChannelSettlement {
     }
 
     function settle(bytes32 channelId, bytes calldata evidence) external {
-        Channel storage c = channels[channelId];
-        if (c.status != Status.Open && c.status != Status.Exiting) revert WrongStatus(c.status);
-        if (c.status == Status.Open && block.timestamp >= c.deadline) revert Deadline();
         Evidence memory e = abi.decode(evidence, (Evidence));
+        bytes32 rr = _acceptedReceiptsRoot(e.l2BlockHash, e.l2Header);
+        _settleOne(
+            Item(channelId, e.txIndex, e.receipt, e.receiptProof, e.logIndex, e.request, e.outcome), rr, e.l2BlockHash
+        );
+    }
 
-        // 1. The L2 block: accepted under this deployment's profile.
+    /// @notice One receipt of an L2 block, for `settleFromBlock`.
+    struct Item {
+        bytes32 channelId;
+        uint256 txIndex;
+        bytes receipt;
+        bytes[] receiptProof;
+        uint256 logIndex;
+        bytes request;
+        bytes outcome;
+    }
+
+    /// @notice Settles several channels whose outcomes are in the same L2 block: the block's
+    ///         acceptance and header are checked once, then each receipt. All or nothing.
+    function settleFromBlock(bytes32 l2BlockHash, bytes calldata l2Header, Item[] calldata items) external {
+        bytes32 rr = _acceptedReceiptsRoot(l2BlockHash, l2Header);
+        for (uint256 i; i < items.length; ++i) {
+            _settleOne(items[i], rr, l2BlockHash);
+        }
+    }
+
+    /// @dev The L2 block: accepted under this deployment's profile; the header hashes to it and
+    ///      carries the accepted receipts root.
+    function _acceptedReceiptsRoot(bytes32 l2BlockHash, bytes memory l2Header) internal view returns (bytes32 rr) {
         if (blocks.profileKind() != profileKind) revert Invalid("registry profile kind");
-        IAcceptedBlockRegistry.AcceptedBlock memory b = blocks.acceptedBlock(rollupId, e.l2BlockHash);
+        IAcceptedBlockRegistry.AcceptedBlock memory b = blocks.acceptedBlock(rollupId, l2BlockHash);
         if (!b.accepted) revert Invalid("block not accepted");
         if (b.executionProfileHash != profileHash) revert Invalid("block profile");
-        (bytes32 hh, bytes32 rr) = receiptVerifier.headerRoots(e.l2Header);
-        if (hh != e.l2BlockHash || rr != b.receiptsRoot) revert Invalid("header");
-        ReceiptVerifier.Result memory log = receiptVerifier.verify(rr, e.txIndex, e.receipt, e.receiptProof, e.logIndex);
+        bytes32 hh;
+        (hh, rr) = receiptVerifier.headerRoots(l2Header);
+        if (hh != l2BlockHash || rr != b.receiptsRoot) revert Invalid("header");
+    }
 
-        // 2. The receipt: included, successful.
-        if (!log.included) revert Invalid("receipt proof");
-        if (!log.success) revert Invalid("receipt status");
-        if (!log.hasLog) revert Invalid("log index");
+    function _settleOne(Item memory e, bytes32 rr, bytes32 l2BlockHash) internal {
+        Channel storage c = channels[e.channelId];
+        if (c.status != Status.Open && c.status != Status.Exiting) revert WrongStatus(c.status);
+        if (c.status == Status.Open && block.timestamp >= c.deadline) revert Deadline();
 
-        // 3. The log: this channel's outcome, from its executor, for this signed request.
-        ChannelTypes.FinalRequest memory r = ChannelTypes.decodeFinalRequest(e.request);
-        bytes32 requestHash = ChannelTypes.requestSigningHash(r, block.chainid, address(this));
-        if (log.emitter != c.executor) revert Invalid("emitter");
-        if (log.topics.length != 3 || log.topics[0] != OUTCOME_TOPIC) revert Invalid("event");
-        if (log.topics[1] != channelId || log.topics[2] != requestHash) revert Invalid("log binding");
-        if (keccak256(log.data) != keccak256(abi.encode(r.anchorId, r.policyHash, keccak256(e.outcome)))) {
-            revert Invalid("log data");
-        }
+        // The receipt and its log: this channel's outcome, from its executor, for this signed
+        // request (stateless checks, in ReceiptVerifier).
+        (ChannelTypes.FinalRequest memory r, bytes32 requestHash) = receiptVerifier.outcome(
+            rr,
+            e.txIndex,
+            e.receipt,
+            e.receiptProof,
+            e.logIndex,
+            e.request,
+            e.outcome,
+            c.executor,
+            e.channelId,
+            address(this)
+        );
 
-        // 4. The request: this channel's terms, policy and profile; an anchor L1 vouches for.
-        if (r.channelId != channelId || r.termsHash != c.termsHash) revert Invalid("request");
+        // The request: this channel's terms, policy and profile; an anchor L1 vouches for.
+        if (r.channelId != e.channelId || r.termsHash != c.termsHash) revert Invalid("request");
         if (r.policyHash != c.policyHash || r.executionProfileHash != profileHash) revert Invalid("request policy");
         if (!anchors.recorded(r.anchorId)) revert Invalid("anchor not recorded on L1");
         // During an emergency exit, only the pending (highest-nonce) request may settle.
-        if (c.status == Status.Exiting && requestHash != exits.pendingRequest(channelId)) {
+        if (c.status == Status.Exiting && requestHash != exits.pendingRequest(e.channelId)) {
             revert Invalid("not the pending exit request");
         }
 
-        // 5. The outcome: one payout per participant, conserving the escrow.
+        // The outcome: one payout per participant, conserving the escrow.
         _payout(c, e.outcome);
-        emit Settled(channelId, requestHash, e.l2BlockHash);
+        emit Settled(e.channelId, requestHash, l2BlockHash);
     }
 
     // ---- emergency-exit hooks ---------------------------------------------------------------

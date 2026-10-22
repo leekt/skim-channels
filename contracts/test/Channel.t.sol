@@ -385,7 +385,9 @@ contract ChannelTest is Test {
         (, bytes32[] memory writes) = vm.accesses(address(executor));
         assertEq(writes.length, 0, "executor wrote storage");
 
+        uint256 g0 = gasleft();
         settlement.settle(t.channelId, evidence);
+        emit log_named_uint("single settle, gas", g0 - gasleft());
         assertEq(uint8(settlement.channel(t.channelId).status), uint8(ChannelSettlement.Status.Settled));
         assertEq(settlement.withdrawable(participants[0]), 1.4 ether);
         assertEq(settlement.withdrawable(participants[1]), 0.6 ether);
@@ -667,6 +669,88 @@ contract ChannelTest is Test {
         bytes[] memory restEv = new bytes[](2);
         (rest[0], rest[1], restEv[0], restEv[1]) = (ids[2], ids[3], evs[3], evs[2]);
         assertEq(b.settleAll(settlement, rest, restEv), 0x3);
+    }
+
+    /// EIP-1559 receipt (status 1) carrying `logs`.
+    function _receipt(Vm.Log[] memory logs) internal pure returns (bytes memory) {
+        bytes[] memory encLogs = new bytes[](logs.length);
+        for (uint256 i; i < logs.length; ++i) {
+            bytes[] memory topics = new bytes[](logs[i].topics.length);
+            for (uint256 j; j < topics.length; ++j) {
+                topics[j] = RLPEncode.str(abi.encodePacked(logs[i].topics[j]));
+            }
+            bytes[] memory f = new bytes[](3);
+            f[0] = RLPEncode.str(abi.encodePacked(logs[i].emitter));
+            f[1] = RLPEncode.list(topics);
+            f[2] = RLPEncode.str(logs[i].data);
+            encLogs[i] = RLPEncode.list(f);
+        }
+        bytes[] memory rf = new bytes[](4);
+        rf[0] = RLPEncode.num(1);
+        rf[1] = RLPEncode.num(100_000);
+        rf[2] = RLPEncode.str(new bytes(256));
+        rf[3] = RLPEncode.list(encLogs);
+        return bytes.concat(hex"02", RLPEncode.list(rf));
+    }
+
+    function _leaf(bytes memory hpPath, bytes memory value) internal pure returns (bytes memory) {
+        bytes[] memory f = new bytes[](2);
+        f[0] = RLPEncode.str(hpPath);
+        f[1] = RLPEncode.str(value);
+        return RLPEncode.list(f);
+    }
+
+    function test_settleFromBlockSharesTheBlockCheck() public {
+        // Two channels executed in one L2 block: receipts at index 0 (key 0x80) and 1 (key 0x01).
+        ChannelTypes.ChannelTerms memory ta = _openAndFund("sbA", address(split));
+        ChannelTypes.ChannelTerms memory tb = _openAndFund("sbB", address(split));
+        (ChannelExecutor.Call memory ca, ChannelTypes.FinalRequest memory ra) = _call(ta, ".h1", _input());
+        (ChannelExecutor.Call memory cb,) = _call(tb, ".h1", _input());
+        vm.recordLogs();
+        bytes memory oa = executor.execute(ca);
+        bytes memory recA = _receipt(vm.getRecordedLogs());
+        vm.recordLogs();
+        bytes memory ob = executor.execute(cb);
+        bytes memory recB = _receipt(vm.getRecordedLogs());
+        // Branch at the root: nibble 8 → leaf for 0x80 (rest [0]: hp 0x30), nibble 0 → leaf
+        // for 0x01 (rest [1]: hp 0x31).
+        bytes memory leafA = _leaf(hex"30", recA);
+        bytes memory leafB = _leaf(hex"31", recB);
+        bytes[] memory br = new bytes[](17);
+        for (uint256 i; i < 17; ++i) {
+            br[i] = hex"80";
+        }
+        br[8] = RLPEncode.str(abi.encodePacked(keccak256(leafA)));
+        br[0] = RLPEncode.str(abi.encodePacked(keccak256(leafB)));
+        bytes memory branch = RLPEncode.list(br);
+        bytes32 root = keccak256(branch);
+        bytes memory header = _l2Header(root);
+        bytes32 bh = keccak256(header);
+        registry.mockAccept(
+            ROLLUP,
+            bh,
+            IAcceptedBlockRegistry.AcceptedBlock(
+                keccak256("l2-parent"), keccak256("l2-state"), root, ra.anchorId, profileHash, 1, true
+            )
+        );
+        ChannelSettlement.Item[] memory items = new ChannelSettlement.Item[](2);
+        bytes[] memory pa = new bytes[](2);
+        (pa[0], pa[1]) = (branch, leafA);
+        bytes[] memory pb = new bytes[](2);
+        (pb[0], pb[1]) = (branch, leafB);
+        items[0] = ChannelSettlement.Item(ta.channelId, 0, recA, pa, 0, ca.request, oa);
+        items[1] = ChannelSettlement.Item(tb.channelId, 1, recB, pb, 0, cb.request, ob);
+        // All or nothing: a wrong index for B reverts the whole batch.
+        items[1].txIndex = 0;
+        vm.expectRevert();
+        settlement.settleFromBlock(bh, header, items);
+        items[1].txIndex = 1;
+        uint256 g = gasleft();
+        settlement.settleFromBlock(bh, header, items);
+        emit log_named_uint("settleFromBlock, gas per channel (2 in one block)", (g - gasleft()) / 2);
+        assertEq(uint8(settlement.channel(ta.channelId).status), uint8(ChannelSettlement.Status.Settled));
+        assertEq(uint8(settlement.channel(tb.channelId).status), uint8(ChannelSettlement.Status.Settled));
+        assertEq(settlement.withdrawable(participants[0]), 2.8 ether);
     }
 
     function test_crossChannelReuseRejected() public {

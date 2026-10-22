@@ -107,7 +107,8 @@ Added since:
 | | L2 `execute`; L1 `settle` (canonical registry) | 317,050; 501,125 gas |
 | | L1 `NativeRollupRegistry.acceptHistorical` (earlier run) | 892,971 gas |
 | anvil (Prague) | L1 `settle` vs. L2 block size (receipt mid-block): 1 / 31 / 127 / 255 txs | 314,895 / 375,460 / 389,695 / 389,683 gas; evidence 2,528 / 3,296 / 3,520 / 3,520 B; proof 1 / 3 / 3 / 3 nodes. Cost follows trie depth (base 16), so it flattens (`experiments/e2e-mock-local-fill*.json`) |
-| forge | `BatchSettler.settleAll`, 4 channels, 2 failing on purpose | 243,866 gas per attempted channel |
+| forge | `BatchSettler.settleAll`, 4 channels, 2 failing on purpose | 248,884 gas per attempted channel |
+| forge | `settle` (1 receipt) vs. `settleFromBlock` (2 channels in one L2 block, shared acceptance and header check) | 315,124 vs. 280,975 gas per channel |
 | anvil (Prague) | L2 `execute`; `finalizeExit`; `startExit` | see `experiments/e2e-mock-local.json` |
 
 Gas on the ethrex chains is higher across the board, because Amsterdam reprices state access
@@ -116,8 +117,9 @@ epoch 2): three samples confirmed blocks 133/137/141 at 1/0/0 behind latest whil
 block 64, so FCR was 69–77 blocks (~7–8 min at 6 s slots) ahead of finality.
 
 ## Known limitations
-- **`native-proof-dependencies` can't be built honestly yet.** EIP-8288 has no reference
-  implementation, and L2BEAT's devnet mocks the dependency verifier.
+- **`native-proof-dependencies`:** `ProofDependencyVerifier` exists, but no network can carry a
+  STARK dependency (EIP-8288 reserves the scheme), and no real EIP-8357 key exists. Evidence is
+  in STAGE2.
 - **ethrex PoC specifics:**
   - its own `advance()` has a single advancer (our registry doesn't);
   - forced-inclusion deadlines start at `poke`, because ethrex records no message times;
@@ -136,9 +138,10 @@ block 64, so FCR was 69–77 blocks (~7–8 min at 6 s slots) ahead of finality.
   - 30-day governance with a fault-gated council.
 
 ## Next tasks
-1. When EIP-8288 gets a prover: a `ProofDependencyVerifier` behind the same governance path.
-2. Batching that shares work across channels settled from the same L2 block (one header and
-   acceptance check for many receipts). `BatchSettler` amortizes only transaction overhead.
+1. When EIP-8288 defines `get_deps_hash` for STARKs and a network carries it: implement
+   `IDependencySource` over EIP-8141 frame introspection, deploy `ProofDependencyVerifier`, and
+   schedule it through `RollupGovernance`.
 
 M4 items done: FCR, witness prefetching (`AnchorBook::prefetch`), batched settlement
-(`BatchSettler`), cost and size measurements (above).
+(`BatchSettler`, best effort across blocks; `settleFromBlock`, all or nothing within one L2
+block), cost and size measurements (above).
