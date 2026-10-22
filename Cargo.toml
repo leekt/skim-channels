@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/channel-types", "crates/channel-witness", "crates/channel-receipts"]
+members = ["crates/*"]
 
 [workspace.package]
 version = "0.1.0"
@@ -16,6 +16,8 @@ alloy-rlp = "0.3.16"
 alloy-trie = "0.9.8"
 alloy-consensus = "2.5.0"
 alloy-eips = "2.5.0"
+alloy-rpc-types-eth = { version = "2.5.0", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
 alloy-sol-types = { version = "1", features = ["eip712-serde"] }
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }

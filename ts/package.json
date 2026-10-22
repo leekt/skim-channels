@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check-encodings": "node --experimental-strip-types check-encodings.ts"
+    "check-encodings": "node --experimental-strip-types check-encodings.ts",
+    "e2e": "node --experimental-strip-types e2e.ts"
   },
   "dependencies": {
     "viem": "2.30.0"
