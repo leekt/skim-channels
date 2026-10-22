@@ -138,7 +138,7 @@ contract ChannelTest is Test {
         mods[2] = address(greedy);
         executor = new ChannelExecutor(profileHash, L1, inbox, wv, mods);
         settlement = _deploySettlement(ChannelTypes.PROFILE_MOCK_LOCAL, registry);
-        policy = ChannelTypes.ChannelPolicy({anchorConfirmation: 2, maxAnchorLag: 64});
+        policy = ChannelTypes.ChannelPolicy({anchorConfirmation: 2, maxAnchorLag: 64, challengeWindow: uint32(WINDOW)});
 
         // L1 anchors H0 (100) and H1 (101): posted to L2, authenticated on L1 by blockhash.
         bytes memory raw0 = vm.parseJsonBytes(wjson, ".h0.rawHeader");
@@ -154,7 +154,7 @@ contract ChannelTest is Test {
     /// Settlement plus its emergency-exit contract (sets `exits`).
     function _deploySettlement(uint8 kind, IAcceptedBlockRegistry blocks) internal returns (ChannelSettlement s) {
         s = new ChannelSettlement(ChannelSettlement.Config(ROLLUP, profileHash, kind, blocks, anchors, rv));
-        exits = new EmergencyExit(s, wv, WINDOW, _l1Modules());
+        exits = new EmergencyExit(s, wv, _l1Modules());
         s.bindExits(IEmergencyExit(address(exits)));
     }
 
@@ -636,7 +636,7 @@ contract ChannelTest is Test {
         settlement.settle(t.channelId, evidence);
         // The operator-free path doesn't depend on the verifier.
         bytes memory req = c.request;
-        exits.startExit(t.channelId, req, c.signatures);
+        exits.startExit(t.channelId, req, c.signatures, abi.encode(policy));
         vm.warp(block.timestamp + WINDOW);
         exits.finalizeExit(t.channelId, req, _input(), vm.parseJsonBytes(wjson, ".h1.package"));
         assertEq(settlement.withdrawable(participants[0]), 1.4 ether);
@@ -752,7 +752,7 @@ contract ChannelTest is Test {
         ChannelTypes.ChannelTerms memory t = _openAndFund("e1", address(split));
         (bytes memory req, bytes[] memory sigs) = _signed(t, ".h1", 1);
         vm.prank(address(0xdead)); // anyone may post; signatures carry the authority
-        exits.startExit(t.channelId, req, sigs);
+        exits.startExit(t.channelId, req, sigs, abi.encode(policy));
         bytes memory witness = vm.parseJsonBytes(wjson, ".h1.package");
         vm.expectRevert(ChannelSettlement.Deadline.selector);
         exits.finalizeExit(t.channelId, req, _input(), witness);
@@ -766,6 +766,35 @@ contract ChannelTest is Test {
         exits.finalizeExit(t.channelId, req, _input(), witness);
     }
 
+    function test_exitWindowIsPerChannelAndClamped() public {
+        // A channel whose policy asks for 2 days.
+        policy.challengeWindow = 2 days;
+        ChannelTypes.ChannelTerms memory t = _openAndFund("w2", address(split));
+        (bytes memory req, bytes[] memory sigs) = _signed(t, ".h1", 1);
+        // The policy must be the channel's own.
+        ChannelTypes.ChannelPolicy memory other = policy;
+        other.challengeWindow = 1 hours;
+        vm.expectRevert(abi.encodeWithSelector(ChannelSettlement.Invalid.selector, "policy"));
+        exits.startExit(t.channelId, req, sigs, abi.encode(other));
+        exits.startExit(t.channelId, req, sigs, abi.encode(policy));
+        uint256 start = block.timestamp;
+        vm.warp(start + 1 days);
+        vm.expectRevert(ChannelSettlement.Deadline.selector);
+        exits.finalizeExit(t.channelId, req, _input(), vm.parseJsonBytes(wjson, ".h1.package"));
+        vm.warp(start + 2 days);
+        exits.finalizeExit(t.channelId, req, _input(), vm.parseJsonBytes(wjson, ".h1.package"));
+
+        // A channel asking for no window at all gets the 1-hour minimum.
+        policy.challengeWindow = 0;
+        ChannelTypes.ChannelTerms memory t0 = _openAndFund("w0", address(split));
+        (bytes memory req0, bytes[] memory sigs0) = _signed(t0, ".h1", 1);
+        exits.startExit(t0.channelId, req0, sigs0, abi.encode(policy));
+        vm.expectRevert(ChannelSettlement.Deadline.selector);
+        exits.finalizeExit(t0.channelId, req0, _input(), vm.parseJsonBytes(wjson, ".h1.package"));
+        vm.warp(block.timestamp + 1 hours);
+        exits.finalizeExit(t0.channelId, req0, _input(), vm.parseJsonBytes(wjson, ".h1.package"));
+    }
+
     function test_emergencyExitStaleRequestIsReplaced() public {
         // H0 needs to be recorded on L1 for the stale request to be finalizable at all.
         bytes memory raw0 = vm.parseJsonBytes(wjson, ".h0.rawHeader");
@@ -773,7 +802,7 @@ contract ChannelTest is Test {
         ChannelTypes.ChannelTerms memory t = _openAndFund("e2", address(split));
         (bytes memory stale, bytes[] memory staleSigs) = _signed(t, ".h0", 1);
         (bytes memory fresh, bytes[] memory freshSigs) = _signed(t, ".h1", 2);
-        exits.startExit(t.channelId, stale, staleSigs);
+        exits.startExit(t.channelId, stale, staleSigs, abi.encode(policy));
         // Equal or lower nonces can't replace it.
         vm.expectRevert(abi.encodeWithSelector(ChannelSettlement.Invalid.selector, "not newer"));
         exits.challengeExit(t.channelId, stale, staleSigs);
@@ -793,7 +822,7 @@ contract ChannelTest is Test {
         ChannelTypes.ChannelTerms memory t = _openAndFund("e3", address(split));
         (bytes memory r1, bytes[] memory s1) = _signed(t, ".h1", 1);
         (bytes memory r2, bytes[] memory s2) = _signed(t, ".h1", 2);
-        exits.startExit(t.channelId, r1, s1);
+        exits.startExit(t.channelId, r1, s1, abi.encode(policy));
         vm.warp(block.timestamp + WINDOW);
         vm.expectRevert(ChannelSettlement.Deadline.selector);
         exits.challengeExit(t.channelId, r2, s2);
@@ -804,18 +833,18 @@ contract ChannelTest is Test {
         (, ChannelTypes.FinalRequest memory r) = _call(t, ".h1", _input());
         bytes[] memory sigs = _sign(r, _pairU(keys[0], 0xBAD));
         vm.expectRevert(abi.encodeWithSelector(ChannelSettlement.Invalid.selector, "signature"));
-        exits.startExit(t.channelId, abi.encode(r), sigs);
+        exits.startExit(t.channelId, abi.encode(r), sigs, abi.encode(policy));
         // Another channel's request.
         ChannelTypes.ChannelTerms memory other = _openAndFund("e4b", address(split));
         (bytes memory req, bytes[] memory s) = _signed(other, ".h1", 1);
         vm.expectRevert(abi.encodeWithSelector(ChannelSettlement.Invalid.selector, "request"));
-        exits.startExit(t.channelId, req, s);
+        exits.startExit(t.channelId, req, s, abi.encode(policy));
     }
 
     function test_emergencyExitValidatesWitnessInputAndModule() public {
         ChannelTypes.ChannelTerms memory t = _openAndFund("e5", address(split));
         (bytes memory req, bytes[] memory sigs) = _signed(t, ".h1", 1);
-        exits.startExit(t.channelId, req, sigs);
+        exits.startExit(t.channelId, req, sigs, abi.encode(policy));
         vm.warp(block.timestamp + WINDOW);
         vm.expectRevert(abi.encodeWithSelector(ChannelSettlement.Invalid.selector, "input"));
         exits.finalizeExit(
@@ -834,7 +863,7 @@ contract ChannelTest is Test {
         // H0 is known to the L2 inbox but not recorded on L1.
         ChannelTypes.ChannelTerms memory t = _openAndFund("e6", address(split));
         (bytes memory req, bytes[] memory sigs) = _signed(t, ".h0", 1);
-        exits.startExit(t.channelId, req, sigs);
+        exits.startExit(t.channelId, req, sigs, abi.encode(policy));
         vm.warp(block.timestamp + WINDOW);
         vm.expectRevert(abi.encodeWithSelector(ChannelSettlement.Invalid.selector, "anchor not recorded on L1"));
         exits.finalizeExit(t.channelId, req, _input(), vm.parseJsonBytes(wjson, ".h0.package"));
@@ -843,7 +872,7 @@ contract ChannelTest is Test {
     function test_emergencyExitStillEnforcesConservation() public {
         ChannelTypes.ChannelTerms memory t = _openAndFund("e7", address(greedy));
         (bytes memory req, bytes[] memory sigs) = _signed(t, ".h1", 1);
-        exits.startExit(t.channelId, req, sigs);
+        exits.startExit(t.channelId, req, sigs, abi.encode(policy));
         vm.warp(block.timestamp + WINDOW);
         vm.expectRevert(abi.encodeWithSelector(ChannelSettlement.Invalid.selector, "conservation"));
         exits.finalizeExit(t.channelId, req, _input(), vm.parseJsonBytes(wjson, ".h1.package"));
@@ -853,7 +882,7 @@ contract ChannelTest is Test {
         // `writer` is approved on L2 only.
         ChannelTypes.ChannelTerms memory t = _openAndFund("e8", address(writer));
         (bytes memory req, bytes[] memory sigs) = _signed(t, ".h1", 1);
-        exits.startExit(t.channelId, req, sigs);
+        exits.startExit(t.channelId, req, sigs, abi.encode(policy));
         vm.warp(block.timestamp + WINDOW);
         vm.expectRevert(abi.encodeWithSelector(ChannelSettlement.Invalid.selector, "module not approved on L1"));
         exits.finalizeExit(t.channelId, req, _input(), vm.parseJsonBytes(wjson, ".h1.package"));
@@ -864,7 +893,7 @@ contract ChannelTest is Test {
         (ChannelExecutor.Call memory c, ChannelTypes.FinalRequest memory r) = _call(t, ".h1", _input());
         bytes memory evidence = _executeAndProve(c, r, true); // nonce 1 executed on L2
         (bytes memory r2, bytes[] memory s2) = _signed(t, ".h1", 2);
-        exits.startExit(t.channelId, r2, s2);
+        exits.startExit(t.channelId, r2, s2, abi.encode(policy));
         vm.expectRevert(abi.encodeWithSelector(ChannelSettlement.Invalid.selector, "not the pending exit request"));
         settlement.settle(t.channelId, evidence);
         // The pending request, executed on L2, settles through the normal path.
@@ -879,7 +908,7 @@ contract ChannelTest is Test {
     function test_unfinalizableExitFallsBackToRefund() public {
         ChannelTypes.ChannelTerms memory t = _openAndFund("e10", address(split));
         (bytes memory req, bytes[] memory sigs) = _signed(t, ".h1", 1);
-        exits.startExit(t.channelId, req, sigs);
+        exits.startExit(t.channelId, req, sigs, abi.encode(policy));
         uint256 exitEnd = block.timestamp + WINDOW;
         // While the exit can still be finalized, refund waits (even past the channel deadline
         // it would have to wait for exitEnd + WINDOW).
@@ -905,7 +934,7 @@ contract ChannelTest is Test {
         (bytes memory req, bytes[] memory sigs) = _signed(t, ".h1", 1);
         vm.warp(DEADLINE);
         vm.expectRevert(ChannelSettlement.Deadline.selector);
-        exits.startExit(t.channelId, req, sigs);
+        exits.startExit(t.channelId, req, sigs, abi.encode(policy));
     }
 
     // ---- properties -------------------------------------------------------------------------

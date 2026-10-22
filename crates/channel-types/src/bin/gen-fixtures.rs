@@ -28,6 +28,7 @@ fn main() {
     let policy = ChannelPolicy {
         anchorConfirmation: ConfirmationPolicy::Finalized as u8,
         maxAnchorLag: 64,
+        challengeWindow: 7 * 24 * 3600,
     };
     let profile = ExecutionProfile {
         rollupId: keccak256(b"rollup"),
@@ -84,7 +85,10 @@ fn main() {
             "encoded": h(anchor.abi_encode()),
             "id": anchor.id(),
         },
-        "policy": { "anchorConfirmation": policy.anchorConfirmation, "maxAnchorLag": policy.maxAnchorLag, "hash": policy.hash() },
+        "policy": {
+            "anchorConfirmation": policy.anchorConfirmation, "maxAnchorLag": policy.maxAnchorLag,
+            "challengeWindow": policy.challengeWindow, "hash": policy.hash(),
+        },
         "profile": {
             "rollupId": profile.rollupId, "kind": profile.kind, "genesisHash": profile.genesisHash,
             "programHash": profile.programHash, "forkSchemaHash": profile.forkSchemaHash,

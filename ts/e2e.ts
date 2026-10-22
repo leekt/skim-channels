@@ -85,7 +85,7 @@ const evidenceT = { type: "tuple", components: [
 const eip712 = {
   FinalRequest: requestT.components.map((c) => ({ name: c.name, type: c.type })),
   ChannelTerms: termsT.components.map((c) => ({ name: c.name, type: c.type })),
-  ChannelPolicy: [{ name: "anchorConfirmation", type: "uint8" }, { name: "maxAnchorLag", type: "uint32" }],
+  ChannelPolicy: [{ name: "anchorConfirmation", type: "uint8" }, { name: "maxAnchorLag", type: "uint32" }, { name: "challengeWindow", type: "uint32" }],
   ExecutionProfile: [
     { name: "rollupId", type: "bytes32" }, { name: "kind", type: "uint8" }, { name: "genesisHash", type: "bytes32" },
     { name: "programHash", type: "bytes32" }, { name: "forkSchemaHash", type: "bytes32" },
@@ -128,15 +128,15 @@ async function run() {
   const executor = await deploy(w2(), pub2, "ChannelExecutor.sol", "ChannelExecutor", [profileHash, BigInt(L1_ID), inbox.address, wvL2.address, [split.address]]);
   // The same SplitModule bytecode on L1, for emergency exits (same code hash).
   const splitL1 = await deploy(w1(), pub1, "SplitModule.sol", "SplitModule");
-  const WINDOW = 600n;
   const wvL1 = await deploy(w1(), pub1, "WitnessVerifier.sol", "WitnessVerifier");
   const rvL1 = await deploy(w1(), pub1, "ReceiptVerifier.sol", "ReceiptVerifier");
   const settlement = await deploy(w1(), pub1, "ChannelSettlement.sol", "ChannelSettlement", [{ rollupId: ROLLUP, profileHash, profileKind: 0, blocks: registry.address, anchors: anchors.address, receiptVerifier: rvL1.address }]);
-  const exits = await deploy(w1(), pub1, "EmergencyExit.sol", "EmergencyExit", [settlement.address, wvL1.address, WINDOW, [splitL1.address]]);
+  const exits = await deploy(w1(), pub1, "EmergencyExit.sol", "EmergencyExit", [settlement.address, wvL1.address, [splitL1.address]]);
   await send(w1(), pub1, settlement, "bindExits", [exits.address]);
 
-  const policy = { anchorConfirmation: 0, maxAnchorLag: 64 }; // Latest: optimistic, local experiment only
+  const policy = { anchorConfirmation: 0, maxAnchorLag: 64, challengeWindow: 3600 }; // Latest: optimistic, local experiment only
   const policyHash = hashStruct({ types: eip712, primaryType: "ChannelPolicy", data: policy });
+  const policyBytes = encodeAbiParameters([{ type: "tuple", components: eip712.ChannelPolicy }], [policy]);
   const participantRoot = keccak256(encodeAbiParameters([{ type: "address[]" }], [participants]));
 
   async function openChannel(salt: Hex) {
@@ -166,7 +166,7 @@ async function run() {
     const signatures = await Promise.all([alice, bob].map((a) => a.signTypedData({ domain, types: { FinalRequest: eip712.FinalRequest }, primaryType: "FinalRequest", message: request })));
     const call = {
       terms: encodeAbiParameters([termsT], [terms]),
-      policy: encodeAbiParameters([{ type: "tuple", components: [{ name: "a", type: "uint8" }, { name: "b", type: "uint32" }] }], [{ a: policy.anchorConfirmation, b: policy.maxAnchorLag }]),
+      policy: policyBytes,
       request: encodeAbiParameters([requestT], [request]), input, witness: w.package as Hex, participants, signatures,
     };
     return { call, request, witness: w };
@@ -250,9 +250,9 @@ async function run() {
   const exitDomain = { name: "SkimChannels", version: "0", chainId: L1_ID, verifyingContract: settlement.address };
   const exitSigs = await Promise.all([alice, bob].map((a) => a.signTypedData({ domain: exitDomain, types: { FinalRequest: eip712.FinalRequest }, primaryType: "FinalRequest", message: exitReq })));
   const exitReqBytes = encodeAbiParameters([requestT], [exitReq]);
-  await send(w1(carol), pub1, exits, "startExit", [three.terms.channelId, exitReqBytes, exitSigs], "L1 startExit");
+  await send(w1(carol), pub1, exits, "startExit", [three.terms.channelId, exitReqBytes, exitSigs, policyBytes], "L1 startExit");
   await expectRevert(pub1.simulateContract({ account: carol, address: exits.address, abi: exits.abi, functionName: "finalizeExit", args: [three.terms.channelId, exitReqBytes, input, b.witness.package] }), "finalizeExit inside the challenge window");
-  await pub1.request({ method: "evm_increaseTime" as any, params: [Number(WINDOW)] as any });
+  await pub1.request({ method: "evm_increaseTime" as any, params: [policy.challengeWindow] as any });
   await pub1.request({ method: "evm_mine" as any, params: [] as any });
   const balBefore = await pub1.readContract({ address: settlement.address, abi: settlement.abi, functionName: "withdrawable", args: [alice.address] }) as bigint;
   await send(w1(carol), pub1, exits, "finalizeExit", [three.terms.channelId, exitReqBytes, input, b.witness.package], "L1 finalizeExit");

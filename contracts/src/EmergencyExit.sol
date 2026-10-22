@@ -11,7 +11,8 @@ import {ChannelSettlement} from "./ChannelSettlement.sol";
 /// @notice L1: the operator-free exit (docs/STAGE2.md), for when the sequencer or prover is
 ///         unavailable.
 ///         - startExit posts an all-signed request for an Open channel (before its deadline).
-///         - During `challengeWindow`, anyone may replace it with an all-signed request of a
+///         - During the channel's challenge window (its ChannelPolicy, clamped to
+///           [MIN_WINDOW, MAX_WINDOW]), anyone may replace it with an all-signed request of a
 ///           strictly higher nonce (stale-state protection). The window is not extended.
 ///         - finalizeExit then runs the approved module ON L1, with a witness verified against
 ///           the request's L1-recorded anchor, and pays out through the settlement contract
@@ -24,12 +25,14 @@ contract EmergencyExit {
         bytes32 requestHash;
         uint64 nonce;
         uint64 deadline;
+        uint64 window;
     }
 
     ChannelSettlement public immutable settlement;
     AnchorRegistry public immutable anchors;
     WitnessVerifier public immutable witnessVerifier;
-    uint64 public immutable challengeWindow;
+    uint64 public constant MIN_WINDOW = 1 hours;
+    uint64 public constant MAX_WINDOW = 30 days;
     bytes32 public immutable profileHash;
     /// Approved L1 copies of channel modules, by code hash. Written only in the constructor.
     mapping(bytes32 codeHash => address module) public l1Modules;
@@ -43,17 +46,11 @@ contract EmergencyExit {
     error WrongStatus(ChannelSettlement.Status status);
     error Deadline();
 
-    constructor(
-        ChannelSettlement settlement_,
-        WitnessVerifier witnessVerifier_,
-        uint64 challengeWindow_,
-        address[] memory l1Modules_
-    ) {
+    constructor(ChannelSettlement settlement_, WitnessVerifier witnessVerifier_, address[] memory l1Modules_) {
         settlement = settlement_;
         anchors = settlement_.anchors();
         profileHash = settlement_.profileHash();
         witnessVerifier = witnessVerifier_;
-        challengeWindow = challengeWindow_;
         for (uint256 i; i < l1Modules_.length; ++i) {
             l1Modules[l1Modules_[i].codehash] = l1Modules_[i];
         }
@@ -64,16 +61,27 @@ contract EmergencyExit {
     }
 
     function refundOpen(bytes32 channelId) external view returns (bool) {
-        return block.timestamp >= uint256(pending[channelId].deadline) + challengeWindow;
+        Pending memory p = pending[channelId];
+        return block.timestamp >= uint256(p.deadline) + p.window;
     }
 
     /// @notice Anyone may call: the signatures carry the authority.
-    function startExit(bytes32 channelId, bytes calldata request, bytes[] calldata signatures) external {
+    /// @notice Anyone may call: the signatures carry the authority. `policy` is the channel's
+    ///         ChannelPolicy (abi-encoded); its challenge window applies, clamped.
+    function startExit(bytes32 channelId, bytes calldata request, bytes[] calldata signatures, bytes calldata policy)
+        external
+    {
         ChannelSettlement.Channel memory c = settlement.channel(channelId);
+        if (policy.length != 96) revert Invalid("policy encoding");
+        ChannelTypes.ChannelPolicy memory pol = abi.decode(policy, (ChannelTypes.ChannelPolicy));
+        if (ChannelTypes.policyHash(pol) != c.policyHash) revert Invalid("policy");
+        uint64 window = pol.challengeWindow < MIN_WINDOW
+            ? MIN_WINDOW
+            : (pol.challengeWindow > MAX_WINDOW ? MAX_WINDOW : pol.challengeWindow);
         (bytes32 h, uint64 nonce) = _signedRequest(c, channelId, request, signatures);
         settlement.beginExit(channelId); // Open and before the deadline, or reverts
-        uint64 deadline = uint64(block.timestamp) + challengeWindow;
-        pending[channelId] = Pending(h, nonce, deadline);
+        uint64 deadline = uint64(block.timestamp) + window;
+        pending[channelId] = Pending(h, nonce, deadline, window);
         emit ExitStarted(channelId, h, nonce, deadline);
     }
 

@@ -126,13 +126,13 @@ size beyond 31 transactions; FCR lag once finality is running normally.
 - **The emergency exit needs a witness at the request's anchor**, and skim serves only recent
   roots. Older anchors may need an archive node; the refund fallback covers that.
 - **The anvil e2e still uses the labeled mock feed and registry.** The native e2e uses none.
-- **Owner decisions pending:** the STAGE2 "Choices to review" (exit window, nonce as
-  checkpoint, governance delays, `FORCE_DELAY`). They're implemented with defaults; changing
-  them means changing constants.
+- **Owner decisions, 2026-10-22** (STAGE2):
+  - per-channel exit window (`ChannelPolicy.challengeWindow`, clamped to [1 hour, 30 days]);
+  - nonce as checkpoint, no window extension;
+  - `FORCE_DELAY` = 1 day;
+  - 30-day governance with a fault-gated council.
 
 ## Next tasks
-1. Owner review of the STAGE2 choices: exit window, nonce-as-checkpoint, governance delays,
-   `FORCE_DELAY`.
-2. When EIP-8288 gets a prover: a `ProofDependencyVerifier` behind the same governance path.
-3. M4 leftovers: settlement gas versus block size, witness prefetching, receipt batching across
+1. When EIP-8288 gets a prover: a `ProofDependencyVerifier` behind the same governance path.
+2. M4 leftovers: settlement gas versus block size, witness prefetching, receipt batching across
    channels, FCR lag with live finality.

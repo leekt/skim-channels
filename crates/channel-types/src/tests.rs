@@ -96,6 +96,7 @@ fn unknown_codes_rejected() {
     let p = ChannelPolicy {
         anchorConfirmation: 4,
         maxAnchorLag: 0,
+        challengeWindow: 0,
     };
     assert!(p.confirmation().is_err());
     let prof = ExecutionProfile {

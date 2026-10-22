@@ -25,6 +25,7 @@ library ChannelTypes {
     struct ChannelPolicy {
         uint8 anchorConfirmation;
         uint32 maxAnchorLag;
+        uint32 challengeWindow;
     }
 
     struct FinalRequest {
@@ -58,7 +59,7 @@ library ChannelTypes {
         "ChannelTerms(bytes32 channelId,bytes32 rollupId,address settlementContract,address executor,bytes32 moduleCodeHash,bytes32 participantRoot,bytes32 policyHash,uint64 closeDeadline)"
     );
     bytes32 internal constant CHANNEL_POLICY_TYPEHASH =
-        keccak256("ChannelPolicy(uint8 anchorConfirmation,uint32 maxAnchorLag)");
+        keccak256("ChannelPolicy(uint8 anchorConfirmation,uint32 maxAnchorLag,uint32 challengeWindow)");
     bytes32 internal constant FINAL_REQUEST_TYPEHASH = keccak256(
         "FinalRequest(bytes32 channelId,bytes32 termsHash,bytes32 anchorId,bytes32 policyHash,bytes32 executionProfileHash,bytes32 inputHash,uint64 nonce)"
     );
@@ -94,7 +95,7 @@ library ChannelTypes {
     }
 
     function policyHash(ChannelPolicy memory p) internal pure returns (bytes32) {
-        return keccak256(abi.encode(CHANNEL_POLICY_TYPEHASH, p.anchorConfirmation, p.maxAnchorLag));
+        return keccak256(abi.encode(CHANNEL_POLICY_TYPEHASH, p.anchorConfirmation, p.maxAnchorLag, p.challengeWindow));
     }
 
     function profileHash(ExecutionProfile memory p) internal pure returns (bytes32) {

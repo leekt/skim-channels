@@ -112,7 +112,7 @@ async function main() {
       { name: "channelId", type: "bytes32" }, { name: "rollupId", type: "bytes32" }, { name: "settlementContract", type: "address" },
       { name: "executor", type: "address" }, { name: "moduleCodeHash", type: "bytes32" }, { name: "participantRoot", type: "bytes32" },
       { name: "policyHash", type: "bytes32" }, { name: "closeDeadline", type: "uint64" }],
-    ChannelPolicy: [{ name: "anchorConfirmation", type: "uint8" }, { name: "maxAnchorLag", type: "uint32" }],
+    ChannelPolicy: [{ name: "anchorConfirmation", type: "uint8" }, { name: "maxAnchorLag", type: "uint32" }, { name: "challengeWindow", type: "uint32" }],
     ExecutionProfile: [
       { name: "rollupId", type: "bytes32" }, { name: "kind", type: "uint8" }, { name: "genesisHash", type: "bytes32" },
       { name: "programHash", type: "bytes32" }, { name: "forkSchemaHash", type: "bytes32" }, { name: "daSchemaHash", type: "bytes32" },
@@ -157,7 +157,7 @@ async function main() {
   const executor = await deploy(w2(), pub2, "ChannelExecutor.sol", "ChannelExecutor", [profileHash, BigInt(L1_ID), inbox.address, wvL2.address, [split.address]]);
   check(true, `contracts deployed on ethrex L1 (chain ${L1_ID}) and ethrex native L2 (chain ${L2_ID})`);
 
-  const policy = { anchorConfirmation: 0, maxAnchorLag: 1000 };
+  const policy = { anchorConfirmation: 0, maxAnchorLag: 1000, challengeWindow: 3600 };
   const policyHash = hashStruct({ types, primaryType: "ChannelPolicy", data: policy });
   const salt = keccak256(toHex("native-1"));
   const channelId = keccak256(encodeAbiParameters(

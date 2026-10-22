@@ -85,7 +85,8 @@ contract EncodingsTest is Test {
     function test_policyProfileTermsMatchRust() public view {
         ChannelTypes.ChannelPolicy memory p = ChannelTypes.ChannelPolicy({
             anchorConfirmation: uint8(vm.parseJsonUint(json, ".policy.anchorConfirmation")),
-            maxAnchorLag: uint32(vm.parseJsonUint(json, ".policy.maxAnchorLag"))
+            maxAnchorLag: uint32(vm.parseJsonUint(json, ".policy.maxAnchorLag")),
+            challengeWindow: uint32(vm.parseJsonUint(json, ".policy.challengeWindow"))
         });
         assertEq(ChannelTypes.policyHash(p), _b32(".policy.hash"));
         assertEq(ChannelTypes.profileHash(_profile()), _b32(".profile.hash"));

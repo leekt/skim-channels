@@ -82,7 +82,7 @@ contract ChannelExecutor {
     {
         ChannelTypes.ChannelTerms memory t = ChannelTypes.decodeTerms(c.terms);
         r = ChannelTypes.decodeFinalRequest(c.request);
-        if (c.policy.length != 64) revert Mismatch("policy encoding");
+        if (c.policy.length != 96) revert Mismatch("policy encoding");
         ChannelTypes.ChannelPolicy memory p = abi.decode(c.policy, (ChannelTypes.ChannelPolicy));
 
         if (t.executor != address(this)) revert WrongExecutor();

@@ -70,13 +70,18 @@ It does **not** remove the cost of proving existing L1 state (witnesses) or the 
   (`BLOBHASH(0)`), and the verifier's approval. Its security is exactly the verifier's, and
   only a labeled mock verifier exists.
 
-**Choices to review** (owner decisions; implemented with these defaults):
-1. The nonce acts as the checkpoint version. No separate checkpoint type exists: a checkpoint
-   *is* a signed `FinalRequest`.
-2. The window is fixed per deployment, and challenges don't extend it.
-3. The refund grace is one more window.
-4. Exits must start before the channel deadline.
-5. L1 module copies are approved at deployment.
+**Owner decisions (2026-10-22):**
+1. **Challenge window: per channel.** It's `ChannelPolicy.challengeWindow`, committed to by
+   `policyHash` and signed with every request. `EmergencyExit` takes it from the policy
+   presented at `startExit` (it must hash to the channel's `policyHash`) and clamps it to
+   [1 hour, 30 days], so no channel can make a stale request final instantly.
+2. **Checkpoints stay as built.** A checkpoint is an all-signed `FinalRequest` with a higher
+   nonce. Challenges don't extend the window.
+3. **`FORCE_DELAY` = 1 day.**
+4. **Governance stays as built.** 30-day upgrade timelock; the Security Council acts only
+   after a fault is proven on chain.
+
+Refund grace after an unfinalized exit: one more window (the channel's own).
 
 **Measured on anvil:** `finalizeExit` costs 295k gas; receipt-based `settle` costs 306k.
 

@@ -52,6 +52,9 @@ sol! {
         uint8 anchorConfirmation;
         /// How far the anchor may trail the L1 head the executor sees, in blocks.
         uint32 maxAnchorLag;
+        /// Emergency-exit challenge window, in seconds (EmergencyExit clamps it to
+        /// [1 hour, 30 days], so no channel can make a stale request final instantly).
+        uint32 challengeWindow;
     }
 
     /// The single request eligible for settlement (§5.2), signed by every participant.

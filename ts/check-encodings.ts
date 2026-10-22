@@ -18,7 +18,7 @@ const types = {
     { name: "moduleCodeHash", type: "bytes32" }, { name: "participantRoot", type: "bytes32" },
     { name: "policyHash", type: "bytes32" }, { name: "closeDeadline", type: "uint64" },
   ],
-  ChannelPolicy: [{ name: "anchorConfirmation", type: "uint8" }, { name: "maxAnchorLag", type: "uint32" }],
+  ChannelPolicy: [{ name: "anchorConfirmation", type: "uint8" }, { name: "maxAnchorLag", type: "uint32" }, { name: "challengeWindow", type: "uint32" }],
   FinalRequest: [
     { name: "channelId", type: "bytes32" }, { name: "termsHash", type: "bytes32" },
     { name: "anchorId", type: "bytes32" }, { name: "policyHash", type: "bytes32" },
