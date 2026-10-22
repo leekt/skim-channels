@@ -338,7 +338,7 @@ The validity-rollup shape above was a **design choice**, not something the requi
 - what L1 checks, whether conditions on the result or part of the execution;
 - which state withdrawals use if data is withheld or the operator disappears.
 
-Choose the proof or dispute mechanism after that.
+Choose the proof or dispute mechanism after that. Done for four apps in [app enforcement rules](app-enforcement.md).
 
 ## Implementation status
 

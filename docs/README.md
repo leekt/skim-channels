@@ -16,6 +16,7 @@
 12. [Troubleshooting](guide/troubleshooting.md): failure modes found while building, and their causes
 13. [App channels](guide/app-channels.md): apps on channels with proven checkpoints, L1-locked assets, withdraw any time, operator-free exit (accounting built behind a mock verifier)
 14. [Future considerations](guide/future-considerations.md): proof systems (SP1, RISC Zero), zkEVMs, native proof verification; deferred on purpose
+15. [App enforcement rules](guide/app-enforcement.md): prediction rounds, 1:1 games, OTC matching, shared AMM. What users sign, who disputes with what evidence, what L1 checks, where withdrawals come from
 
 ## Examples
 
