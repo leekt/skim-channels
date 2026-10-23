@@ -85,7 +85,7 @@ async function main() {
     if (id !== SEPOLIA) throw new Error(`${SKIM_RPC} follows chain ${id}, not Sepolia`);
     const bal = await l1.pub.getBalance({ address: op.address });
     note(`Sepolia operator ${op.address}: ${Number(bal) / 1e18} ETH`);
-    if (bal < parseEther("0.03")) throw new Error(`fund ${op.address} with Sepolia ETH (≥ 0.03; deployments and proposals cost gas)`);
+    if (bal < parseEther("0.003")) throw new Error(`fund ${op.address} with Sepolia ETH (proposals cost gas and a bond)`);
   }
   const codeHash = async (a: Address) => (await l1.rpc<any>("eth_getProof", [a, [], "latest"])).codeHash as Hex;
 
@@ -140,6 +140,9 @@ async function main() {
   const last = app.sessions.at(-1);
   const resume = NET === "sepolia" && !process.env.NEW_SESSION && !!last
     && Number((await l1.read<any[]>(sessionC(last.channel), "state"))[5]) === 0;
+  if (!resume && NET === "sepolia" && (await l1.pub.getBalance({ address: op.address })) < parseEther("0.05")) {
+    throw new Error(`a new session needs ≥ 0.05 Sepolia ETH at ${op.address} (~36M gas to deploy under Amsterdam pricing)`);
+  }
   if (!resume) {
     const sid = BigInt(Number(await l1.read(vault, "sessionCount")) + 1);
     const d = await l1.deploy(ROOT, op, "ClearingDisputes.sol", "ClearingDisputes", [{
@@ -160,6 +163,7 @@ async function main() {
   const startBlock = BigInt(cur.startBlock ?? 0);
   const ch = sessionC(cur.channel);
   if (resume) note(`resuming session ${id} (${ch.address}) from its journal`);
+  if ((await l1.read<bigint>(ch, "bondCredit", [op.address])) > 0n) await l1.send(ch, "withdrawBond", [], op);
   /** An earlier session: start closing it, close it when nothing is pending, then take the maker's float back. */
   async function closeOld(s: App["sessions"][number]) {
     const c = sessionC(s.channel);
@@ -273,7 +277,8 @@ async function main() {
     });
     return {
       anchorBlock: String(anchorBlock), anchorTime: String(anchorTime), price: String(p),
-      priceWitnessBytes: prep?.priceWitness ? (prep.priceWitness.package.length - 2) / 2 : 0, fills,
+      segments: prep?.segments?.length ?? 0,
+      priceWitnessBytes: (prep?.segments ?? []).reduce((n: number, s: any) => n + (s.witness.package.length - 2) / 2, 0), fills,
     };
   }
 

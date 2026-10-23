@@ -79,6 +79,31 @@ abstract contract ClearingChannelBase is Test {
 
     function _beforeChannel() internal virtual {}
 
+    // One oracle segment: the fixture's price (7000) at its anchor (block 101).
+    function _w() internal view returns (bytes[] memory w) {
+        w = new bytes[](1);
+        w[0] = pkg1;
+    }
+
+    function _w(bytes memory p) internal pure returns (bytes[] memory w) {
+        w = new bytes[](1);
+        w[0] = p;
+    }
+
+    function _f0() internal pure returns (uint32[] memory f) {
+        f = new uint32[](1);
+    }
+
+    function _p0() internal pure returns (uint256[] memory p) {
+        p = new uint256[](1);
+        p[0] = 7000;
+    }
+
+    function _b0() internal pure returns (uint64[] memory b) {
+        b = new uint64[](1);
+        b[0] = 101;
+    }
+
     function _config() internal view returns (ClearingStorage.Config memory) {
         return ClearingStorage.Config({
             operator: op,
@@ -182,7 +207,7 @@ abstract contract ClearingChannelBase is Test {
     ) internal {
         (bytes memory u, bytes32[] memory proof) = _updates(next);
         vm.prank(op);
-        ch.propose{value: 1 ether}(pkg1, fills, u, proof, reqCursor, forcedCursor, statuses);
+        ch.propose{value: 1 ether}(_w(), _f0(), fills, u, proof, reqCursor, forcedCursor, statuses);
     }
 
     function _finalize(L.Account[] memory next) internal {
@@ -221,7 +246,7 @@ contract ClearingChannelTest is ClearingChannelBase {
         _propose(fills, n, 0, 0, "");
         vm.prank(watcher);
         vm.expectRevert(ClearingStorage.NotWrong.selector);
-        D.challengeFill(fills, 0);
+        D.challengeFill(fills, 0, _f0(), _p0(), _b0());
         for (uint32 i; i < 3; ++i) {
             vm.expectRevert(ClearingStorage.NotWrong.selector);
             _challengeAccount(i, n, fills); // carol's untouched leaf too
@@ -268,7 +293,7 @@ contract ClearingChannelTest is ClearingChannelBase {
         (, L.Account[] memory n) = _batch1();
         _propose(fills, n, 0, 0, "");
         vm.prank(watcher);
-        D.challengeFill(fills, 0);
+        D.challengeFill(fills, 0, _f0(), _p0(), _b0());
         assertEq(D.bondCredit(watcher), 1 ether, "bond to the challenger");
         assertEq(D.pending().at, 0, "batch discarded");
     }
@@ -280,7 +305,7 @@ contract ClearingChannelTest is ClearingChannelBase {
         n[1] = L.Account(uint128(ETH1), 12_800, 0, 20_000, 0, 0, 1, 0);
         _propose(fills, n, 0, 0, "");
         vm.prank(watcher);
-        D.challengeFill(fills, 0);
+        D.challengeFill(fills, 0, _f0(), _p0(), _b0());
     }
 
     function test_overpaidAccount() public {
@@ -310,7 +335,7 @@ contract ClearingChannelTest is ClearingChannelBase {
         _propose(fills, m, 0, 0, "");
         vm.prank(watcher);
         vm.expectRevert(ClearingStorage.NotWrong.selector);
-        D.challengeFill(fills, 0); // the fill itself is valid
+        D.challengeFill(fills, 0, _f0(), _p0(), _b0()); // the fill itself is valid
         _challengeAccount(0, m, fills); // but alice's nonce was spent
     }
 
@@ -352,22 +377,22 @@ contract ClearingChannelTest is ClearingChannelBase {
         vm.deal(who[2], 2 ether);
         vm.prank(who[2]);
         vm.expectRevert(ClearingStorage.WrongState.selector); // not the operator, no takeover yet
-        ch.propose{value: 1 ether}(pkg1, fills, u, proof, 0, 0, "");
+        ch.propose{value: 1 ether}(_w(), _f0(), fills, u, proof, 0, 0, "");
         vm.prank(op);
         vm.expectRevert(ClearingStorage.WrongState.selector); // no bond
-        ch.propose(pkg1, fills, u, proof, 0, 0, "");
+        ch.propose(_w(), _f0(), fills, u, proof, 0, 0, "");
         u[30] = bytes1(uint8(u[30]) ^ 1); // an old leaf that isn't finalized
         vm.prank(op);
         vm.expectRevert(ClearingStorage.BadProof.selector);
-        ch.propose{value: 1 ether}(pkg1, fills, u, proof, 0, 0, "");
+        ch.propose{value: 1 ether}(_w(), _f0(), fills, u, proof, 0, 0, "");
         (u, proof) = _updates(n);
         vm.prank(op);
         vm.expectRevert(abi.encodeWithSelector(ClearingStorage.BadBatch.selector, "reqCursor"));
-        ch.propose{value: 1 ether}(pkg1, fills, u, proof, 1, 0, "");
+        ch.propose{value: 1 ether}(_w(), _f0(), fills, u, proof, 1, 0, "");
         vm.roll(101 + 257);
         vm.prank(op);
         vm.expectRevert(ChainlinkAdapter.BadAnchor.selector);
-        ch.propose{value: 1 ether}(pkg1, fills, u, proof, 0, 0, "");
+        ch.propose{value: 1 ether}(_w(), _f0(), fills, u, proof, 0, 0, "");
     }
 
     function test_finalizeAfterTheWindowOnly() public {
@@ -379,7 +404,7 @@ contract ClearingChannelTest is ClearingChannelBase {
         vm.warp(block.timestamp + 1);
         vm.prank(watcher);
         vm.expectRevert(ClearingStorage.WrongState.selector);
-        D.challengeFill(fills, 0); // and challenges end exactly then
+        D.challengeFill(fills, 0, _f0(), _p0(), _b0()); // and challenges end exactly then
         ch.finalize();
     }
 
@@ -450,7 +475,7 @@ contract ClearingChannelTest is ClearingChannelBase {
         vm.expectRevert(ClearingStorage.BadProof.selector);
         D.challengeAccount(0, fin[0], _sib(_copyFin(), 0), fake, _sib(n, 0), fills);
         vm.expectRevert(ClearingStorage.BadProof.selector);
-        D.challengeFill(other, 0); // not the published fills
+        D.challengeFill(other, 0, _f0(), _p0(), _b0()); // not the published fills
         vm.stopPrank();
     }
 
@@ -462,7 +487,7 @@ contract ClearingChannelTest is ClearingChannelBase {
         (, L.Account[] memory n) = _batch1();
         _propose(fills, n, 0, 0, "");
         vm.prank(watcher);
-        D.challengeFill(fills, 0);
+        D.challengeFill(fills, 0, _f0(), _p0(), _b0());
     }
 
     function test_indexBeyondUsersRejected() public {
@@ -473,7 +498,7 @@ contract ClearingChannelTest is ClearingChannelBase {
         fin.pop();
         vm.prank(op);
         vm.expectRevert(abi.encodeWithSelector(ClearingStorage.BadBatch.selector, "index"));
-        ch.propose{value: 1 ether}(pkg1, "", u, proof, 0, 0, "");
+        ch.propose{value: 1 ether}(_w(), _f0(), "", u, proof, 0, 0, "");
     }
 
     function test_unservedRequestFreezesServedOneDoesNot() public {
@@ -504,7 +529,7 @@ contract ClearingChannelTest is ClearingChannelBase {
         (bytes memory u, bytes32[] memory proof) = _updates(n);
         vm.prank(op);
         vm.expectRevert(ChainlinkAdapter.BadAnchor.selector); // block 100: never recorded
-        ch.propose{value: 1 ether}(vm.parseJsonBytes(fx, ".h0.package"), fills, u, proof, 0, 0, "");
+        ch.propose{value: 1 ether}(_w(vm.parseJsonBytes(fx, ".h0.package")), _f0(), fills, u, proof, 0, 0, "");
     }
 
     // ---- forced orders ------------------------------------------------------------------------
@@ -573,7 +598,7 @@ contract ClearingChannelTest is ClearingChannelBase {
         vm.warp(block.timestamp + 2 days + 1); // takeover
         (bytes memory fills, L.Account[] memory n) = _batch1();
         (bytes memory u, bytes32[] memory proof) = _updates(n);
-        p.propose{value: 1 ether}(ch, abi.encodeCall(ch.propose, (pkg1, fills, u, proof, 0, 0, "")));
+        p.propose{value: 1 ether}(ch, abi.encodeCall(ch.propose, (_w(), _f0(), fills, u, proof, 0, 0, "")));
         _finalize(n);
         assertEq(D.bondCredit(address(p)), 1 ether);
         vm.expectRevert(ClearingStorage.TransferFailed.selector);
@@ -584,7 +609,7 @@ contract ClearingChannelTest is ClearingChannelBase {
         vm.warp(block.timestamp + 2 days + 1);
         L.Account[] memory m = _copyFin();
         (u, proof) = _updates(m);
-        p.propose{value: 1 ether}(ch, abi.encodeCall(ch.propose, (pkg1, "", u, proof, 0, 0, "")));
+        p.propose{value: 1 ether}(ch, abi.encodeCall(ch.propose, (_w(), _f0(), "", u, proof, 0, 0, "")));
         D.freeze();
         assertEq(D.bondCredit(address(p)), 2 ether);
     }
@@ -610,7 +635,7 @@ contract ClearingChannelTest is ClearingChannelBase {
         _propose(fills, n, 0, 1, abi.encodePacked(uint16(1)));
         vm.prank(watcher);
         vm.expectRevert(ClearingStorage.NotWrong.selector);
-        D.challengeFill(fills, 0);
+        D.challengeFill(fills, 0, _f0(), _p0(), _b0());
         vm.warp(block.timestamp + 1 hours);
         ch.finalize();
     }
@@ -623,7 +648,7 @@ contract ClearingChannelTest is ClearingChannelBase {
         (, L.Account[] memory n) = _batch1();
         _propose(fills, n, 0, 0, "");
         vm.prank(watcher);
-        D.challengeFill(fills, 0);
+        D.challengeFill(fills, 0, _f0(), _p0(), _b0());
     }
 
     /// Orders are signed in the app network's domain (what a wallet connected to it can sign),
@@ -641,10 +666,10 @@ contract ClearingChannelTest is ClearingChannelBase {
         vm.warp(block.timestamp + 2 days);
         vm.prank(who[2]);
         vm.expectRevert(ClearingStorage.WrongState.selector);
-        ch.propose{value: 1 ether}(pkg1, fills, u, proof, 0, 0, "");
+        ch.propose{value: 1 ether}(_w(), _f0(), fills, u, proof, 0, 0, "");
         vm.warp(block.timestamp + 1);
         vm.prank(who[2]);
-        ch.propose{value: 1 ether}(pkg1, fills, u, proof, 0, 0, "");
+        ch.propose{value: 1 ether}(_w(), _f0(), fills, u, proof, 0, 0, "");
         assertEq(D.pending().proposer, who[2]);
     }
 

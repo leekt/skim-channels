@@ -51,3 +51,4 @@ Measurements of the builds named in each log. Use the guides for current behavio
 | [Clearing](experiments/clearing.md) | skim → stateful Solidity → optimistic L1 settlement: recovery, handover, forced orders, live skim reads; cost against batched and per-transaction controls |
 | [Sessions](experiments/sessions.md) | Disposable sessions over a stable vault: close, delete the operator's state, restart from a passive recovery package without historical RPC; lifetime costs |
 | [Chainlink rounds](experiments/chainlink-rounds.md) | Evaluation: checking the batch price with `getRoundData(roundId)` and an explicit round-selection rule instead of proofs |
+| [Subscription](experiments/subscription.md) | The executor follows L1 (skim's stream, proof-ready working set, durable cursor); act at H, change L1, act at H+1 with no pin; oracle segments in one batch; latency and requests per block |

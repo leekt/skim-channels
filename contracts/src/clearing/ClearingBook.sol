@@ -19,6 +19,13 @@ interface IClearingL1 {
     function forced(uint256 i) external view returns (S.Forced memory);
     function forcedCount() external view returns (uint256);
     function state() external view returns (bytes32, uint256, uint256, uint256, uint256, S.Phase, uint64);
+    function pending() external view returns (S.Pending memory);
+}
+
+/// The app executor's L1 head (crates/app-executor, `db::L1_HEAD`): which L1 block the imported
+/// reads in this transaction reflect.
+interface IL1Head {
+    function head() external view returns (uint256 number, bytes32 hash, uint256 timestamp);
 }
 
 /// Chainlink's feed interface (the proxy apps call).
@@ -42,6 +49,8 @@ interface IAggregatorV3 {
 /// A new operator can take over from L1 data alone: `adopt` imports the finalized leaves
 /// (from published proposals or a session package) and checks them against L1's root.
 contract ClearingBook {
+    IL1Head internal constant L1_HEAD = IL1Head(0x0000000000000000000000000000000000004C31);
+
     struct Resting {
         L.PackedOrder o;
         bytes sig; // 65 zero bytes for a forced order (its trader authorized it on L1)
@@ -49,10 +58,18 @@ contract ClearingBook {
         bool live;
     }
 
-    struct Batch {
+    /// One oracle context of a batch: the L1 head the price was read at, the feed round, and
+    /// the first fill priced with it. L1 verifies each segment's price at its own anchor.
+    struct Segment {
         uint64 anchorBlock;
         uint64 anchorTime;
+        uint80 round;
+        uint32 firstFill;
         uint256 price;
+    }
+
+    struct Batch {
+        Segment[] segments;
         bytes fills; // packed, as L1 takes them
         uint32[] touched;
         uint64 reqFrom;
@@ -85,6 +102,9 @@ contract ClearingBook {
     bytes32 public stateDigest;
 
     event Opened(uint256 indexed batch, uint64 anchorBlock, uint256 price);
+    /// A new oracle segment: the executor had moved to a newer L1 head and the feed's round had
+    /// changed. The operator fetches the price witness at `anchorBlock` for L1.
+    event SegmentStarted(uint256 indexed batch, uint256 segment, uint64 anchorBlock, uint256 price);
     event Filled(uint256 indexed batch, bytes32 a, bytes32 b);
     event Sealed(uint256 indexed batch, uint256 fills, uint256 accounts);
 
@@ -137,21 +157,39 @@ contract ClearingBook {
         }
     }
 
-    /// The feed's latest round at the pin, fresh at `anchorTime`, in 6 decimals.
-    function _price(uint64 anchorTime) internal view returns (uint256) {
-        (, int256 answer,, uint256 updatedAt,) = priceFeed.latestRoundData();
-        if (answer <= 0 || updatedAt > anchorTime || anchorTime > updatedAt + maxStaleness) {
-            revert StalePrice(updatedAt, anchorTime);
+    /// The feed's latest round at the executor's current L1 head, fresh at that head's time, in
+    /// 6 decimals: a segment starting at `firstFill`.
+    function _segment(uint32 firstFill) internal view returns (Segment memory g) {
+        (uint256 number,, uint256 time) = L1_HEAD.head();
+        (uint80 round, int256 answer,, uint256 updatedAt,) = priceFeed.latestRoundData();
+        if (answer <= 0 || updatedAt > time || time > updatedAt + maxStaleness) {
+            revert StalePrice(updatedAt, uint64(time));
         }
-        return uint256(answer) * 1e6 / 10 ** priceFeed.decimals();
+        g = Segment(uint64(number), uint64(time), round, firstFill, uint256(answer) * 1e6 / 10 ** priceFeed.decimals());
+    }
+
+    /// The segment fill `b`'s next fill is priced in. When the executor has moved to a newer L1
+    /// head and the feed has a new round there, a new segment starts at that head. Same round:
+    /// the same price, so the current segment (and its anchor) stays.
+    function _currentSegment(uint256 b) internal returns (Segment memory g) {
+        Batch storage bt = batches[b];
+        g = bt.segments[bt.segments.length - 1];
+        (uint256 number,,) = L1_HEAD.head();
+        if (number == g.anchorBlock) return g;
+        (uint80 round,,,,) = priceFeed.latestRoundData();
+        if (round == g.round) return g;
+        g = _segment(uint32(bt.fills.length / L.FILL_BYTES));
+        bt.segments.push(g);
+        emit SegmentStarted(b, bt.segments.length - 1, g.anchorBlock, g.price);
     }
 
     // ---- handover ----------------------------------------------------------------------------
 
-    /// @notice Start from L1's finalized state (a new operator, or a restart): the leaves of
-    ///         every account (`idx` ascending), checked against the finalized root, and the
-    ///         finalized queue cursors.
-    function adopt(uint32[] calldata idx, L.Account[] calldata leaves) external onlyOperator {
+    /// @notice Start from L1's committed state (a new operator, or a restart): the leaves of
+    ///         every account (`idx` ascending), checked against the finalized root and cursors,
+    ///         or (`pending`) against the proposed batch's root and cursors, so a proposal in
+    ///         its challenge window never has to be re-executed.
+    function adopt(uint32[] calldata idx, L.Account[] calldata leaves, bool pending) external onlyOperator {
         if (current != 0) revert Adopted();
         _syncUsers();
         uint256[] memory ii = new uint256[](idx.length);
@@ -164,6 +202,10 @@ contract ClearingBook {
         }
         bytes32 root = SparseTree16.build(ii, hs);
         (bytes32 onL1, uint256 req, uint256 frc,,,,) = channel.state();
+        if (pending) {
+            S.Pending memory p = channel.pending();
+            (onL1, req, frc) = (p.root, p.reqCursor, p.forcedCursor);
+        }
         if (root != onL1) revert RootMismatch(root, onL1);
         reqCursor = uint64(req);
         forcedCursor = uint64(frc);
@@ -172,32 +214,27 @@ contract ClearingBook {
 
     // ---- batches -----------------------------------------------------------------------------
 
-    /// @notice Open the next batch at the executor's pin (`anchorBlock`, with its header time
-    ///         `anchorTime`; the price witness L1 checks is for that block). Applies, in order: deposits of
+    /// @notice Open the next batch at the L1 head the executor has applied now (its number and
+    ///         time come from the L1 head account; the price witness L1 checks is for that
+    ///         block). Applies, in order: deposits of
     ///         `depositUsers` (any user may be left for later; nothing is lost), every queued
     ///         withdrawal request (as far as a user's per-batch limit allows), and takes the
     ///         new forced orders (data relayed from L1 events, checked against L1's hashes)
     ///         into the book.
-    function openBatch(
-        uint64 anchorBlock,
-        uint64 anchorTime,
-        uint32[] calldata depositUsers,
-        bytes[] calldata forcedOrders
-    ) external onlyOperator {
+    function openBatch(uint32[] calldata depositUsers, bytes[] calldata forcedOrders) external onlyOperator {
         if (current != 0 && !batches[current].sealed_) revert BatchOpen();
         uint256 b = ++current;
         Batch storage bt = batches[b];
-        bt.anchorBlock = anchorBlock;
-        bt.anchorTime = anchorTime;
-        bt.price = _price(anchorTime);
+        Segment memory g = _segment(0);
+        bt.segments.push(g);
         _syncUsers();
         for (uint256 i; i < depositUsers.length; ++i) {
             _deposit(b, depositUsers[i]);
         }
         _serveRequests(b);
         _takeForced(b, forcedOrders);
-        _step(keccak256(abi.encode("open", b, anchorBlock, bt.price)));
-        emit Opened(b, anchorBlock, bt.price);
+        _step(keccak256(abi.encode("open", b, g.anchorBlock, g.price)));
+        emit Opened(b, g.anchorBlock, g.price);
     }
 
     function _deposit(uint256 b, uint32 idx) internal {
@@ -231,10 +268,12 @@ contract ClearingBook {
 
     function _takeForced(uint256 b, bytes[] calldata orders) internal {
         Batch storage bt = batches[b];
+        // The orders relayed (from L1 events); any posted since are taken in by a later batch.
         uint256 n = channel.forcedCount();
         uint64 pos = forcedCursor;
         bt.forcedFrom = pos;
-        if (orders.length != n - pos) revert ForcedMismatch(pos);
+        if (orders.length > n - pos) revert ForcedMismatch(pos);
+        n = pos + orders.length;
         for (uint256 k; pos < n; ++pos) {
             L.PackedOrder memory p = L.decodeOrder(orders[k]);
             if (p.idx >= users.length) revert UnknownTrader();
@@ -283,8 +322,9 @@ contract ClearingBook {
         Resting memory ra = book[ha];
         Resting memory rb = book[hb];
         if (!ra.live || !rb.live) revert UnknownOrder();
+        Segment memory seg = _currentSegment(b);
         R.Reject why = R.check(
-            L.toOrder(ra.o, users[ra.o.idx]), L.toOrder(rb.o, users[rb.o.idx]), bt.price, bandBps, bt.anchorBlock
+            L.toOrder(ra.o, users[ra.o.idx]), L.toOrder(rb.o, users[rb.o.idx]), seg.price, bandBps, seg.anchorBlock
         );
         if (why != R.Reject.None) revert Rejected(why);
         L.Account memory a = _touch(b, ra.o.idx);
@@ -320,13 +360,13 @@ contract ClearingBook {
 
     // ---- views for the proposal --------------------------------------------------------------
 
-    /// Everything L1's `propose` needs for batch `b` (the price witness at `anchorBlock` comes
-    /// from the runtime).
+    /// Everything L1's `propose` needs for batch `b` (the price witnesses, one per segment at its
+    /// anchor, come from the runtime).
     function proposal(uint256 b)
         external
         view
         returns (
-            uint64 anchorBlock,
+            Segment[] memory segs,
             bytes memory fills,
             uint32[] memory idx,
             L.Account[] memory olds,
@@ -347,7 +387,7 @@ contract ClearingBook {
         for (uint64 j = bt.forcedFrom; j < bt.forcedTo; ++j) {
             statuses = bytes.concat(statuses, bytes2(forcedStatus[b][j]));
         }
-        return (bt.anchorBlock, bt.fills, idx, olds, news, bt.reqTo, bt.forcedTo, statuses);
+        return (bt.segments, bt.fills, idx, olds, news, bt.reqTo, bt.forcedTo, statuses);
     }
 
     /// An account's leaf at the end of batch `b`: its leaf before the next batch that touched
@@ -359,10 +399,16 @@ contract ClearingBook {
         return accounts[i];
     }
 
-    /// What batch `b` was opened at: the L1 block and time, and the price it used.
+    /// Batch `b`'s latest oracle segment: the L1 block and time, and the price it uses.
     function batchInfo(uint256 b) external view returns (uint64 anchorBlock, uint64 anchorTime, uint256 price) {
-        Batch storage bt = batches[b];
-        return (bt.anchorBlock, bt.anchorTime, bt.price);
+        Segment[] storage g = batches[b].segments;
+        if (g.length == 0) return (0, 0, 0);
+        Segment storage last = g[g.length - 1];
+        return (last.anchorBlock, last.anchorTime, last.price);
+    }
+
+    function segments(uint256 b) external view returns (Segment[] memory) {
+        return batches[b].segments;
     }
 
     function account(uint32 idx) external view returns (L.Account memory) {

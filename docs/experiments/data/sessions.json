@@ -7,43 +7,43 @@
     "what": "AnchorRegistry, ChainlinkAdapter, ClearingCodec, ClearingVault: once per app"
   },
   "sessionSetup": {
-    "gas": 2378869,
+    "gas": 2558799,
     "txs": 3,
     "what": "ClearingDisputes + ClearingChannel + vault.register, per session"
   },
   "perBatch": {
-    "proposeGas": 1240320,
-    "finalizeGas": 85510
+    "proposeGas": 1251213,
+    "finalizeGas": 85407
   },
   "idle": "no L1 transactions while idle (no batch, no proposal). An Active session must still be watched: after takeoverDelay anyone may propose",
   "close": {
-    "beginCloseGas": 49952,
-    "closeGas": 34320,
+    "beginCloseGas": 49930,
+    "closeGas": 34365,
     "txs": 2
   },
   "monitoring": {
-    "lastProposalToClosedSeconds": 3601,
+    "lastProposalToClosedSeconds": 3600,
     "beginCloseToClosedSeconds": 0,
     "rule": "Active (even idle): watch, proposals stay possible. Closing: watch until nothing is pending. Closed: nothing to watch once the close transaction is final on L1"
   },
   "recovery": {
     "packageBytes": 1341,
     "claimFileBytes": 1545,
-    "publishFinalGas": 108485,
+    "publishFinalGas": 108399,
     "publishChunks": 2,
     "publishedLeafBytes": 432,
     "bySize": "contracts/test/clearing/ClearingSession.t.sol test_publishFinalCost: ~5k execution gas + 108 calldata bytes per user, linear; 1024 users in one chunk = 5.1M execution gas + 110 KB"
   },
   "restart": {
-    "ms": 327,
+    "ms": 338,
     "l1Txs": 3,
-    "executorSetupMs": 137,
+    "executorSetupMs": 148,
     "what": "deploy + register session 2, start an empty executor; no replay of session 1"
   },
   "users_": {
-    "claimWhileActiveGas": 88859,
-    "redeemToWalletGas": 125564,
-    "redeemToVaultGas": 160870,
+    "claimWhileActiveGas": 88863,
+    "redeemToWalletGas": 125568,
+    "redeemToVaultGas": 160886,
     "vaultFundGas": 127574
   },
   "gas": {
@@ -51,23 +51,23 @@
     "app: AnchorRegistry": 669126,
     "app: ClearingCodec": 1644905,
     "app: ClearingVault": 809889,
-    "session 1: deploy": 2279265,
-    "session 1: register": 99604,
+    "session 1: deploy": 2459191,
+    "session 1: register": 99608,
     "user: deposit": 689682,
-    "AnchorRegistry.record": 469593,
-    "operator: propose": 2480640,
-    "operator: finalize": 256529,
+    "AnchorRegistry.record": 469581,
+    "operator: propose": 2502426,
+    "operator: finalize": 256220,
     "user: requestWithdraw": 249921,
-    "user: claim (active)": 88859,
-    "operator: beginClose": 49952,
-    "operator: close": 34320,
-    "optional: publishFinal": 108485,
-    "session 2: deploy": 2279265,
-    "session 2: register": 82504,
-    "operator: withdrawBond": 28762,
-    "user: redeem → vault": 160870,
+    "user: claim (active)": 88863,
+    "operator: beginClose": 49930,
+    "operator: close": 34365,
+    "optional: publishFinal": 108399,
+    "session 2: deploy": 2459191,
+    "session 2: register": 82508,
+    "operator: withdrawBond": 28740,
+    "user: redeem → vault": 160886,
     "user: vault.fund": 255147,
-    "user: redeem → wallet": 376693
+    "user: redeem → wallet": 376705
   },
   "txs": {
     "session 1: register": 1,

@@ -94,3 +94,6 @@ jobs:
       - name: e2e sessions (close, forget, restart from recovery material)
         working-directory: ts
         run: npm run -s e2e-sessions
+      - name: e2e subscription (the executor follows L1; oracle segments)
+        working-directory: ts
+        run: npm run -s e2e-subscription

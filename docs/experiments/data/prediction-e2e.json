@@ -7,8 +7,8 @@
     "channel deposit (x3)": 358209,
     "openRound": 135948,
     "commit (3 users)": 139533,
-    "AnchorRegistry.record": 156172,
-    "resolve (witness)": 265409,
+    "AnchorRegistry.record": 156196,
+    "resolve (witness)": 265397,
     "propose (bad)": 158804,
     "challengeUpdate": 112454,
     "propose (3 users)": 138892,
@@ -22,7 +22,7 @@
     "L1 deposit (x3)": 130854,
     "L1 openRound": 119357,
     "L1 stake (x4)": 244334,
-    "L1 resolve (witness)": 258795,
+    "L1 resolve (witness)": 258807,
     "L1 collect (x3)": 106667,
     "L1 withdraw": 28630
   }

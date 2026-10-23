@@ -92,7 +92,7 @@ contract ClearingSessionTest is ClearingChannelBase {
         vm.deal(watcher, 5 ether);
         vm.prank(watcher);
         vm.expectRevert(ClearingStorage.WrongState.selector);
-        ch.propose{value: 1 ether}(pkg1, "", u, proof, 1, 0, "");
+        ch.propose{value: 1 ether}(_w(), _f0(), "", u, proof, 1, 0, "");
         vm.prank(op);
         vm.expectRevert(ClearingStorage.WrongState.selector);
         ch.beginClose();
@@ -113,7 +113,7 @@ contract ClearingSessionTest is ClearingChannelBase {
         (bytes memory u, bytes32[] memory proof) = _updates(n);
         vm.prank(watcher);
         vm.expectRevert(ClearingStorage.WrongState.selector);
-        ch.propose{value: 1 ether}(pkg1, fills, u, proof, 0, 0, "");
+        ch.propose{value: 1 ether}(_w(), _f0(), fills, u, proof, 0, 0, "");
     }
 
     /// Proposals during Closing stop at the deadline after which anyone may close.
@@ -128,7 +128,7 @@ contract ClearingSessionTest is ClearingChannelBase {
         (bytes memory u, bytes32[] memory proof) = _updates(m);
         vm.prank(op);
         vm.expectRevert(ClearingStorage.WrongState.selector);
-        ch.propose{value: 1 ether}(pkg1, "", u, proof, 0, 0, "");
+        ch.propose{value: 1 ether}(_w(), _f0(), "", u, proof, 0, 0, "");
         vm.prank(watcher);
         ch.close();
         assertEq(uint8(_phase(D)), uint8(ClearingStorage.Phase.Closed));
@@ -198,7 +198,7 @@ contract ClearingSessionTest is ClearingChannelBase {
         vm.warp(block.timestamp + 2 days + 1); // takeover
         (bytes memory fills, L.Account[] memory n) = _batch1();
         (bytes memory u, bytes32[] memory proof) = _updates(n);
-        p.propose{value: 1 ether}(ch, abi.encodeCall(ch.propose, (pkg1, fills, u, proof, 0, 0, "")));
+        p.propose{value: 1 ether}(ch, abi.encodeCall(ch.propose, (_w(), _f0(), fills, u, proof, 0, 0, "")));
         _finalize(n); // the refund can't be pushed to it: finalize still works
         assertEq(D.bondCredit(address(p)), 1 ether);
         vm.expectRevert(ClearingStorage.TransferFailed.selector);
@@ -313,20 +313,20 @@ contract ClearingSessionTest is ClearingChannelBase {
         idx[1] = 1;
         bytes32[] memory proof = Tree.multiproof(new bytes32[](3), idx);
         vm.prank(op);
-        s2.propose{value: 1 ether}(pkg1, fills, u, proof, 0, 0, "");
+        s2.propose{value: 1 ether}(_w(), _f0(), fills, u, proof, 0, 0, "");
         // Valid signatures, in session 1's domain: in session 2 they are a provable fault.
         vm.prank(watcher);
-        d2.challengeFill(fills, 0);
+        d2.challengeFill(fills, 0, _f0(), _p0(), _b0());
         assertEq(d2.pending().at, 0, "discarded");
         assertEq(d2.bondCredit(watcher), 1 ether);
         // The same orders signed for session 2 are fine there.
         bytes memory again =
             _fill(_signedIn(s2, 0, R.ETH, uint128(ETH1), 6990, 1), _signedIn(s2, 1, R.USD, 7000, uint128(ETH1), 1));
         vm.prank(op);
-        s2.propose{value: 1 ether}(pkg1, again, u, proof, 0, 0, "");
+        s2.propose{value: 1 ether}(_w(), _f0(), again, u, proof, 0, 0, "");
         vm.prank(watcher);
         vm.expectRevert(ClearingStorage.NotWrong.selector);
-        d2.challengeFill(again, 0);
+        d2.challengeFill(again, 0, _f0(), _p0(), _b0());
     }
 
     function _signedIn(ClearingChannel s, uint32 i, uint8 sell, uint128 sellAmt, uint128 buyAmt, uint64 nonce)

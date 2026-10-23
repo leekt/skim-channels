@@ -82,8 +82,9 @@ abstract contract ClearingStorage {
     struct Pending {
         bytes32 root;
         bytes32 fillsHash;
-        uint256 price;
-        uint64 anchorBlock;
+        /// keccak256(abi.encode(firstFills, prices, anchorBlocks)): the batch's oracle segments,
+        /// each price verified at its own anchor when the batch was proposed.
+        bytes32 segments;
         uint64 at;
         uint64 reqCursor;
         uint64 forcedCursor;
@@ -134,14 +135,10 @@ abstract contract ClearingStorage {
     event WithdrawRequested(uint256 indexed pos, uint32 indexed idx, uint8 token, uint256 amount);
     event ForcedOrder(uint256 indexed pos, uint32 indexed idx, bytes order);
     event Proposed(
-        uint256 indexed batch,
-        bytes32 root,
-        address proposer,
-        uint256 price,
-        uint64 anchorBlock,
-        uint64 reqCursor,
-        uint64 forcedCursor
+        uint256 indexed batch, bytes32 root, address proposer, bytes32 segments, uint64 reqCursor, uint64 forcedCursor
     );
+    /// A proposal's oracle segments: each price verified at its anchor (challengeFill takes them).
+    event Segments(uint256 indexed batch, uint32[] firstFills, uint256[] prices, uint64[] anchorBlocks);
     event ForcedRested(uint256 indexed pos);
     event Finalized(uint256 indexed batch, bytes32 root);
     event Discarded(uint256 indexed batch, address challenger, string reason);

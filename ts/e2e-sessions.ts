@@ -167,7 +167,7 @@ async function run(l1: Chain) {
     const A = new ClearingOperator({
       view: new L1ReadView({ url: l1.url, chainId: 900, cli: CLI }), exec: ex, book, op, l1, channel: ch, anchors,
       feed, maxStaleness: MAX_STALE, evidence: new EvidenceStore(join(dir, "evidence")), policy: { kind: "confirmations", n: 1 },
-      bond: parseEther("1"), journal: join(dir, "journal.json"), maxAnchorAge: 256n, ageMargin: 16n,
+      bond: parseEther("1"), journal: join(dir, "journal.json"), maxAnchorAge: 256n, ageMargin: 16n, nextBlock: () => l1.rpc("anvil_mine", [toHex(1)]),
     });
     return { A, ex, dir, startMs: Date.now() - t0 };
   }

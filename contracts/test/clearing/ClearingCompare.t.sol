@@ -220,7 +220,11 @@ contract ClearingCompareTest is Test {
         bytes32[] memory proof;
         L.Account[] memory next;
         (fills, u, proof, next) = _channelBatch(p);
-        uint256 g = _txGas(op, address(chn), abi.encodeCall(chn.propose, (pkg1, fills, u, proof, 0, 0, "")), 1 ether);
+        bytes[] memory ws = new bytes[](1);
+        ws[0] = pkg1;
+        uint256 g = _txGas(
+            op, address(chn), abi.encodeCall(chn.propose, (ws, new uint32[](1), fills, u, proof, 0, 0, "")), 1 ether
+        );
         vm.warp(block.timestamp + 1 hours);
         uint256 g2 = _txGas(address(0x5EE), address(chn), abi.encodeCall(chn.finalize, ()), 0);
         for (uint256 i; i < next.length; ++i) {
@@ -335,7 +339,9 @@ contract ClearingCompareTest is Test {
         }
         proof = Tree.multiproof(h, idx);
         vm.prank(op);
-        chn.propose{value: 1 ether}(pkg1, fills, u, proof, 0, 0, "");
+        bytes[] memory ws = new bytes[](1);
+        ws[0] = pkg1;
+        chn.propose{value: 1 ether}(ws, new uint32[](1), fills, u, proof, 0, 0, "");
         uint256 snap = vm.snapshotState();
         bytes32[] memory nh = new bytes32[](fin.length);
         for (uint256 i; i < fin.length; ++i) {
@@ -352,7 +358,16 @@ contract ClearingCompareTest is Test {
         // A forged last signature, measured the same way.
         fills[fills.length - 1] = bytes1(uint8(fills[fills.length - 1]) ^ 1);
         vm.store(address(chn), bytes32(uint256(_pendingSlot()) + 1), keccak256(fills)); // fillsHash
-        g = _txGas(address(0x5EE), address(chn), abi.encodeCall(D.challengeFill, (fills, 255)), 0);
+        uint256[] memory prices = new uint256[](1);
+        prices[0] = 7000; // the fixture's price at its anchor (block 101): one segment
+        uint64[] memory blocks = new uint64[](1);
+        blocks[0] = 101;
+        g = _txGas(
+            address(0x5EE),
+            address(chn),
+            abi.encodeCall(D.challengeFill, (fills, 255, new uint32[](1), prices, blocks)),
+            0
+        );
         _log("channel.challengeFill", "last-of-256", 256, g);
     }
 

@@ -13,8 +13,10 @@ import {SparseTree16} from "../predict/SparseTree16.sol";
 /// - Every batch commits a new **account root** (each trader's balances, deposit and
 ///   withdrawal counters, nonce floor), publishing only the changed leaves (packed) with a
 ///   multiproof; L1 computes the new root itself. Fills are published packed (236 B each:
-///   both orders and signatures) and only hashed here. The L1 price is proven once per
-///   batch at a recorded anchor.
+///   both orders and signatures) and only hashed here. The price is proven per oracle
+///   segment: the app reads the feed at whatever L1 head its executor has applied, and a batch
+///   starts a new segment when the feed's round changed, so each segment's price is checked at
+///   its own anchor.
 /// - Nothing about a fill is re-checked unless challenged (ClearingDisputes):
 ///   `challengeFill` (one fill's signatures, price band, limits, expiry) and
 ///   `challengeAccount` (one account replayed through the batch with ClearingLedger: deposits,
@@ -131,8 +133,10 @@ contract ClearingChannel is ClearingStorage {
 
     // ---- batches ----------------------------------------------------------------------------
 
-    /// @param witness the price witness at the batch's anchor (recorded, ≤ maxAnchorAge old), as
-    ///        the session's price adapter reads it
+    /// @param witnesses one price witness per oracle segment, at that segment's anchor (recorded,
+    ///        ≤ maxAnchorAge old), as the session's price adapter reads it
+    /// @param firstFills each segment's first fill: 0, then strictly increasing, all below the
+    ///        number of fills (a batch without fills has one segment)
     /// @param fills packed fills (ClearingLedger.FILL_BYTES each), in execution order
     /// @param updates changed accounts (ClearingLedger.UPDATE_BYTES each), indices ascending
     /// @param proof multiproof of unchanged subtrees (SparseTree16.transition)
@@ -141,7 +145,8 @@ contract ClearingChannel is ClearingStorage {
     /// @param forcedStatus per forced order from finalizedForced to forcedCursor: uint16,
     ///        0 = rests in the book, else 2·fill + side + 1 = filled there
     function propose(
-        bytes calldata witness,
+        bytes[] calldata witnesses,
+        uint32[] calldata firstFills,
         bytes calldata fills,
         bytes calldata updates,
         bytes32[] calldata proof,
@@ -163,7 +168,7 @@ contract ClearingChannel is ClearingStorage {
         if (forcedCursor < f0 || forcedCursor > _forced.length || forcedStatus.length != 2 * (forcedCursor - f0)) {
             revert BadBatch("forcedCursor");
         }
-        (uint256 price, uint64 anchorBlock) = priceAdapter.price(witness, anchors, maxAnchorAge);
+        bytes32 segments = _segments(witnesses, firstFills, fills.length / L.FILL_BYTES);
         for (uint256 j = f0; j < forcedCursor; ++j) {
             uint16 s = uint16(bytes2(forcedStatus[2 * (j - f0):2 * (j - f0) + 2]));
             if (s == 0) {
@@ -183,18 +188,27 @@ contract ClearingChannel is ClearingStorage {
             root = newRoot;
         }
         _pending = Pending(
-            root,
-            keccak256(fills),
-            price,
-            anchorBlock,
-            uint64(block.timestamp),
-            reqCursor,
-            forcedCursor,
-            msg.sender,
-            msg.value
+            root, keccak256(fills), segments, uint64(block.timestamp), reqCursor, forcedCursor, msg.sender, msg.value
         );
         _lastProposalAt = block.timestamp;
-        emit Proposed(_batches + 1, root, msg.sender, price, anchorBlock, reqCursor, forcedCursor);
+        emit Proposed(_batches + 1, root, msg.sender, segments, reqCursor, forcedCursor);
+    }
+
+    /// Verifies every segment's price at its anchor; returns the commitment challengeFill checks.
+    function _segments(bytes[] calldata witnesses, uint32[] calldata firstFills, uint256 nFills)
+        internal
+        returns (bytes32)
+    {
+        uint256 n = witnesses.length;
+        if (n == 0 || firstFills.length != n || firstFills[0] != 0) revert BadBatch("segments");
+        uint256[] memory prices = new uint256[](n);
+        uint64[] memory blocks = new uint64[](n);
+        for (uint256 s; s < n; ++s) {
+            if (s > 0 && (firstFills[s] <= firstFills[s - 1] || firstFills[s] >= nFills)) revert BadBatch("segments");
+            (prices[s], blocks[s]) = priceAdapter.price(witnesses[s], anchors, maxAnchorAge);
+        }
+        emit Segments(_batches + 1, firstFills, prices, blocks);
+        return keccak256(abi.encode(firstFills, prices, blocks));
     }
 
     /// @notice Anyone, after the window: the pending root becomes final; the bond is credited

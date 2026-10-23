@@ -82,6 +82,10 @@ export abstract class BatchRuntime<A, O> {
   protected abstract prepare(snap: Snapshot, from: O, forBatches: JournalBatch<A, O>[]): Promise<unknown>;
   /** Pin and open; returns the executor's batch number. */
   protected abstract openWith(prepared: unknown): Promise<bigint>;
+  /** The L1 block a batch actually opened at, when the executor follows L1's head itself. */
+  protected openedAt(_prepared: unknown): Snapshot | undefined {
+    return undefined;
+  }
   protected abstract run(action: A): Promise<void>;
   protected abstract sealOne(): Promise<void>;
   /** Rebuild the executor when its checkpoint is gone (e.g. it restarted). */
@@ -116,7 +120,7 @@ export abstract class BatchRuntime<A, O> {
     const prepared = await this.prepare(snap, from, []);
     const checkpoint = await this.exec.checkpoint();
     const no = await this.openWith(prepared);
-    const b: JournalBatch<A, O> = { no: `${no}`, state: "open", snap, openState: from, prepared, log: [], checkpoint };
+    const b: JournalBatch<A, O> = { no: `${no}`, state: "open", snap: this.openedAt(prepared) ?? snap, openState: from, prepared, log: [], checkpoint };
     this.batches.push(b);
     this.save();
     return b;
@@ -228,7 +232,7 @@ export abstract class BatchRuntime<A, O> {
     // 4. Replay their accepted actions, in order, into one batch on the new snapshot.
     const checkpoint = await this.exec.checkpoint();
     const no = await this.openWith(r.prepared);
-    const merged: JournalBatch<A, O> = { no: `${no}`, state: "open", snap: r.snap, openState: from, prepared: r.prepared, log: [], checkpoint };
+    const merged: JournalBatch<A, O> = { no: `${no}`, state: "open", snap: this.openedAt(r.prepared) ?? r.snap, openState: from, prepared: r.prepared, log: [], checkpoint };
     this.journal.batches = [...this.batches.slice(0, i), merged];
     const accepted = affected.flatMap((b) => b.log.filter((l) => l.ok));
     const notRetried = affected.flatMap((b) => b.log.filter((l) => !l.ok));

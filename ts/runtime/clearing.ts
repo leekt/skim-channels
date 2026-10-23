@@ -2,15 +2,17 @@
 // executor): docs/guide/stateful-runtime.md.
 //
 // The executor is crates/app-executor: the channel (both halves) and the Chainlink feed (proxy
-// and aggregator) are imported read-only, so ClearingBook reads them with ordinary calls and
-// the executor fetches and verifies every value it touches at its pin.
+// and aggregator) are imported read-only, so ClearingBook reads them with ordinary calls. The
+// executor follows L1's head: those reads are always current, and every value is verified at
+// the head it was read at.
 //
-// Per batch: one L1 snapshot → pin the executor there → open the batch (deposits, withdrawal
-// requests and forced orders applied first, as L1 replays them; the price from the feed's
-// latest round) → orders and fills → seal → propose: the packed fills, the changed accounts
-// with a multiproof against the finalized root, the queue cursors, the forced-order
-// statuses, the price witness for L1's ChainlinkAdapter (at the same block), and a bond.
-// Anyone finalizes after the window.
+// Per batch: open the batch at the executor's current head (deposits, withdrawal requests and
+// forced orders applied first, as L1 replays them; the price from the feed's latest round),
+// then fetch the price witness for L1's ChainlinkAdapter at that same block right away →
+// orders and fills → seal → propose: the packed fills, the changed accounts with a multiproof
+// against the finalized root, the queue cursors, the forced-order statuses, the price
+// witness, and a bond. Anyone finalizes after the window. Nothing ever needs an old block:
+// a restart adopts the finalized and pending leaves instead of re-executing.
 //
 // `recover` rebuilds the finalized accounts from L1 alone (published proposals that
 // finalized), so another operator can `adopt` them and continue after the takeover delay.
@@ -88,10 +90,16 @@ export type Action =
 /** Executor state a batch opens from (plans and recoveries start here). */
 export type OpenState = { users: number; reqCursor: number; forcedCursor: number; scannedTo: bigint };
 export type Prepared = {
-  anchor: { number: bigint; hash: Hex; time: bigint }; priceWitness: Witness; forced: { orders: Hex[] }; depositUsers: number[];
+  forced: { orders: Hex[] }; depositUsers: number[];
   requests: number; // withdrawal requests queued on L1 that this batch will serve
   scannedTo: bigint;
+  // The batch's oracle segments as they happen: the head each was read at, and L1's price
+  // witness there (segment 0 at open; another whenever a fill starts one).
+  segments?: Segment[];
+  // Set at proposal: the leaves it commits (a restart adopts them while it's pending).
+  proposed?: [number, Account][];
 };
+export type Segment = { number: bigint; hash: Hex; time: bigint; snap: Snapshot; witness: Witness };
 /** The Chainlink feed a session prices from: the proxy apps call, and its aggregator. */
 export type Feed = { proxy: Address; aggregator: Address };
 
@@ -106,8 +114,9 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
   readonly l1: Chain; readonly channel: C; readonly anchors: C; readonly feed: Feed; readonly maxStaleness: bigint;
   readonly evidence: EvidenceStore; readonly bond: bigint;
   fin = new Map<number, Account>(); // finalized leaves (L1's committed state, as this operator knows it)
-  pendingNext?: { no: bigint; next: Map<number, Account> };
+  pendingNext?: { b: JournalBatch<Action, OpenState>; next: Map<number, Account> };
   readonly startBlock: bigint; // the channel's deployment block: no event of it is older
+  readonly nextBlock: () => Promise<unknown>;
   scannedTo = 0n; // last L1 block scanned for deposits
   forcedScanFrom = 0n; // where unserved forced orders' events start
 
@@ -115,12 +124,15 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
     view: L1ReadView; exec: Chain; book: C; op: PrivateKeyAccount; l1: Chain; channel: C; anchors: C;
     feed: Feed; maxStaleness: bigint; evidence: EvidenceStore; policy: Policy; bond: bigint;
     journal: string; maxAnchorAge: bigint; ageMargin: bigint; startBlock?: bigint;
+    /** How to get a new L1 block when a proposal must wait for one (tests mine; by default, wait). */
+    nextBlock?: () => Promise<unknown>;
   }) {
     super(o.view, o.exec, o.journal, o.policy, o.maxAnchorAge, o.ageMargin);
     this.book = o.book; this.op = o.op; this.l1 = o.l1;
     this.channel = o.channel; this.anchors = o.anchors; this.feed = o.feed; this.maxStaleness = o.maxStaleness;
     this.evidence = o.evidence; this.bond = o.bond;
     this.startBlock = o.startBlock ?? 0n;
+    this.nextBlock = o.nextBlock ?? (() => new Promise((r) => setTimeout(r, 1000)));
     this.watched = [o.channel.address, o.feed.proxy, o.feed.aggregator];
   }
 
@@ -193,37 +205,73 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
         forced.orders.push(ev.order);
       }
     }
+    return {
+      forced, depositUsers: [...users].sort((a, b) => a - b), requests: Math.max(0, nReq - from.reqCursor), scannedTo: snap.number,
+    };
+  }
+
+  /** The L1 price witness L1's ChainlinkAdapter checks, at exactly `snap`. */
+  private async priceWitness(snap: Snapshot): Promise<Witness> {
     const round = (await this.view.value(snap, this.feed.aggregator, AGG_HOT_SLOT)) >> 176n & 0xffffffffn;
-    const reads: Read[] = [
+    return this.view.witness(snap, [
       { account: this.feed.proxy, slots: [PROXY_PHASE_SLOT] },
       { account: this.feed.aggregator, slots: [AGG_HOT_SLOT, transmissionSlot(round)] },
-    ];
-    const priceWitness = this.view.witness(snap, reads); // throws ProofNotReady: nothing changed yet
-    const block = await this.l1.pub.getBlock({ blockHash: snap.hash });
-    return {
-      anchor: { number: snap.number, hash: snap.hash, time: block.timestamp }, priceWitness, forced,
-      depositUsers: [...users].sort((a, b) => a - b), requests: Math.max(0, nReq - from.reqCursor), scannedTo: snap.number,
-    };
+    ]);
   }
 
   protected async openWith(prepared: unknown): Promise<bigint> {
     const p = prepared as Prepared;
-    await this.exec.rpc("executor_pin", [p.anchor.hash]);
-    await this.exec.send(this.book, "openBatch", [p.anchor.number, p.anchor.time, p.depositUsers, p.forced.orders], this.op);
+    await this.exec.rpc("executor_sync"); // catch up with L1's head now (it follows on its own too)
+    const r = await this.exec.send(this.book, "openBatch", [p.depositUsers, p.forced.orders], this.op);
     this.scannedTo = p.scannedTo;
     const no = BigInt(await this.exec.read(this.book, "current"));
-    // Everything the executor verified at this pin (channel, feed), kept until L1 finalizes.
-    const ev = await this.exec.rpc<{ package: Hex }>("executor_evidence");
-    this.evidence.pin(`clearing:batch:${no}:${p.anchor.hash.slice(2, 10)}`, {
-      purpose: `clearing batch ${no}`, anchor: { chainId: this.view.chainId, blockNumber: `${p.anchor.number}`, blockHash: p.anchor.hash },
-      rawHeader: p.priceWitness.rawHeader, package: ev.package, reads: [], note: `price witness: ${p.priceWitness.package}`,
-    });
+    // The head this batch opened at (the executor follows L1's head), and the price witness
+    // there, fetched right away while that block is recent.
+    p.segments = [await this.segmentAt(r.transactionHash, no, `clearing:batch:${no}:seg0`)];
     return no;
+  }
+
+  /**
+   * The oracle segment a transaction on the app network started: the L1 head it executed
+   * against (from its receipt), the book's price there, and L1's price witness at that block,
+   * fetched right away while it's recent. The executor's evidence at that head is kept too.
+   */
+  private async segmentAt(tx: Hex, no: bigint, key: string): Promise<Segment> {
+    const raw = await this.exec.rpc<any>("eth_getTransactionReceipt", [tx]);
+    const [number, time] = await this.exec.read<any[]>(this.book, "batchInfo", [no]);
+    if (BigInt(number) !== BigInt(raw.l1BlockNumber)) throw new Error(`segment of batch ${no}: book and receipt disagree on the L1 head`);
+    const blk = await this.l1.pub.getBlock({ blockHash: raw.l1BlockHash });
+    const snap: Snapshot = {
+      chainId: this.view.chainId, number: BigInt(number), hash: raw.l1BlockHash, parentHash: blk.parentHash, stateRoot: blk.stateRoot,
+      policy: this.policy, speculative: this.policy.kind === "latest",
+    };
+    const witness = await this.priceWitness(snap);
+    const ev = await this.exec.rpc<{ package: Hex }>("executor_evidence");
+    this.evidence.pin(key, {
+      purpose: `clearing batch ${no}`, anchor: { chainId: this.view.chainId, blockNumber: `${number}`, blockHash: raw.l1BlockHash },
+      rawHeader: witness.rawHeader, package: ev.package, reads: [], note: `price witness: ${witness.package}`,
+    });
+    return { number: BigInt(number), hash: raw.l1BlockHash, time: BigInt(time), snap, witness };
+  }
+
+  protected openedAt(prepared: unknown): Snapshot | undefined {
+    return (prepared as Prepared).segments?.[0]?.snap;
   }
 
   protected async run(action: Action) {
     if (action.kind === "order") await this.exec.send(this.book, "submitOrder", [action.order, action.sig], this.op);
-    else if (action.kind === "fill") await this.exec.send(this.book, "fill", [action.a, action.b], this.op);
+    else if (action.kind === "fill") {
+      const r = await this.exec.send(this.book, "fill", [action.a, action.b], this.op);
+      // A fill at a newer L1 head with a new feed round starts a segment: witness it now.
+      const started = r.logs.some((l) => {
+        try { return (decodeEventLog({ abi: this.book.abi, data: l.data, topics: l.topics }) as any).eventName === "SegmentStarted"; } catch { return false; }
+      });
+      if (started) {
+        const p = this.current.prepared as Prepared;
+        const no = BigInt(this.current.no);
+        p.segments = [...(p.segments ?? []), await this.segmentAt(r.transactionHash, no, `clearing:batch:${no}:seg${p.segments?.length ?? 0}`)];
+      }
+    }
     else await this.sendRaw(action.tx);
   }
 
@@ -247,22 +295,29 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
    * finalized accounts, and re-execute every batch that is proposed but not yet final, with
    * the proofs it used. Then the executor is where the first unproposed batch began.
    */
+  /**
+   * A fresh executor (the old one, or its checkpoints, are gone): deploy the book and adopt
+   * L1's committed state. A batch in its challenge window isn't re-executed (that would need
+   * its old block); its proposed leaves are adopted, checked against L1's pending root.
+   */
   protected async rebuild() {
     this.book = await ClearingOperator.deployBook(this.exec, this.l1, this.op, this.channel, this.feed, this.maxStaleness);
     // The finalized leaves this operator kept (adopt checks them against L1's root), else L1's history.
     const fin = this.fin.size ? new Map(this.fin) : await ClearingOperator.recover(this.l1, this.channel, this.startBlock);
-    await this.adopt(fin);
-    for (const b of this.batches) {
-      if (b.state !== "proposed") continue;
-      const no = await this.openWith(b.prepared);
-      for (const l of b.log) if (l.ok) await this.run(l.action);
-      await this.sealOne();
-      // the fresh book numbers batches from 1 again
-      b.no = `${no}`;
-      b.checkpoint = undefined;
-      // its proposed leaves, for when L1 finalizes it (lost with the old process, if any)
-      this.pendingNext = { no, next: (await this.proposal(no)).next };
+    const pend = await this.l1.read<any>(this.channel, "pending");
+    const b = this.batches.findLast((x) => x.state === "proposed" && (x.prepared as Prepared).proposed);
+    if (pend.at !== 0n) {
+      // Its leaves: from the journal, else from the proposal's own calldata on L1.
+      const next = b ? new Map((b.prepared as Prepared).proposed) : await ClearingOperator.pendingLeaves(this.l1, this.channel, this.startBlock);
+      const merged = new Map(fin);
+      for (const [k, v] of next) merged.set(k, v);
+      await this.adopt(merged, true);
+      this.fin = fin;
+      if (b) this.pendingNext = { b, next };
+    } else {
+      await this.adopt(fin);
     }
+    for (const x of this.batches) x.checkpoint = undefined;
   }
 
   /**
@@ -271,7 +326,6 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
    * batch not yet proposed.
    */
   async restart() {
-    if (!this.batches.length) return;
     const b = this.batches.find((x) => x.state === "open" || x.state === "sealed");
     if (b) return this.recover(b.no, "restarted");
     await this.rebuild();
@@ -282,7 +336,7 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
 
   /** The proposal for batch `no`, against the finalized state this operator knows. */
   async proposal(no: bigint, tamper?: (news: Map<number, Account>) => void) {
-    const [anchorBlock, fills, idx, olds, news, reqTo, forcedTo, statuses] = await this.exec.read<any[]>(this.book, "proposal", [no]);
+    const [segments, fills, idx, olds, news, reqTo, forcedTo, statuses] = await this.exec.read<any[]>(this.book, "proposal", [no]);
     const n = Number(await this.l1.read(this.channel, "userCount"));
     const next = new Map<number, Account>();
     const order = (idx as number[]).map((x, i) => i).sort((a, b) => Number(idx[a]) - Number(idx[b]));
@@ -299,7 +353,9 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
       ? concat(changed.map((k) => concat([encodePacked(["uint32"], [k]), packLeaf(this.fin.get(k) ?? EMPTY), packLeaf(next.get(k)!)])))
       : "0x";
     const proof = changed.length ? multiproof(levels(dense), changed) : [];
-    return { anchorBlock: BigInt(anchorBlock), fills: fills as Hex, updates: updates as Hex, proof, reqTo: BigInt(reqTo), forcedTo: BigInt(forcedTo), statuses: (statuses as Hex) || "0x", next };
+    return {
+      segments: (segments as any[]).map((g) => ({ anchorBlock: BigInt(g.anchorBlock), firstFill: Number(g.firstFill), price: BigInt(g.price) })),
+      fills: fills as Hex, updates: updates as Hex, proof, reqTo: BigInt(reqTo), forcedTo: BigInt(forcedTo), statuses: (statuses as Hex) || "0x", next };
   }
 
   /**
@@ -313,14 +369,29 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
     if (status !== "canonical") throw new Error(`batch ${no}: anchor ${status}; run tick() first`);
     if ((await this.view.head()) - b.snap.number > this.maxAnchorAge) throw new Error(`batch ${no}: anchor too old; run tick() first`);
     const p0 = b.prepared as Prepared;
-    if (!(await this.l1.read<boolean>(this.anchors, "recorded", [p0.priceWitness.anchorId]))) {
-      await this.l1.send(this.anchors, "record", [p0.priceWitness.rawHeader], this.op, "AnchorRegistry.record");
-    }
+    const segs = p0.segments ?? [];
     const p = await this.proposal(no, opts.tamper);
+    if (segs.length !== p.segments.length || segs.some((s, i) => s.number !== p.segments[i].anchorBlock)) {
+      throw new Error(`batch ${no}: its price witnesses don't match the book's oracle segments`);
+    }
+    // L1 records an anchor only once a later block exists (BLOCKHASH covers past blocks).
+    for (let i = 0; (await this.l1.height()) <= segs[segs.length - 1].number; i++) {
+      if (i > 120) throw new Error(`batch ${no}: L1 hasn't moved past its last segment's anchor`);
+      await this.nextBlock();
+    }
+    for (const s of segs) {
+      if (!(await this.l1.read<boolean>(this.anchors, "recorded", [s.witness.anchorId]))) {
+        await this.l1.send(this.anchors, "record", [s.witness.rawHeader], this.op, "AnchorRegistry.record");
+      }
+    }
     const r = await this.l1.send(this.channel, "propose",
-      [p0.priceWitness.package, p.fills, p.updates, p.proof, p.reqTo, p.forcedTo, p.statuses], this.op, opts.label, this.bond);
-    this.pendingNext = { no, next: p.next };
-    if (!opts.tamper) this.markProposed(no, r.transactionHash, r.blockNumber);
+      [segs.map((s) => s.witness.package), p.segments.map((s) => s.firstFill), p.fills, p.updates, p.proof, p.reqTo, p.forcedTo, p.statuses],
+      this.op, opts.label, this.bond);
+    if (!opts.tamper) {
+      (b.prepared as Prepared).proposed = [...p.next];
+      this.markProposed(no, r.transactionHash, r.blockNumber);
+    }
+    this.pendingNext = { b, next: p.next };
     return { ...p, receipt: r };
   }
 
@@ -328,8 +399,33 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
   async finalized() {
     if (!this.pendingNext) return;
     for (const [k, v] of this.pendingNext.next) this.fin.set(k, v);
-    this.markFinal(this.pendingNext.no, "finalized");
+    this.pendingNext.b.state = "finalized";
+    this.save();
     this.pendingNext = undefined;
+  }
+
+  /** The pending proposal's new leaves, from its calldata on L1 (the latest Proposed event). */
+  static async pendingLeaves(l1: Chain, channel: C, fromBlock = 0n): Promise<Map<number, Account>> {
+    const head = await l1.height();
+    let tx: Hex | undefined;
+    for (let f = fromBlock; f <= head; f += LOG_RANGE) {
+      for (const log of await l1.pub.getLogs({ address: channel.address, fromBlock: f, toBlock: f + LOG_RANGE - 1n < head ? f + LOG_RANGE - 1n : head })) {
+        try {
+          const ev = decodeEventLog({ abi: channel.abi, data: log.data, topics: log.topics }) as any;
+          if (ev.eventName === "Proposed") tx = log.transactionHash;
+        } catch { /* other */ }
+      }
+    }
+    const out = new Map<number, Account>();
+    if (!tx) return out;
+    const t = await l1.pub.getTransaction({ hash: tx });
+    const { args } = decodeFunctionData({ abi: channel.abi, data: t.input }) as any;
+    const raw = (args[3] as Hex).slice(2); // updates
+    for (let o = 0; o < raw.length; o += 440) {
+      const u = raw.slice(o, o + 440);
+      out.set(Number(BigInt(`0x${u.slice(0, 8)}`)), unpackLeaf(`0x${u.slice(224)}`));
+    }
+    return out;
   }
 
   /** Finalized accounts from L1 alone: every finalized proposal's published leaves, in order. */
@@ -352,7 +448,7 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
     for (const b of finalizedBatches) {
       const tx = await l1.pub.getTransaction({ hash: proposed.get(b)! });
       const { args } = decodeFunctionData({ abi: channel.abi, data: tx.input }) as any;
-      const updates: Hex = args[2];
+      const updates: Hex = args[3]; // propose(witnesses, firstFills, fills, updates, …)
       const raw = updates.slice(2);
       for (let o = 0; o < raw.length; o += 440) {
         const u = raw.slice(o, o + 440);
@@ -363,12 +459,11 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
   }
 
   /** Start this executor's AppState from L1's finalized state (checked against L1's root). */
-  async adopt(fin: Map<number, Account>) {
-    const snap = await this.view.snapshot(this.policy);
-    await this.exec.rpc("executor_pin", [snap.hash]);
-    const n = Number(await this.view.value(snap, this.channel.address, word(0n)));
+  async adopt(fin: Map<number, Account>, pending = false) {
+    await this.exec.rpc("executor_sync").catch(() => undefined); // catch up with L1's head first
+    const n = Number(await this.l1.read(this.channel, "userCount"));
     const idx = [...fin.keys()].filter((k) => leafHash(fin.get(k)!) !== zeroHash).sort((a, b) => a - b);
-    await this.exec.send(this.book, "adopt", [idx, idx.map((k) => fin.get(k)!)], this.op);
+    await this.exec.send(this.book, "adopt", [idx, idx.map((k) => fin.get(k)!), pending], this.op);
     this.fin = new Map(fin);
     this.scannedTo = 0n; // re-scan deposits from the start: applying them again is a no-op
     return rootOf(levels(Array.from({ length: n }, (_, i) => leafHash(fin.get(i) ?? EMPTY))));

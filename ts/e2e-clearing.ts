@@ -112,8 +112,8 @@ async function run(l1: Chain) {
   // ---- the app network: app executors (crates/app-executor), fees 0. They import the
   //      channel (both halves) and the feed (proxy and aggregator) read-only. ----
   const IMPORTS = [ch.address, disputes.address, proxy.address, agg.address];
-  const executor = async (port: number) => {
-    const ex = await Chain.appExecutor(ROOT, port, 7001, l1.url, { readonly: IMPORTS });
+  const executor = async (port: number, follow = "latest") => {
+    const ex = await Chain.appExecutor(ROOT, port, 7001, l1.url, { readonly: IMPORTS, follow });
     extraChains.push(ex);
     return ex;
   };
@@ -127,7 +127,7 @@ async function run(l1: Chain) {
       evidence: new EvidenceStore(join(tmpdir(), `skim-clearing-${who.address.slice(2, 8)}-${process.pid}`)),
       policy: { kind: "confirmations", n: 1 }, bond: parseEther("1"),
       journal: join(tmpdir(), `skim-clearing-journal-${who.address.slice(2, 8)}-${process.pid}.json`),
-      maxAnchorAge: 256n, ageMargin: 16n,
+      maxAnchorAge: 256n, ageMargin: 16n, nextBlock: () => l1.rpc("anvil_mine", [toHex(1)]),
     });
   };
   const A = await mkOp(exA, opA);
@@ -253,13 +253,13 @@ async function run(l1: Chain) {
   const digestAfter2 = await A.exec.read<Hex>(A.book, "stateDigest");
 
   // ---- the same journal replayed on a fresh executor gives the same AppState ----
-  const exC = await executor(18693);
+  const exC = await executor(18693, "none"); // replay tooling: moved to each batch's block explicitly
   try {
     const fresh = await ClearingOperator.deployBook(exC, l1, opA, ch, feed, MAX_STALE);
     for (const b of A.batches.slice(0, 2)) {
       const pr = b.prepared as any;
-      await exC.rpc("executor_pin", [pr.anchor.hash]); // the same L1 block, re-read and re-verified
-      await exC.send(fresh, "openBatch", [pr.anchor.number, pr.anchor.time, pr.depositUsers, pr.forced.orders], opA);
+      await exC.rpc("executor_pin", [pr.segments[0].hash]); // the same L1 block, re-read and re-verified
+      await exC.send(fresh, "openBatch", [pr.depositUsers, pr.forced.orders], opA);
       for (const l of b.log) {
         if (!l.ok) continue;
         const a = l.action as any;
@@ -269,7 +269,7 @@ async function run(l1: Chain) {
       }
       await exC.send(fresh, "seal", [], opA);
     }
-    check((await exC.read<Hex>(fresh, "stateDigest")) === digestAfter2, "the journal replayed on a fresh executor, pinned to the same L1 blocks, gives the same AppState digest");
+    check((await exC.read<Hex>(fresh, "stateDigest")) === digestAfter2, "the journal replayed on a fresh executor, at the same L1 blocks, gives the same AppState digest");
   } finally {
     exC.stop();
   }
@@ -427,7 +427,7 @@ async function run(l1: Chain) {
   await new Promise((r) => setTimeout(r, 500));
   A.exec = await executor(18691);
   const r5 = await A.recover(A.current.no, "executor restarted");
-  check(r5.status === "recovered", "the runtime rebuilt a fresh executor (adopt from L1 + the pending batch from the journal) and replayed the unproposed one");
+  check(r5.status === "recovered", "the runtime rebuilt a fresh executor without any old block: L1's finalized leaves plus the pending proposal's (checked against L1's pending root), then replayed the unproposed batch at the current head");
   await time(WINDOW);
   await l1.send(ch, "finalize", [], watcher);
   await A.finalized();

@@ -68,10 +68,17 @@ The final state diff is re-checked before commit as well.
 
 **Zero isn't "unused".** A zero flag or mapping entry can matter to an L1 contract. An overlay write there makes the app's copy differ from L1 on purpose.
 
-**Moving the pin** (`executor_pin(tag | number | hash)`):
-- All app state is kept.
-- An overlay slot whose L1 value is still zero at the new pin is kept.
-- If L1 now holds a value at an overlay slot, the move is **refused** and the conflict is reported. The previous pin and all state stay as they were. Nothing is dropped implicitly. A later explicit rebase or termination policy can resolve conflicts.
+**Following L1: a subscription, not a held block** (`crates/app-executor/src/follow.rs`):
+
+| | |
+|---|---|
+| Stream | `skim_streamNext`, subscribed to the imported accounts. It wakes the follower when skim applies a block and reports `rewind` and `gap`. Its cursor is kept on disk (`--state-dir`), so a restart continues the stream. Without skim (another node), the follower polls the head |
+| State-ready vs proof-ready | The stream's state changes are skim's word. This process can't authenticate them, because skim doesn't serve the full block access list to check against the header. So they are only cross-checked against proofs and counted (`state_ready_mismatches`), never executed on. Execution reads only **proof-ready** values |
+| Warm working set | Every account and slot the app has touched. At each new head the follower proves the whole set in the background, against that head's state root: one `eth_getProof` per account, all its slots. Code is fetched once per code hash |
+| Adoption | The proven head replaces the previous one between executions, atomically: an execution always runs against one head, never mixed roots. A dependency touched for the first time is proven at that execution's head on the spot and joins the working set. Overlay slots are always proven at the new head; an unproven slot is never taken as zero |
+| App state | Kept across heads; nothing is replayed or erased by ordinary head advancement. If L1 now holds a value at an overlay slot, following stops with the previous head and all state kept, and the conflict is reported (a later explicit rebase or termination policy can resolve it) |
+| Which head ran | Each transaction's receipt has `l1BlockNumber` / `l1BlockHash`. Contracts can read the head with a call to the L1 head account `0x…4C31`, which returns `(number, hash, timestamp)` |
+| Explicit control | `executor_pin(tag | number | hash)` (replay tooling, debugging, evidence; run with `--follow none`), `executor_sync` (catch up now), `evm_snapshot` / `evm_revert`, `executor_evidence`, `executor_metrics` |
 
 **Execution environment.** Imported code runs against L1 storage, but `block.*`, `msg.sender`, gas and anything in the overlay are the app's. A call returns what L1 would only for equivalent inputs and context.
 
@@ -88,6 +95,21 @@ The final state diff is re-checked before commit as well.
 Tests:
 - `npm run e2e-executor`: an anvil L1; 25 checks covering every rule above, a proxy, pin moves, a refused move on conflict, evidence, snapshots, and failing closed.
 - `SKIM_RPC=… npm run live-executor`: an app contract reads Chainlink's ETH/USD through its Sepolia proxy, with the proxy and its aggregator imported. It matches Sepolia at the pin, and so do the slots the L1 adapter verifies at that block. With only the proxy imported, the read reverts.
+- `npm run e2e-subscription` and `SKIM_RPC=… SEPOLIA_OPERATOR_KEY=… npm run live-subscription`: act at H, change the L1 dependency, act again. The executor is at the new block by itself, with no pin, sync or restart. The second action sees the new value, app state is kept, and in clearing, the batch gains a second oracle segment that L1 verifies. Results: [subscription](../experiments/subscription.md).
+
+## Oracle segments: the batch price follows the head too
+
+A batch doesn't hold one price. `ClearingBook` keeps **segments**, each recording:
+- the L1 head the feed was read at, and its time;
+- the feed's round and price there;
+- the first fill priced with it.
+
+The batch opens with segment 0. When a fill executes at a newer head and the feed's round has changed, a new segment starts at that head (`SegmentStarted`). If the round is the same, the price is the same, so the segment and its anchor stay.
+
+- **Operator:** fetches each segment's price witness at its block right away, while the block is recent.
+- **L1 at proposal:** verifies every segment's price at its own anchor and commits to the list (`firstFills, prices, anchorBlocks`).
+- **Disputes:** `challengeFill` judges each fill against its own segment.
+- **Cost of a new oracle context:** nothing beyond one more witness in the next proposal. No new session, re-pin or L1 keep-alive.
 
 ## The price on L1: `ChainlinkAdapter`
 
@@ -95,22 +117,22 @@ The executor's `latestRoundData()` call runs Chainlink's code at the pin; L1 can
 
 | Check | Rule |
 |---|---|
-| Anchor | Recorded in `AnchorRegistry` (canonical by L1's own `BLOCKHASH`), of this chain, at most `maxAnchorAge` blocks old |
+| Anchor | The segment's L1 block: recorded in `AnchorRegistry` (canonical by L1's own `BLOCKHASH`), of this chain, at most `maxAnchorAge` blocks old |
 | Proxy | Its code hash is the pinned one (so its layout is known); its current phase (slot 2) points at the one supported aggregator. A switched aggregator is refused, not followed |
 | Aggregator | Its code hash is the pinned one (AccessControlledOffchainAggregator layout) |
 | Round selection | The aggregator's latest round at the anchor (slot `0x2b`): what `latestRoundData()` returns there |
 | Freshness | Answered no later than the anchor's header time, and at most `maxStaleness` before it: decided at the anchor, not when the proposal lands |
 | Value | The answer, positive, scaled from the feed's decimals to 6 |
 
-The verified price is stored with the pending batch, and `challengeFill` judges fills against it. Fills aren't checked on L1 at proposal.
+The verified prices are committed with the pending batch, and `challengeFill` judges each fill against its segment's price. Fills aren't checked on L1 at proposal.
 
 **Scope.** This adapter is Chainlink-specific. Other ways to check an L1 read on L1 include witness-backed execution, an interactive fault proof, or EXECUTE. [`getRoundData` as an alternative](../experiments/chainlink-rounds.md) is evaluated separately.
 
 ## Snapshots, readiness, reorgs and recovery
 
-- **One snapshot per batch.**
-  - `snapshot(policy)` returns one block under a confirmation policy: `latest` (speculative), `confirmations n`, `safe` or `finalized` (skim's light client).
-  - Every read for the batch names that block hash.
+- **The executor follows L1; the runtime watches.** A batch opens at the head the executor has applied. Its anchor and segments are what the book recorded, and the receipts say which head each transaction ran against.
+  - `snapshot(policy)` still picks the block the operator scans events up to, and the policy used for aging and canonical checks.
+  - L1 records an anchor only once a later block exists, so `propose` waits for the next L1 block.
 - **stateReady vs proofReady.**
   - `value()` is a node's answer: on skim, a tracked key kept current from block access lists. Previews only.
   - `witness()` returns proofs at the exact block hash (the price witness for L1's adapter). The executor fetches and verifies everything else it reads at the pin itself.
@@ -126,7 +148,7 @@ The verified price is stored with the pending batch, and `challengeFill` judges 
   1. Start at the **earliest** affected batch, so later batches that spent its results are included.
   2. Take a new snapshot and **fetch its proofs first**. If that fails (`proof-unavailable`), nothing changes.
   3. Record the intent in the journal.
-  4. Roll the executor back to the batch's checkpoint, or rebuild a lost executor from L1's finalized state plus the journal.
+  4. Roll the executor back to the batch's checkpoint, or rebuild a lost executor. A rebuild never re-executes at an old block: it adopts L1's finalized leaves, plus the pending proposal's leaves (from the journal, or from its calldata on L1), checked against L1's pending root.
   5. Replay **only accepted actions** into one batch on the new snapshot.
   - Actions that no longer hold are reported as `dropped`.
   - Actions rejected before are reported as `notRetried` and never retried. Re-matching resting orders is a separate, explicit step.
