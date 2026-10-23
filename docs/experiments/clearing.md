@@ -53,6 +53,11 @@
   - The runtime's rewind signal (`skimRewound`) works on skim.
   - Skim served proofs 64 blocks back, and returned no block by number from 256 back.
 
+- **Devnet with Sepolia's price** (`npm run devnet`, see [the guide](../guide/stateful-runtime.md#try-it-in-a-browser-the-devnet-tsdevnetts)):
+  - The relay proved Chainlink ETH/USD from skim's `safe` block (Sepolia 11 973 489, round 37 003, $2392.59) into `FeedMirror`: 10.6 KB of proofs, fetched in ~1.1 s, verified on-chain for ~920k–994k gas.
+  - Batches pinned it (2.5 KB price proof per batch), and the smoke test's fill went through at 0.00% from it, then a withdrawal was claimed on L1.
+  - `FeedMirror` forge tests (7) run on a recorded witness (`fixtures/witnesses/sepolia-eth-usd.json`): wrong relayer, wrong source chain, a header that isn't the anchor, another contract's slots, replayed or older blocks, and tampered proofs are all refused.
+
 ## Cost (L1 gas, measured)
 
 `contracts/test/clearing/ClearingCompare.t.sol` measures one batch in steady state (accounts exist, deposits applied), priced as L1 transactions. Data: [`data/clearing-compare.json`](data/clearing-compare.json).

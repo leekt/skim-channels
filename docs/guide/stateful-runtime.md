@@ -129,3 +129,23 @@ $ SKIM_RPC=http://127.0.0.1:8545 npm run live-skim      # live: a skim node foll
 ```
 
 A wallet connects to the gateway's URL (`new Gateway(operator, port)`; the e2e serves one on `127.0.0.1:18695` while it runs). The executor behind it must not be reachable directly: it has cheat methods.
+
+## Try it in a browser: the devnet (`ts/devnet.ts`)
+
+```console
+$ cd ts && SKIM_RPC=http://127.0.0.1:18545 npm run devnet   # a skim node following Sepolia
+$ tailscale serve --bg 8787                                   # optional: HTTPS on your tailnet
+```
+
+One server on `:8787` runs an L1 devnet (anvil, chain 900), the app network (chain 7001, behind the gateway), an operator loop, a market-making bot, a faucet, and a test app styled with the Schematic design system (vendored in `ts/devnet/schematic`).
+
+**The price is Sepolia's live state.** It is Chainlink's ETH/USD on Sepolia, carried in four steps:
+
+| Step | What | Verified by |
+|---|---|---|
+| 1 | The aggregator's hot-variables slot (latest round) and `transmissions[round]` at skim's `safe` block | storage proofs from skim (`eth_getProof`), ~10.6 KB |
+| 2 | `FeedMirror.update(rawHeader, package)` on the L1 devnet (`contracts/src/clearing/FeedMirror.sol`, ~1M gas) | on-chain: header ↔ anchor, both proofs, the round read from the proven slot, blocks only forward. **Trusted:** that the header is canonical on Sepolia (no Sepolia BLOCKHASH here), so only the relay may submit |
+| 3 | Each batch pins an L1 devnet block and proves FeedMirror's slot 0 | `L1View` on the executor; L1 again at proposal |
+| 4 | Each fill must be within 1% of that price | the executor; `challengeFill` on L1 |
+
+The app shows each step with its values (Sepolia block, round, proof sizes, the L1 block a batch pinned, every fill's distance from the price), plus Sepolia's head value from skim, labeled as unproven. `npm run devnet-smoke [URL]` runs a fresh wallet through faucet, deposit, a fill, a withdrawal and a claim.
