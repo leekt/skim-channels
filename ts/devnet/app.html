@@ -33,7 +33,7 @@
 <body>
 <main>
   <h1>Skim Clearing — devnet</h1>
-  <div class="sub">Trade on the app network with a normal wallet; funds live in an L1 escrow. <b>Devnet only:</b> chains reset when the server restarts.</div>
+  <div class="sub">Trade on the app network with a normal wallet; funds live in an L1 escrow. <b>Devnet only:</b> chains reset when the server restarts. · <a href="/faucet" style="color:var(--accent)">Faucet</a></div>
 
   <div class="grid">
     <section class="card">
@@ -41,7 +41,7 @@
       <div class="row"><button id="connect">Connect wallet</button><span id="who" class="mono"></span></div>
       <div class="row"><button class="ghost" id="addL1">Add / switch to L1 devnet</button><button class="ghost" id="addApp">Add / switch to app network</button></div>
       <div class="kv"><div>wallet chain</div><div id="chain">—</div></div>
-      <div class="row"><button id="faucet">Faucet: 5 ETH + 20,000 USD on L1</button></div>
+      <div class="row"><button id="faucet">Faucet: 5 ETH + 20,000 USD on L1</button><a id="faucetLink" href="/faucet" style="color:var(--accent)">faucet page →</a></div>
       <div class="note">Two networks: <b>L1 devnet</b> (chain 900: deposits, withdrawals, forced orders) and the <b>app network</b> (chain 7001: trading, fees 0). The app switches for you.</div>
     </section>
 
@@ -153,6 +153,7 @@ $("connect").onclick = () => act("connect", async () => {
   [account] = await window.ethereum.request({ method: "eth_requestAccounts" });
   wallet = createWalletClient({ account, transport: custom(window.ethereum) });
   $("who").textContent = account;
+  $("faucetLink").href = `/faucet?address=${account}`;
   window.ethereum.on?.("accountsChanged", (a) => { account = a[0]; $("who").textContent = account; });
   refresh();
 });

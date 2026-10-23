@@ -215,6 +215,10 @@ async function main() {
         res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
         return res.end(page());
       }
+      if (url.pathname === "/faucet") {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        return res.end(readFileSync(new URL("./devnet/faucet.html", import.meta.url), "utf8"));
+      }
       if (url.pathname === "/rpc/app") return proxy(req, res, gw.url, () => true);
       if (url.pathname === "/rpc/l1") return proxy(req, res, l1.url, (m) => L1_ALLOWED.test(m) && !L1_DENIED.has(m));
       if (url.pathname === "/api/config") {

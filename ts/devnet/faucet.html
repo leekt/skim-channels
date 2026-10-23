@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Skim devnet faucet</title>
+<style>
+  body { margin: 0; background: #0b0d12; color: #e6e9ef; font: 14px/1.45 system-ui, -apple-system, sans-serif; }
+  main { max-width: 520px; margin: 0 auto; padding: 24px 16px; }
+  h1 { font-size: 20px; } a { color: #7c5cff; }
+  .card { background: #141821; border: 1px solid #232a37; border-radius: 12px; padding: 16px; }
+  input { width: 100%; box-sizing: border-box; background: #0e1118; color: #e6e9ef; border: 1px solid #232a37; border-radius: 8px; padding: 9px; font: 13px ui-monospace, Menlo, monospace; }
+  button { margin-top: 10px; background: #7c5cff; color: white; border: 0; border-radius: 8px; padding: 9px 14px; font: inherit; cursor: pointer; }
+  .muted { color: #8b93a7; font-size: 12px; } #out { margin-top: 10px; }
+</style>
+</head>
+<body>
+<main>
+  <p><a href="/">← back to the app</a></p>
+  <h1>Skim devnet faucet</h1>
+  <div class="card">
+    <div class="muted">Sends <b>5 ETH</b> and <b>20,000 USD</b> (test token) on the <b>L1 devnet</b> (chain 900). Devnet only.</div>
+    <p><input id="addr" placeholder="0x… your address"></p>
+    <button id="useWallet">Use my wallet's address</button>
+    <button id="go">Send</button>
+    <div id="out"></div>
+  </div>
+</main>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const say = (m, ok) => { $("out").innerHTML = `<span style="color:${ok ? "#2ee6c5" : "#ff5c7a"}">${m}</span>`; };
+  $("addr").value = new URLSearchParams(location.search).get("address") ?? "";
+  $("useWallet").onclick = async () => {
+    if (!window.ethereum) return say("no wallet found", false);
+    const [a] = await window.ethereum.request({ method: "eth_requestAccounts" });
+    $("addr").value = a;
+  };
+  $("go").onclick = async () => {
+    const address = $("addr").value.trim();
+    if (!/^0x[0-9a-fA-F]{40}$/.test(address)) return say("enter a valid address", false);
+    say("sending…", true);
+    const r = await fetch("/api/faucet", { method: "POST", body: JSON.stringify({ address }) });
+    const j = await r.json().catch(() => ({}));
+    r.ok ? say(`sent 5 ETH + 20,000 USD to ${address}`, true) : say(j.error ?? "failed", false);
+  };
+</script>
+</body>
+</html>
