@@ -16,16 +16,16 @@ The two paths are separate:
 
 | | What | Where | Who can change it |
 |---|---|---|---|
-| **Imported L1 state** | The L1 contracts the app declares (for clearing: its channel and the Chainlink feed's proxy and aggregator), at the executor's pinned block | L1, called at their L1 addresses on the app executor; every value fetched through skim with a proof | Nobody: imported read-only, so nothing on the app network can write to them |
+| **Imported L1 state** | The L1 contracts the app declares (for clearing: its channel and the Chainlink feed's proxy and aggregator), at the L1 head the executor follows | L1, called at their L1 addresses on the app executor; every value fetched through skim with a proof | Nobody: imported read-only, so nothing on the app network can write to them |
 | **AppState** | Every account exactly as L1 commits it (balances, deposit and withdrawal counters, nonce floor), the order book, the open batch | `ClearingBook` (Solidity) on the **executor** | Only through `ClearingLedger`, driven by signed orders, the operator's fills, and L1's queues |
 | **L1 settlement** | Real money; the **account root**; the withdrawal and forced-order queues; payout records | `ClearingChannel` on L1 | Deposits, finalized batches (optimistic, challengeable), claims and exits |
 
 **L1 head changes don't reset AppState.**
-- A batch pins one anchor; the next batch pins a later one.
-- Accounts, resting orders and nonces carry over.
-- At each pin the app reads, with ordinary calls:
-  - the price, with `latestRoundData()` on Chainlink's proxy (the risk band);
-  - the channel's user list, deposits, and withdrawal and forced-order queues.
+- The executor follows L1's head; each transaction runs against one head (below).
+- Accounts, resting orders and nonces carry over from head to head and from batch to batch.
+- The app reads, with ordinary calls at the current head:
+  - the price, with `latestRoundData()` on Chainlink's proxy (the risk band), recorded per [oracle segment](#oracle-segments-the-batch-price-follows-the-head-too);
+  - the channel's user list, deposits, and withdrawal and forced-order queues, when a batch opens.
 
 **Collateral:**
 - A fill may spend only the trader's balance in the account L1 commits: L1 deposits, minus withdrawals released, plus fills, checked fill by fill in execution order.
@@ -48,16 +48,16 @@ The two paths are separate:
 
 ## Imported L1 accounts: the app executor (`crates/app-executor`)
 
-The app's Solidity can call L1 contracts **at their L1 addresses**, e.g. `AggregatorV3Interface(feed).latestRoundData()`, and run their real code against L1 state at the executor's pin. The executor is revm over two layers, served over standard JSON-RPC:
+The app's Solidity can call L1 contracts **at their L1 addresses**, e.g. `AggregatorV3Interface(feed).latestRoundData()`, and run their real code against L1 state at the head the executor has applied. The executor is revm over two layers, served over standard JSON-RPC:
 
-- **Imported accounts** (the addresses the app declares) are L1's at the pin. Balance, nonce, code and storage are fetched on first use with `eth_getProof` (through skim) and verified against the pin's state root. Absence and zero are proven too. Code is fetched separately and must hash to the proven code hash. A value that can't be fetched and verified fails the transaction; it never reads as zero.
+- **Imported accounts** (the addresses the app declares) are L1's at the current head. Balance, nonce, code and storage are fetched on first use with `eth_getProof` (through skim) and verified against that head's state root. Absence and zero are proven too. Code is fetched separately and must hash to the proven code hash. A value that can't be fetched and verified fails the transaction; it never reads as zero.
 - **Every other address is app-local** and starts empty, whatever it holds on L1. A contract the app didn't import is empty here, so a call into it reverts. L1 ETH balances are never spendable on the app.
 
 **Write rules, enforced when the write is attempted:**
 
 | Attempt | Result |
 |---|---|
-| `SSTORE` into an imported account's storage (the frame's storage context, so through a proxy it's the proxy's storage) where L1's value at the pin is proven **non-zero** | The frame reverts: `L1SlotProtected(account, slot)` |
+| `SSTORE` into an imported account's storage (the frame's storage context, so through a proxy it's the proxy's storage) where L1's value at the head is proven **non-zero** | The frame reverts: `L1SlotProtected(account, slot)` |
 | The same where L1's value is proven **zero** | Written to the app's overlay. Later writes are checked against L1's value, not the overlay's |
 | The same where L1's value can't be fetched and verified | The whole transaction fails |
 | Any write under `STATICCALL` | Refused by the EVM, as anywhere |
@@ -82,9 +82,9 @@ The final state diff is re-checked before commit as well.
 
 **Execution environment.** Imported code runs against L1 storage, but `block.*`, `msg.sender`, gas and anything in the overlay are the app's. A call returns what L1 would only for equivalent inputs and context.
 
-**Evidence.** `executor_evidence` returns everything verified at the pin as one canonical witness package: accounts (with code where it ran), slots read, and the zero proofs behind overlay writes.
+**Evidence.** `executor_evidence` returns everything verified at the current head as one canonical witness package: accounts (with code where it ran), slots read, and the zero proofs behind overlay writes.
 
-**Settlement still needs its own check.** L1 can't re-run arbitrary L1 code as of the pin by itself. Options include an app-specific adapter that verifies the semantics the app used, witness-backed execution, an interactive fault proof, or EXECUTE. The executor supplies evidence; it doesn't make any of them unnecessary.
+**Settlement still needs its own check.** L1 can't re-run arbitrary L1 code as of a past head by itself. Options include an app-specific adapter that verifies the semantics the app used, witness-backed execution, an interactive fault proof, or EXECUTE. The executor supplies evidence; it doesn't make any of them unnecessary.
 
 **Read-only imports** (`--import-readonly`) take no overlay writes at all (`L1ReadOnly`), so what the app reads there is always L1's value. Clearing imports its channel and the feed this way: the price the book uses is exactly what the L1 adapter verifies.
 
@@ -93,8 +93,8 @@ The final state diff is re-checked before commit as well.
 **Fees** are 0 whatever the wallet signed: gas settles nowhere, so no app-local balance is needed to send.
 
 Tests:
-- `npm run e2e-executor`: an anvil L1; 25 checks covering every rule above, a proxy, pin moves, a refused move on conflict, evidence, snapshots, and failing closed.
-- `SKIM_RPC=… npm run live-executor`: an app contract reads Chainlink's ETH/USD through its Sepolia proxy, with the proxy and its aggregator imported. It matches Sepolia at the pin, and so do the slots the L1 adapter verifies at that block. With only the proxy imported, the read reverts.
+- `npm run e2e-executor`: an anvil L1; 26 checks covering every rule above, a proxy, following L1 by itself with the overlay kept, a conflict that stops following without dropping state, evidence, snapshots, and failing closed.
+- `SKIM_RPC=… npm run live-executor`: an app contract reads Chainlink's ETH/USD through its Sepolia proxy, with the proxy and its aggregator imported. It matches Sepolia at the executor's head, and so do the slots the L1 adapter verifies at that block. With only the proxy imported, the read reverts.
 - `npm run e2e-subscription` and `SKIM_RPC=… SEPOLIA_OPERATOR_KEY=… npm run live-subscription`: act at H, change the L1 dependency, act again. The executor is at the new block by itself, with no pin, sync or restart. The second action sees the new value, app state is kept, and in clearing, the batch gains a second oracle segment that L1 verifies. Results: [subscription](../experiments/subscription.md).
 
 ## Oracle segments: the batch price follows the head too
@@ -113,7 +113,7 @@ The batch opens with segment 0. When a fill executes at a newer head and the fee
 
 ## The price on L1: `ChainlinkAdapter`
 
-The executor's `latestRoundData()` call runs Chainlink's code at the pin; L1 can't re-run that as of a past block. So each session's price is checked on L1 by an **app-specific adapter**, scoped to the feed it was configured for (`contracts/src/clearing/ChainlinkAdapter.sol`). At proposal it verifies, from proofs at the batch's anchor (the executor's pin):
+The executor's `latestRoundData()` call runs Chainlink's code at a head; L1 can't re-run that as of a past block. So each session's price is checked on L1 by an **app-specific adapter**, scoped to the feed it was configured for (`contracts/src/clearing/ChainlinkAdapter.sol`). At proposal it verifies, for each segment, from proofs at the segment's anchor (the head the book read the feed at):
 
 | Check | Rule |
 |---|---|
@@ -135,7 +135,7 @@ The verified prices are committed with the pending batch, and `challengeFill` ju
   - L1 records an anchor only once a later block exists, so `propose` waits for the next L1 block.
 - **stateReady vs proofReady.**
   - `value()` is a node's answer: on skim, a tracked key kept current from block access lists. Previews only.
-  - `witness()` returns proofs at the exact block hash (the price witness for L1's adapter). The executor fetches and verifies everything else it reads at the pin itself.
+  - `witness()` returns proofs at the exact block hash (the price witness for L1's adapter). The executor proves everything else it reads at its head itself.
 - **Batch lifecycle (`ts/runtime/batches.ts`):**
   - States: `open → sealed → proposed → finalized | discarded`.
   - Each batch records the L1 proposal tx and block, its opening state, its prepared proofs, and every action with its outcome.
@@ -148,7 +148,7 @@ The verified prices are committed with the pending batch, and `challengeFill` ju
   1. Start at the **earliest** affected batch, so later batches that spent its results are included.
   2. Take a new snapshot and **fetch its proofs first**. If that fails (`proof-unavailable`), nothing changes.
   3. Record the intent in the journal.
-  4. Roll the executor back to the batch's checkpoint, or rebuild a lost executor. A rebuild never re-executes at an old block: it adopts L1's finalized leaves, plus the pending proposal's leaves (from the journal, or from its calldata on L1), checked against L1's pending root.
+  4. Roll the executor back to the batch's checkpoint (`evm_revert`), or rebuild a lost executor. A rebuild never re-executes at an old block: it adopts L1's finalized leaves, plus the pending proposal's leaves (from the journal, or from its calldata on L1), checked against L1's pending root.
   5. Replay **only accepted actions** into one batch on the new snapshot.
   - Actions that no longer hold are reported as `dropped`.
   - Actions rejected before are reported as `notRetried` and never retried. Re-matching resting orders is a separate, explicit step.
@@ -156,8 +156,8 @@ The verified prices are committed with the pending batch, and `challengeFill` ju
 
 ## Evidence retention (`ts/runtime/evidence.ts`)
 
-- **What's pinned:** each batch's proofs, raw header included, kept apart from any cache until L1 finalizes the batch.
-- **Not needed for safety:** clearing's L1 price is verified when the batch is proposed, and every fill and leaf is in calldata. The pinned proofs are what replay and recovery use.
+- **What's retained:** each batch's proofs, raw header included, kept apart from any cache until L1 finalizes the batch.
+- **Not needed for safety:** clearing's L1 price is verified when the batch is proposed, and every fill and leaf is in calldata. The retained proofs are what replay and recovery use.
 - **Prediction rounds** use the same store for resolution witnesses ([details](../experiments/prediction-review-fixes.md#a4-losing-the-resolution-witness)).
 
 ## Withdrawals, forced orders, handover
@@ -225,7 +225,7 @@ The app network serves the same JSON-RPC as other L2s, so MetaMask, Rabby, viem 
 | Balance | `eth_getBalance` is the account's ETH **in the channel**: what the user can trade or withdraw |
 | Fees | 0 (`eth_gasPrice`, `eth_maxPriorityFeePerGas`, base fee). Gas on the app network settles nowhere; L1 costs are the operator's |
 | Writes | `eth_sendRawTransaction` only: an ordinary signed transaction, to `ClearingBook`, calling `submitOrder` (the sender's own order) or `cancel`, with no value, on this chain, and only if it succeeds in simulation |
-| Refused | Other contracts and functions (e.g. `fill`, operator-only), value transfers, deployments, `eth_sendTransaction` / `eth_sign*` (the node holds no keys), and the executor's debug and cheat methods (`anvil_*`, `evm_*`, `debug_*`, …), each with a standard JSON-RPC error |
+| Refused | Other contracts and functions (e.g. `fill`, operator-only), value transfers, deployments, `eth_sendTransaction` / `eth_sign*` (the node holds no keys), and the executor's control and debug methods (`executor_*`, `evm_*`, `debug_*`, …), each with a standard JSON-RPC error |
 | App methods | `clearing_account(address)` (pending and finalized), `clearing_order(hash)`, `clearing_batches()` |
 
 **Placing an order takes two wallet actions:**
@@ -243,19 +243,22 @@ The typed signature is what L1 checks in a dispute.
 - **Matching guarantees:** a forced order must be published, but nothing forces it to be matched.
 - **Resting orders that were never published** are lost when the operator changes.
 - **Partial fills, more than two assets, blob DA.**
-- **A production executor.** The executor is an anvil process; any EVM would do, since L1 doesn't trust it.
+- **Authenticated state-ready updates.** The follower re-proves its working set at every head (one `eth_getProof` per account), because skim doesn't serve full block access lists to check the stream's changes against ([subscription](../experiments/subscription.md)).
+- **A general L1 check of imported calls.** Only Chainlink's `latestRoundData` has an L1 adapter.
 
 ## Run it
 
 ```console
 $ cd contracts && forge build && forge test --match-path 'test/clearing/*'
-$ cargo build -p channel-runner
+$ cargo build -p channel-runner -p app-executor
 $ cd ts && npm run e2e-clearing                          # deterministic: anvil L1 + local executors
 $ cd ts && npm run e2e-sessions                          # close a session, delete everything, start the next
+$ cd ts && npm run e2e-executor                          # the executor's write rules and following
+$ cd ts && npm run e2e-subscription                      # act at H, change L1, act at H+1 with no pin
 $ SKIM_RPC=http://127.0.0.1:18545 npm run live-executor  # live: the real Sepolia feed through skim
 ```
 
-A wallet connects to the gateway's URL (`new Gateway(operator, port)`; the e2e serves one on `127.0.0.1:18695` while it runs). The executor behind it must not be reachable directly: it has cheat methods.
+A wallet connects to the gateway's URL (`new Gateway(operator, port)`; the e2e serves one on `127.0.0.1:18695` while it runs). The executor behind it must not be reachable directly: it has control methods (`executor_pin`, `evm_revert`, …).
 
 ## Try it in a browser: the devnet (`ts/devnet.ts`)
 
@@ -277,12 +280,12 @@ One server on `:8787` runs:
 | L1 | anvil (chain 900) | Sepolia, every read and write through skim |
 | Price | A feed with Chainlink's layout (an aggregator behind a proxy), priced from the page; it re-transmits hourly like a heartbeat | Chainlink's real ETH/USD feed on Sepolia |
 | Settlement | On the local chain; “+1 hour” skips challenge windows | On Sepolia, in real time |
-| Sessions | One per run (chains reset) | The vault and infrastructure are deployed once (`~/.skim-devnet/sepolia.json`). Each start opens a new session and closes the previous one; its users redeem or roll over |
+| Sessions | One per run (chains reset) | The vault, the session code and the infrastructure are deployed once (`~/.skim-devnet/sepolia.json`). A restart resumes the active session from its journal on a fresh executor. `NEW_SESSION=1` opens a new proxy session (~0.5M gas) and closes the previous one; its users redeem or roll over |
 
 The page says which one it is. It shows the path from the feed to each fill:
-- the executor's pinned block;
+- the L1 head the executor is at;
 - the accounts it imported, with their code;
-- the price each batch used and the witness L1's adapter checks;
+- each batch's oracle segments and the witnesses L1's adapter checks;
 - every fill's distance from that price.
 
 `npm run devnet-smoke [URL]` runs a fresh wallet through faucet, deposit, a fill, a withdrawal and a claim.

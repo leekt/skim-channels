@@ -245,11 +245,11 @@
           <div class="vals" id="c2"></div></div></li>
         <li><span class="no">3</span><div>
           <strong>The app executor calls the feed at its L1 address</strong>
-          <div class="what">The proxy and aggregator (and the channel) are imported read-only: their real code runs against L1 storage at the executor's pinned block, every value fetched with a proof and checked against that block's state root. Nothing is copied or relayed.</div>
+          <div class="what">The proxy and aggregator (and the channel) are imported read-only: their real code runs against L1 storage at the head the executor follows, every value proven against that head's state root. The executor moves to each new head by itself. Nothing is copied or relayed.</div>
           <div class="vals" id="c3"></div></div></li>
         <li><span class="no">4</span><div>
           <strong>L1 checks the same price when the batch is proposed</strong>
-          <div class="what">The session's ChainlinkAdapter verifies proofs of the slots that call read, at the same block: the proxy's code and its aggregator are the pinned ones, the round is the latest at that block, and it was fresh at that block's time.</div>
+          <div class="what">The session's ChainlinkAdapter verifies proofs of the slots that call read, at the block each oracle segment read it: the proxy's code and its aggregator are the pinned ones, the round is the latest at that block, and it was fresh at that block's time.</div>
           <div class="vals" id="c4"></div></div></li>
         <li><span class="no">5</span><div>
           <strong>Each fill is checked against that price</strong>
@@ -265,7 +265,7 @@
           <dt>ETH/USD</dt><dd id="hPrice">—</dd>
           <dt>Answered</dt><dd id="hAt">—</dd>
         </dl></div>
-        <div class="ds-panel-foot">Batches use the round at their pinned block, checked again on L1.</div>
+        <div class="ds-panel-foot">Batches use the round at the head each fill ran against, checked again on L1.</div>
       </div>
       <div class="ds-panel">
         <div class="ds-panel-head"><h2>The executor's L1 view</h2><span class="ds-meta" id="pinMeta"></span></div>
@@ -357,7 +357,7 @@ if (SEPOLIA) {
   $("pageText").textContent = "Use a normal wallet on Sepolia. Deposit into the session's escrow on Sepolia; orders are signed as typed data and sent as ordinary transactions on the app network. Every batch settles on Sepolia and can be challenged there.";
   $("c1Title").textContent = "Sepolia · Chainlink ETH/USD";
   $("c2Title").textContent = "skim node · Sepolia light client";
-  $("c2What").textContent = "skim follows Sepolia's head; the executor pins a block it serves and fetches every value it reads there with a storage proof.";
+  $("c2What").textContent = "skim follows Sepolia's head and streams each new block to the executor, which proves every value it reads at that head.";
   $("netNote").textContent = "The app switches networks for you before each action. You need a little Sepolia ETH for L1 transactions; the faucet sends some, and test USD.";
 } else {
   $("bannerMark").textContent = "L1";
@@ -368,7 +368,7 @@ if (SEPOLIA) {
   $("pageText").textContent = "Use a normal wallet. Deposits and withdrawals happen on the local L1; orders are signed as typed data and sent as ordinary transactions on the app network. Every batch settles on L1 and can be challenged there.";
   $("c1Title").textContent = "Local L1 · a Chainlink-layout feed";
   $("c2Title").textContent = "The local L1 node";
-  $("c2What").textContent = "The executor pins a recent block and fetches every value it reads there with a storage proof (eth_getProof), checked against that block's state root.";
+  $("c2What").textContent = "The executor follows the head and proves every value it reads there (eth_getProof), checked against that block's state root.";
 }
 const STATE = { open: ["wait", "Open"], sealed: ["wait", "Sealed"], proposed: ["wait", "Challenge window"], finalized: ["done", "Final"], discarded: ["fail", "Discarded"] };
 const chip = (cls, text) => `<span class="chip ${cls}">${esc(text)}</span>`;
@@ -504,12 +504,12 @@ function renderFeed(s) {
   $("bannerMeta").innerHTML = `round ${int(BigInt(f.round) & 0xffffffffn)} · answered ${ago(Number(f.updatedAt))} · L1 block ${blockLink(s.l1Block)}`;
   $("hRound").textContent = int(BigInt(f.round) & 0xffffffffn); $("hPrice").textContent = "$" + dollars(f.price); $("hAt").textContent = ago(Number(f.updatedAt));
   $("c1").innerHTML = `<span><i>proxy</i> ${addrLink(cfg.feed.proxy)}</span><span><i>aggregator</i> ${addrLink(cfg.feed.aggregator)}</span>`
-    + `<span><i>freshness</i> within ${Math.round(cfg.feed.maxStaleness / 3600)} h of the pinned block</span>`;
+    + `<span><i>freshness</i> within ${Math.round(cfg.feed.maxStaleness / 3600)} h of the segment's block</span>`;
   const ex = s.executor;
   if (ex) {
-    $("c2").innerHTML = `<span><i>pinned block</i> ${blockLink(ex.pin.number)}</span><span><i>hash</i> ${short(ex.pin.hash)}</span>`;
-    $("c3").innerHTML = `<span><i>verified at this pin</i> ${ex.accounts.length} accounts, ${ex.slots} slots</span><span><i>evidence</i> ${bytes(ex.evidenceBytes)}</span>`;
-    $("pinMeta").textContent = `pinned at ${int(ex.pin.number)}`;
+    $("c2").innerHTML = `<span><i>executor head</i> ${blockLink(ex.pin.number)}</span><span><i>hash</i> ${short(ex.pin.hash)}</span>`;
+    $("c3").innerHTML = `<span><i>proven at this head</i> ${ex.accounts.length} accounts, ${ex.slots} slots</span><span><i>evidence</i> ${bytes(ex.evidenceBytes)}</span>`;
+    $("pinMeta").textContent = `at L1 block ${int(ex.pin.number)}`;
     const names = { [cfg.feed.proxy.toLowerCase()]: "feed proxy", [cfg.feed.aggregator.toLowerCase()]: "aggregator", [cfg.l1.channel.toLowerCase()]: "channel" };
     $("imports").innerHTML = ex.accounts.map((a) => `<tr><td class="n">${addrLink(a.address)} <span class="muted">${names[a.address.toLowerCase()] ?? "channel (disputes)"}</span></td><td class="n">${bytes(a.codeBytes)}</td></tr>`).join("");
     $("evMeta").textContent = "Read-only imports: no write to them is possible on the app network.";

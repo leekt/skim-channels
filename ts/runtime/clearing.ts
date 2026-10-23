@@ -419,7 +419,7 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
 
   /**
    * Propose batch `no`. Refuses unless its anchor is known canonical and young enough;
-   * `tick()` re-pins a batch that isn't.
+   * `tick()` reopens a batch that isn't at a recent head.
    */
   async propose(no: bigint, opts: { tamper?: (news: Map<number, Account>) => void; label?: string } = {}) {
     const b = this.batch(no);

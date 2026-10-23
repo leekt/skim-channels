@@ -12,7 +12,7 @@
 //             the operator's journal (replayed byte-for-byte on recovery).
 //   refused   everything else: other targets or functions, transfers, deployments,
 //             eth_sendTransaction/eth_sign* (the node holds no keys), and the executor's
-//             debug and cheat methods (anvil_*, evm_*, debug_*, …)
+//             control and debug methods (executor_*, evm_*, debug_*, …)
 //   app       clearing_account(address), clearing_order(hash), clearing_batches()
 //
 // Deposits, withdrawals and forced orders are L1 transactions: the wallet sends them to L1.

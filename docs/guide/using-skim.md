@@ -23,16 +23,16 @@ On Sepolia (see [M1 live skim](../experiments/m1-live-skim.md)):
 - witnesses for WETH (account, code, two slots) were collected at those exact roots, ~13 KB each, in ~1 s;
 - a ~19-minute-old finalized root was still served.
 
-## Used by the stateful runtime (`ts/runtime/l1view.ts`)
+## Used by the stateful runtime (`crates/app-executor`, `ts/runtime/l1view.ts`)
 
 The clearing app ([stateful runtime](stateful-runtime.md)) also uses:
 
 | Need | skim feature |
 |---|---|
-| Which watched contracts changed, block by block, and rewinds after reorgs | `skim_streamNext` with `bal: {addresses}` (state changes from block access lists); `rewind` events |
-| A batch's single snapshot | `eth_getBlockByNumber("safe")` (or `finalized`, or N confirmations): one block, then every read names its hash |
+| Following L1: wake on each applied block, rewinds and gaps | `skim_streamNext` with `bal: {addresses}` (the imported accounts), cursor kept on disk by the app executor. Its state changes are cross-checked against proofs, never executed on |
+| One head per execution | The executor proves its working set at each new head (`eth_getProof` per account) and adopts it atomically; the runtime's `l1view` snapshots (`latest`, `safe`, `finalized`, N confirmations) pick the block it scans events to |
 | Previews (state-ready) | `eth_getStorageAt` at `{blockHash}`; on skim a tracked key is kept current from BALs. Never an execution input |
-| Execution inputs (proof-ready) | `eth_getProof` at `{blockHash}`, verified again by the app executor (`crates/app-executor`), and by L1's price adapter for the batch price |
+| Execution inputs (proof-ready) | `eth_getProof` at `{blockHash}`, verified by the app executor against the head's state root, and by L1's price adapter for each oracle segment's price |
 
 Measured live on Sepolia: [clearing runtime](../experiments/clearing.md#verification).
 

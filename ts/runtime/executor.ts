@@ -45,7 +45,7 @@ export class Chain {
 
   /**
    * The app network's executor (crates/app-executor): app state over the imported L1 accounts,
-   * read lazily from `l1` at the pin with proofs. Every other address is app-local.
+   * read lazily from `l1` with proofs at the head it follows. Every other address is app-local.
    */
   static async appExecutor(root: string, port: number, chainId: number, l1: string, o: { imports?: Address[]; readonly?: Address[]; pin?: string; alloc?: [Address, bigint][]; follow?: string; stateDir?: string }): Promise<Chain> {
     const { imports = [], readonly = [], pin = "latest", alloc = [], follow = "latest", stateDir } = o;

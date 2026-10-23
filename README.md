@@ -54,9 +54,9 @@ Three pieces arrived at once:
 
 | | Where it lives | Lifetime |
 |---|---|---|
-| L1 reads | Calls into imported L1 contracts at their L1 addresses, at the executor's pin; every value proven (`crates/app-executor`) | Per pin (moves forward; app state is kept) |
-| AppState (accounts, book, nonces) | `ClearingBook` on a local executor, which L1 doesn't trust | Across batches and L1 snapshots |
-| Escrow, the account root, queues, payouts | L1 `ClearingChannel` (optimistic; one-transaction challenges per fill or account) | Permanent |
+| L1 reads | Calls into imported L1 contracts at their L1 addresses, at the head the executor follows (skim's stream); every value proven at that head (`crates/app-executor`) | Per execution: one head each; the next execution sees the newer head |
+| AppState (accounts, book, nonces) | `ClearingBook` on the app executor, which L1 doesn't trust | Across L1 heads and batches, for one session |
+| Escrow, the account root, queues, payouts | L1: a session (`ClearingChannel` + `ClearingDisputes` behind a minimal proxy; optimistic, one-transaction challenges per fill or account), opened by the app's `ClearingVault` | Until the session closes and users redeem or roll over |
 
 **Lifecycle:** open and fund on L1 → preview against newer anchors as L1 changes (no reopen) → every participant signs one final request → it executes on L2 → L1 accepts the L2 block (re-execution) → the receipt is proven and the channel settles once. Without settlement by the deadline, anyone can refund. If the operator is gone, anyone can start the [emergency exit](docs/guide/stage-2.md).
 
@@ -70,7 +70,7 @@ Three pieces arrived at once:
 | **Settlement cost** | L1 `settle` 320k gas (1-tx L2 block) → ~396k (127 or 255 txs); `settleFromBlock` 281k vs. 315k per channel (forge, two in one block); evidence 2.5–3.5 KB ([log](docs/experiments/m4-settlement-cost.md)) |
 | **Native verification cost** | ~16M gas per L2 block (the gas limit is charged even for empty blocks): **not cheaper than L1**, see [app channels](docs/guide/app-channels.md) |
 | **App channels (accounting, mock verifier)** | Operator gone before or after checkpoints: every right rebuilt from L1 events and calldata alone and claimed; the vault drains exactly; the one-day fence holds ([log](docs/experiments/app-channels-accounting.md)) |
-| **Stateful clearing** | One app's Solidity state carried across L1 snapshots on a local executor; optimistic settlement with the account root on L1: 14.6k gas per fill (dense) vs 45.5k for the same batch fully verified at once and 67.4k as one L1 transaction per fill. Multi-batch reorg recovery, proofs fetched before rollback, handover from L1 data alone, forced orders and freeze. Live reads through skim on Sepolia ([log](docs/experiments/clearing.md)) |
+| **Stateful clearing** | One app's Solidity state carried across L1 heads on an executor that follows skim's stream, with the oracle price in per-round segments; optimistic settlement with the account root on L1: 14.6k gas per fill (dense) vs 45.5k for the same batch fully verified at once and 67.4k as one L1 transaction per fill. Multi-batch reorg recovery, proofs fetched before rollback, handover from L1 data alone, forced orders and freeze; disposable sessions as ~0.5M-gas proxies. Live following through skim, and a devnet that settles on Sepolia ([log](docs/experiments/clearing.md)) |
 | **Prediction rounds** | Optimistic rounds, about 4–15× cheaper per user than the same game on L1 at 100 users. Review fixes for challenge periods, request coverage, deadlines and witness loss ([cost](docs/experiments/prediction-round-cost.md), [fixes](docs/experiments/prediction-review-fixes.md)) |
 | **Correctness** | Rust, Solidity and TypeScript suites (`scripts/check.sh`); every security check mutation-checked (removing it makes a named test fail) |
 
@@ -87,10 +87,10 @@ Three pieces arrived at once:
 | `contracts/src/verifiers` | `WitnessVerifier`, `ReceiptVerifier`, `ExecuteVerifier` (EXECUTE), `ProofDependencyVerifier` (EIP-8288 adapter, not deployable yet) |
 | `crates/channel-app` | App channels: exit/credit trees, the reference ledger (mock prover), net diffs, recovery from L1 data |
 | `contracts/src/app` | `AppChannelVault`, `AppLeaves`, `IAppCheckpointVerifier`, `MockAppCheckpointVerifier` (labeled mock) |
-| `contracts/src/predict`, `contracts/src/clearing` | Prediction rounds (optimistic); clearing (`ClearingBook` on the app executor; `ClearingChannel` + `ClearingDisputes` + `ClearingCodec` on L1, `ChainlinkAdapter` for the price, `ClearingVault` across sessions; `ClearingLedger` shared; cost controls `ClearingDirectBatch`, `ClearingL1`) |
-| `ts/runtime` | The stateful runtime: `L1ReadView` (skim snapshots, readiness, rewinds), executor checkpoints, the batch journal and recovery engine, the clearing operator, the evidence store |
-| `ts/` | viem cross-checks of every commitment; `e2e.ts` (two anvil chains), `e2e-native.ts` (ethrex), `e2e-app.ts` (app-channel recovery), `e2e-predict.ts`, `e2e-clearing.ts`, `e2e-sessions.ts`, `e2e-executor.ts`, `live-executor.ts` (needs `SKIM_RPC`), `devnet.ts` |
-| `crates/app-executor` | The app network's EVM (revm): app state over imported L1 accounts, read lazily with proofs at a pinned block; write rules; standard JSON-RPC |
+| `contracts/src/predict`, `contracts/src/clearing` | Prediction rounds (optimistic); clearing (`ClearingBook` on the app executor; on L1, `ClearingVault` opening sessions as `Clone1167` proxies of `ClearingChannel` + `ClearingDisputes`, `ClearingCodec`, and `ChainlinkAdapter` for each segment's price; `ClearingLedger` shared; cost controls `ClearingDirectBatch`, `ClearingL1`) |
+| `ts/runtime` | The stateful runtime: the clearing operator, the batch journal and recovery engine, executor checkpoints, the wallet gateway, `L1ReadView` (snapshots, price witnesses, canonical checks), the evidence store, session recovery packages |
+| `ts/` | viem cross-checks of every commitment; `e2e.ts` (two anvil chains), `e2e-native.ts` (ethrex), `e2e-app.ts` (app-channel recovery), `e2e-predict.ts`, `e2e-clearing.ts`, `e2e-sessions.ts`, `e2e-executor.ts`, `e2e-subscription.ts`, `live-executor.ts` and `live-subscription.ts` (need `SKIM_RPC`), `devnet.ts` |
+| `crates/app-executor` | The app network's EVM (revm): app state over imported L1 accounts, following L1's head through skim's stream and proving its working set at each head; write rules; standard JSON-RPC |
 
 ## Quick start
 

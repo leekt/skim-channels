@@ -4,7 +4,7 @@
 
 ## The question
 
-The app executor reads the price with `latestRoundData()` at its pinned block H. Today L1 re-checks that price from storage proofs at H. Could L1 instead check the specific round the executor used, by calling Chainlink's proxy at proposal time: `getRoundData(roundId)`?
+The app executor reads the price with `latestRoundData()` at the head H it has applied. Today L1 re-checks that price from storage proofs at H. Could L1 instead check the specific round the executor used, by calling Chainlink's proxy at proposal time: `getRoundData(roundId)`?
 
 ## What the current check costs
 

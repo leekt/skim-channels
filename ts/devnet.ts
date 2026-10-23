@@ -9,16 +9,16 @@
 //
 // Either way:
 //   app       crates/app-executor (chain 7001, fees 0): ClearingBook reads the channel and the
-//             feed at their L1 addresses (imported read-only, verified at the pin), behind the
+//             feed at their L1 addresses (imported read-only, proven at the L1 head it follows), behind the
 //             standard JSON-RPC gateway (runtime/gateway.ts) wallets connect to
 //   operator  a loop: open batches, match, seal, propose (with the price witness L1's
-//             ChainlinkAdapter checks), finalize, re-pin when idle (no L1 transaction)
+//             ChainlinkAdapter checks), finalize; an idle batch reopens at the current head (no L1 transaction)
 //   maker     a bot that answers any user order inside the band, so one person can trade
 //   sessions  on Sepolia, the app's vault and infrastructure are deployed once
 //             (~/.skim-devnet/sepolia.json). A restart resumes the active session from its
 //             journal (on disk) on a fresh executor. NEW_SESSION=1 opens a new session and closes
 //             the previous one, whose users then redeem or roll over (docs/guide/stateful-runtime.md).
-//             Under Amsterdam's code pricing a session costs ~36M gas to deploy, so rotate on purpose.
+//             A session is a minimal proxy of session code deployed once (~0.5M gas to open).
 //
 // One HTTP server (default :8787) serves the test app, /rpc/l1 (filtered), /rpc/app (the
 // gateway) and /api/*. Expose it with `tailscale serve --bg 8787`.
@@ -264,12 +264,12 @@ async function main() {
       } catch { /* not ours */ }
     }
   }
-  /** The feed now, as any L1 caller sees it (latest block; batches use their pinned block). */
+  /** The feed now, as any L1 caller sees it (latest block; batches record the head of each oracle segment). */
   async function feedNow() {
     const [round, ans, , updatedAt] = await l1.read<any[]>(feedProxy, "latestRoundData");
     return { round: BigInt(round), price: BigInt(ans) / 100n, updatedAt: BigInt(updatedAt) };
   }
-  /** The open batch's price (what the maker quotes against): the one the book pinned. */
+  /** The open batch's price (what the maker quotes against): its latest segment's. */
   async function price() {
     const cur = A.batches.length ? A.current : undefined;
     if (cur) {
@@ -279,7 +279,7 @@ async function main() {
     return (await feedNow()).price;
   }
 
-  // Per batch: the L1 block it pinned, the price it used there, and every fill against it.
+  // Per batch: its latest segment's L1 block and price, and every fill.
   async function batchView(b: (typeof A.batches)[number]) {
     const [anchorBlock, anchorTime, p] = await ex.read<any[]>(book, "batchInfo", [BigInt(b.no)]).catch(() => [0n, 0n, 0n]);
     const prep = b.prepared as any;
@@ -380,7 +380,7 @@ async function main() {
       at_("maker"); await makeMarket();
       learn();
       at_("match"); await match();
-      // Seal every 15 s when something happened; idle batches only re-pin the executor (no L1 tx).
+      // Seal every 15 s when something happened; idle batches only reopen at the current head (no L1 tx).
       const cur = A.current;
       const pr = cur.prepared as any;
       const did = cur.log.length > 0 || (pr.depositUsers?.length ?? 0) > 0 || (pr.requests ?? 0) > 0 || (pr.forced?.orders?.length ?? 0) > 0;

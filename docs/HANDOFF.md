@@ -34,29 +34,32 @@ governance, forced inclusion). Read first: [PROJECT](../PROJECT.md) (spec v0.1),
 
 ## Stateful clearing (2026-10-23)
 - **Model:** [stateful runtime](guide/stateful-runtime.md).
-  - **L1ReadView:** skim snapshots, state-ready vs proof-ready, rewinds.
-  - **AppState:** `ClearingBook`, Solidity on a local executor that L1 doesn't trust.
+  - **L1 reads:** the app executor follows L1's head through `skim_streamNext` (durable cursor), proves its working set at each head, and runs every execution against one head; app state and overlays carry across heads ([subscription](experiments/subscription.md)).
+  - **AppState:** `ClearingBook`, Solidity on the app executor that L1 doesn't trust. Its price is kept in oracle segments, one per feed round seen during a batch.
+  - **Sessions:** a `ClearingVault` per app opens disposable sessions as minimal proxies (~0.5M gas); Active → Closing → Closed, then users redeem or roll over alone ([sessions](experiments/sessions.md)).
   - **L1 settlement:** `ClearingChannel`. Optimistic, with the account root on L1 and one-transaction challenges per fill or account that replay the shared `ClearingLedger`.
 - **Built:**
   - `contracts/src/clearing`;
-  - `ts/runtime/{l1view,executor,batches,clearing,evidence,tree}.ts`;
-  - `crates/app-executor` (the app network's EVM over imported L1 accounts);
-  - `ts/e2e-clearing.ts`, `ts/e2e-sessions.ts`, `ts/e2e-executor.ts` (deterministic, in CI);
-  - `ts/live-executor.ts` (`SKIM_RPC`, not in CI).
+  - `ts/runtime/{clearing,batches,executor,gateway,l1view,evidence,recovery,tree}.ts`;
+  - `crates/app-executor` (revm over imported L1 accounts, following skim's stream);
+  - `ts/e2e-clearing.ts`, `ts/e2e-sessions.ts`, `ts/e2e-executor.ts`, `ts/e2e-subscription.ts` (deterministic, in CI);
+  - `ts/live-executor.ts`, `ts/live-subscription.ts` (`SKIM_RPC`, not in CI);
+  - `ts/devnet.ts` (local or Sepolia, with a wallet-facing test app).
 - **Runtime recovery** (review of 5db7064):
   - a journal on disk with batch states;
   - recovery from the earliest affected batch, with proofs fetched before rollback;
   - only accepted actions replayed;
   - canonical / orphaned / unknown, with skim rewinds consumed by `tick()`;
-  - anchors re-pinned when they age;
+  - aged batches reopened at a recent head;
   - a lost executor rebuilt from L1 plus the journal.
-- **Verified:** 31 forge tests and 40 mutants (one equivalent); an e2e covering reorg, recovery, handover and freeze; live skim reads. Results and costs: [clearing](experiments/clearing.md).
+- **Verified:** 61 clearing forge tests (40 mutants caught before sessions and segments, one equivalent); e2e runs covering reorg, recovery, handover, freeze, sessions and following; live reads and following through skim on Sepolia; the Sepolia devnet proposes batches through skim. Results and costs: [clearing](experiments/clearing.md).
 - **Cost:** 14.6k gas per fill dense vs 45.5k for the same batch fully verified at once vs 67.4k as one L1 transaction per fill. When every account trades once per batch, about break-even with per-transaction L1.
 - **Open:**
   - matching isn't forced;
   - unpublished resting orders are lost on handover;
   - discarded-proposal recovery isn't automatic;
-  - no live settlement through skim yet.
+  - the follower re-proves its working set each block (no authenticated access lists from skim);
+  - only Chainlink's `latestRoundData` has an L1 adapter.
 
 ## Baseline
 - **skim** `df686b70cd567210860582097e25a3f8b3fe6616`, used over JSON-RPC with no crate
