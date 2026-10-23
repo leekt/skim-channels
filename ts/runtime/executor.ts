@@ -43,6 +43,24 @@ export class Chain {
     return c;
   }
 
+  /**
+   * The app network's executor (crates/app-executor): app state over the imported L1 accounts,
+   * read lazily from `l1` at the pin with proofs. Every other address is app-local.
+   */
+  static async appExecutor(root: string, port: number, chainId: number, l1: string, imports: Address[], pin = "latest", alloc: [Address, bigint][] = []): Promise<Chain> {
+    const c = new Chain(`http://127.0.0.1:${port}`, chainId);
+    const busy = await fetch(c.url, { method: "POST", headers: { "content-type": "application/json" }, body: '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' })
+      .then(() => true, () => false);
+    if (busy) throw new Error(`port ${port} is already serving JSON-RPC: stop that node first`);
+    const args = ["--l1", l1, "--chain-id", `${chainId}`, "--port", `${port}`, "--pin", pin, ...imports.flatMap((a) => ["--import", a]), ...alloc.flatMap(([a, w]) => ["--alloc", `${a}=${w}`])];
+    c.proc = spawn(`${root}target/debug/app-executor`, args, { stdio: ["ignore", "ignore", "inherit"] });
+    for (let i = 0; i < 100; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      if (await fetch(c.url, { method: "POST", headers: { "content-type": "application/json" }, body: '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' }).then(() => true, () => false)) return c;
+    }
+    throw new Error("app-executor did not start");
+  }
+
   stop() {
     this.proc?.kill();
   }

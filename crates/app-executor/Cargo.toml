@@ -1,0 +1,28 @@
+[package]
+name = "app-executor"
+description = "The app network's EVM: app state over imported L1 accounts, read lazily with proofs at a pinned block"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "app-executor"
+path = "src/main.rs"
+
+[dependencies]
+channel-types.workspace = true
+channel-witness.workspace = true
+channel-runner = { path = "../channel-runner" }
+alloy-primitives.workspace = true
+alloy-rlp.workspace = true
+alloy-consensus = { workspace = true, features = ["k256"] }
+alloy-eips.workspace = true
+alloy-sol-types.workspace = true
+# Same revm and features as skim df686b7 (its eth_call engine).
+revm = { version = "43.0.3", default-features = false, features = ["std", "dev", "optional_fee_charge", "secp256k1", "blst", "c-kzg", "asm-keccak"] }
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

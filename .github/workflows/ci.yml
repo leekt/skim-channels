@@ -71,7 +71,7 @@ jobs:
           node-version: 23
       - name: Build
         run: |
-          cargo build -p channel-runner --locked
+          cargo build -p channel-runner -p app-executor --locked
           (cd contracts && forge build)
       - name: Encodings (viem)
         working-directory: ts
@@ -88,3 +88,6 @@ jobs:
       - name: e2e stateful clearing (optimistic settlement, recovery, handover, forced orders)
         working-directory: ts
         run: npm run -s e2e-clearing
+      - name: e2e app executor (imported L1 accounts, write rules, pin moves)
+        working-directory: ts
+        run: npm run -s e2e-executor

@@ -11,7 +11,9 @@
     "e2e-clearing": "node --experimental-strip-types e2e-clearing.ts",
     "live-skim": "node --experimental-strip-types live-skim-clearing.ts",
     "devnet": "node --experimental-strip-types devnet.ts",
-    "devnet-smoke": "node --experimental-strip-types devnet-smoke.ts"
+    "devnet-smoke": "node --experimental-strip-types devnet-smoke.ts",
+    "e2e-executor": "node --experimental-strip-types e2e-executor.ts",
+    "live-executor": "node --experimental-strip-types live-executor.ts"
   },
   "dependencies": {
     "viem": "2.30.0"

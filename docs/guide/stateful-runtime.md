@@ -47,6 +47,43 @@ The two paths are separate:
   - `ClearingBook.adopt` rebuilds AppState from L1 data alone and checks it against L1's root.
   - Users can always leave through the withdrawal queue, or freeze and exit.
 
+## Imported L1 accounts: the app executor (`crates/app-executor`)
+
+The app's Solidity can call L1 contracts **at their L1 addresses**, e.g. `AggregatorV3Interface(feed).latestRoundData()`, and run their real code against L1 state at the executor's pin. The executor is revm over two layers, served over standard JSON-RPC:
+
+- **Imported accounts** (the addresses the app declares) are L1's at the pin. Balance, nonce, code and storage are fetched on first use with `eth_getProof` (through skim) and verified against the pin's state root. Absence and zero are proven too. Code is fetched separately and must hash to the proven code hash. A value that can't be fetched and verified fails the transaction; it never reads as zero.
+- **Every other address is app-local** and starts empty, whatever it holds on L1. A contract the app didn't import is empty here, so a call into it reverts. L1 ETH balances are never spendable on the app.
+
+**Write rules, enforced when the write is attempted:**
+
+| Attempt | Result |
+|---|---|
+| `SSTORE` into an imported account's storage (the frame's storage context, so through a proxy it's the proxy's storage) where L1's value at the pin is proven **non-zero** | The frame reverts: `L1SlotProtected(account, slot)` |
+| The same where L1's value is proven **zero** | Written to the app's overlay. Later writes are checked against L1's value, not the overlay's |
+| The same where L1's value can't be fetched and verified | The whole transaction fails |
+| Any write under `STATICCALL` | Refused by the EVM, as anywhere |
+| ETH sent from or to an imported account; `CREATE` by one; `SELFDESTRUCT` of or to one | Reverts: `L1AccountProtected(account)` |
+| A transaction signed by an imported account | Refused (its nonce is L1's) |
+
+The final state diff is re-checked before commit as well.
+
+**Zero isn't "unused".** A zero flag or mapping entry can matter to an L1 contract. An overlay write there makes the app's copy differ from L1 on purpose.
+
+**Moving the pin** (`executor_pin(tag | number | hash)`):
+- All app state is kept.
+- An overlay slot whose L1 value is still zero at the new pin is kept.
+- If L1 now holds a value at an overlay slot, the move is **refused** and the conflict is reported. The previous pin and all state stay as they were. Nothing is dropped implicitly. A later explicit rebase or termination policy can resolve conflicts.
+
+**Execution environment.** Imported code runs against L1 storage, but `block.*`, `msg.sender`, gas and anything in the overlay are the app's. A call returns what L1 would only for equivalent inputs and context.
+
+**Evidence.** `executor_evidence` returns everything verified at the pin as one canonical witness package: accounts (with code where it ran), slots read, and the zero proofs behind overlay writes.
+
+**Settlement still needs its own check.** L1 can't re-run arbitrary L1 code as of the pin by itself. Options include an app-specific adapter that verifies the semantics the app used, witness-backed execution, an interactive fault proof, or EXECUTE. The executor supplies evidence; it doesn't make any of them unnecessary.
+
+Tests:
+- `npm run e2e-executor`: an anvil L1; 24 checks covering every rule above, a proxy, pin moves, a refused move on conflict, evidence, snapshots, and failing closed.
+- `SKIM_RPC=… npm run live-executor`: an app contract reads Chainlink's ETH/USD through its Sepolia proxy, with the proxy and its aggregator imported. It matches Sepolia at the pin. With only the proxy imported, the read reverts.
+
 ## Snapshots, readiness, reorgs and recovery
 
 - **One snapshot per batch.**
