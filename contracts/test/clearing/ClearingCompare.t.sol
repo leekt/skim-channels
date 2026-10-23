@@ -11,6 +11,7 @@ import {ClearingChannel} from "../../src/clearing/ClearingChannel.sol";
 import {ClearingDisputes} from "../../src/clearing/ClearingDisputes.sol";
 import {ClearingStorage, IERC20Lite} from "../../src/clearing/ClearingStorage.sol";
 import {ClearingCodec} from "../../src/clearing/ClearingCodec.sol";
+import {Clone1167} from "../../src/clearing/Clone1167.sol";
 import {ClearingChecker} from "../../src/clearing/ClearingChecker.sol";
 import {ClearingL1, IPriceFeed} from "../../src/clearing/ClearingL1.sol";
 import {ClearingDirectBatch} from "../../src/clearing/ClearingDirectBatch.sol";
@@ -57,25 +58,24 @@ contract ClearingCompareTest is Test {
         vm.roll(200);
         vm.setBlockhash(101, keccak256(raw1));
         anchors.record(raw1);
-        chn = new ClearingChannel(
-            new ClearingDisputes(
-                ClearingStorage.Config({
-                    operator: op,
-                    usd: IERC20Lite(address(usd)),
-                    anchors: anchors,
-                    codec: codec,
-                    priceAdapter: new SlotPriceAdapter(oracle, bytes32(0)),
-                    bandBps: 100,
-                    challengeWindow: 1 hours,
-                    forceDelay: 1 days,
-                    maxAnchorAge: 8191,
-                    minBond: 1 ether,
-                    takeoverDelay: 2 days,
-                    appChainId: 7001,
-                    vault: address(0),
-                    sessionId: 1
-                })
-            )
+        chn = ClearingChannel(Clone1167.clone(address(new ClearingChannel(new ClearingDisputes()))));
+        chn.initialize(
+            ClearingStorage.Config({
+                operator: op,
+                usd: IERC20Lite(address(usd)),
+                anchors: anchors,
+                codec: codec,
+                priceAdapter: new SlotPriceAdapter(oracle, bytes32(0)),
+                bandBps: 100,
+                challengeWindow: 1 hours,
+                forceDelay: 1 days,
+                maxAnchorAge: 8191,
+                minBond: 1 ether,
+                takeoverDelay: 2 days,
+                appChainId: 7001,
+                vault: address(0),
+                sessionId: 1
+            })
         );
         D = ClearingDisputes(address(chn));
         feed = address(new AllocationFixture(7000)); // the direct-L1 baseline reads the feed itself

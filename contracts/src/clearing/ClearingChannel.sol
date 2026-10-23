@@ -38,8 +38,15 @@ import {SparseTree16} from "../predict/SparseTree16.sol";
 contract ClearingChannel is ClearingStorage {
     ClearingDisputes public immutable disputes;
 
-    constructor(ClearingDisputes disputes_) ClearingStorage(disputes_.config()) {
+    /// The shared implementation. Each session is a minimal proxy of it (ClearingVault.openSession),
+    /// so opening a session deploys 45 bytes and writes its configuration, not this code.
+    constructor(ClearingDisputes disputes_) {
         disputes = disputes_;
+    }
+
+    /// Once, by the vault, in the transaction that creates the session.
+    function initialize(Config calldata c) external {
+        _initialize(c);
         _finalizedRoot = SparseTree16.emptyRoot();
         _lastProposalAt = block.timestamp;
     }
@@ -74,7 +81,7 @@ contract ClearingChannel is ClearingStorage {
     /// @notice The vault moves a user's free balance into this session, on that user's own
     ///         request (ClearingVault.fund).
     function depositFor(address user, uint8 token, uint128 amount) external payable {
-        if (msg.sender != vault || vault == address(0)) revert WrongState();
+        if (msg.sender != _cfg.vault || _cfg.vault == address(0)) revert WrongState();
         _deposit(user, msg.sender, token, amount);
     }
 
@@ -94,7 +101,7 @@ contract ClearingChannel is ClearingStorage {
             t.eth += amount;
             _userFunds.eth += amount;
         } else if (token == R.USD) {
-            if (msg.value != 0 || !usd.transferFrom(from, address(this), amount)) revert WrongState();
+            if (msg.value != 0 || !_cfg.usd.transferFrom(from, address(this), amount)) revert WrongState();
             t.usd += amount;
             _userFunds.usd += amount;
         } else {
@@ -158,10 +165,10 @@ contract ClearingChannel is ClearingStorage {
         // settles what it executed, and only until anyone may close (so proposals can't
         // hold a session open forever). Closed: nobody.
         Phase ph = _phase;
-        bool open = ph == Phase.Active && block.timestamp > _lastProposalAt + takeoverDelay;
-        if (ph == Phase.Closed || (msg.sender != operator && !open)) revert WrongState();
-        if (ph == Phase.Closing && block.timestamp > _closingAt + takeoverDelay) revert WrongState();
-        if (_pending.at != 0 || msg.value < minBond) revert WrongState();
+        bool open = ph == Phase.Active && block.timestamp > _lastProposalAt + _cfg.takeoverDelay;
+        if (ph == Phase.Closed || (msg.sender != _cfg.operator && !open)) revert WrongState();
+        if (ph == Phase.Closing && block.timestamp > _closingAt + _cfg.takeoverDelay) revert WrongState();
+        if (_pending.at != 0 || msg.value < _cfg.minBond) revert WrongState();
         if (fills.length % L.FILL_BYTES != 0 || fills.length / L.FILL_BYTES > MAX_FILLS) revert BadBatch("fills");
         if (reqCursor < _finalizedReq || reqCursor > _requests.length) revert BadBatch("reqCursor");
         uint256 f0 = _finalizedForced;
@@ -175,14 +182,14 @@ contract ClearingChannel is ClearingStorage {
                 emit ForcedRested(j);
                 continue;
             }
-            L.PackedOrder memory o = codec.orderOf(fills, (s - 1) / 2, (s - 1) % 2 == 1);
+            L.PackedOrder memory o = _cfg.codec.orderOf(fills, (s - 1) / 2, (s - 1) % 2 == 1);
             if (o.idx >= _users.length || R.orderHash(L.toOrder(o, _users[o.idx])) != _forced[j].hash) {
                 revert BadBatch("forcedStatus");
             }
         }
         bytes32 root = _finalizedRoot;
         if (updates.length != 0) {
-            (bytes32 oldRoot, bytes32 newRoot, uint256 lastIdx) = codec.transition(updates, proof);
+            (bytes32 oldRoot, bytes32 newRoot, uint256 lastIdx) = _cfg.codec.transition(updates, proof);
             if (oldRoot != root) revert BadProof();
             if (lastIdx >= _users.length) revert BadBatch("index");
             root = newRoot;
@@ -205,7 +212,7 @@ contract ClearingChannel is ClearingStorage {
         uint64[] memory blocks = new uint64[](n);
         for (uint256 s; s < n; ++s) {
             if (s > 0 && (firstFills[s] <= firstFills[s - 1] || firstFills[s] >= nFills)) revert BadBatch("segments");
-            (prices[s], blocks[s]) = priceAdapter.price(witnesses[s], anchors, maxAnchorAge);
+            (prices[s], blocks[s]) = _cfg.priceAdapter.price(witnesses[s], _cfg.anchors, _cfg.maxAnchorAge);
         }
         emit Segments(_batches + 1, firstFills, prices, blocks);
         return keccak256(abi.encode(firstFills, prices, blocks));
@@ -215,7 +222,7 @@ contract ClearingChannel is ClearingStorage {
     ///         back to the proposer (withdrawBond).
     function finalize() external {
         Pending memory p = _pending;
-        if (_phase == Phase.Closed || p.at == 0 || block.timestamp < p.at + challengeWindow) revert WrongState();
+        if (_phase == Phase.Closed || p.at == 0 || block.timestamp < p.at + _cfg.challengeWindow) revert WrongState();
         _finalizedRoot = p.root;
         _finalizedReq = p.reqCursor;
         _finalizedForced = p.forcedCursor;
@@ -239,7 +246,9 @@ contract ClearingChannel is ClearingStorage {
     ///         or anyone once the session has been idle for takeoverDelay (abandoned).
     function beginClose() external {
         if (_phase != Phase.Active) revert WrongState();
-        if (msg.sender != operator && block.timestamp <= _lastProposalAt + takeoverDelay) revert WrongState();
+        if (msg.sender != _cfg.operator && block.timestamp <= _lastProposalAt + _cfg.takeoverDelay) {
+            revert WrongState();
+        }
         _phase = Phase.Closing;
         _closingAt = uint64(block.timestamp);
         emit ClosingStarted(_requests.length, _forced.length, msg.sender);
@@ -250,7 +259,7 @@ contract ClearingChannel is ClearingStorage {
     ///         takeoverDelay after Closing began.
     function close() external {
         if (_phase != Phase.Closing || _pending.at != 0) revert WrongState();
-        if (msg.sender != operator && block.timestamp <= _closingAt + takeoverDelay) revert WrongState();
+        if (msg.sender != _cfg.operator && block.timestamp <= _closingAt + _cfg.takeoverDelay) revert WrongState();
         _phase = Phase.Closed;
         emit Closed(_finalizedRoot, _batches);
     }

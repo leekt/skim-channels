@@ -17,7 +17,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { Chain } from "./runtime/executor.ts";
 import { L1ReadView } from "./runtime/l1view.ts";
 import { EvidenceStore } from "./runtime/evidence.ts";
-import { ClearingOperator, eip712Order, mergeAbi, orderHash, type Order } from "./runtime/clearing.ts";
+import { ClearingOperator, deploySessionCode, eip712Order, openSession, orderHash, type Order } from "./runtime/clearing.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const CLI = `${ROOT}target/debug/skim-channels`;
@@ -112,19 +112,18 @@ async function partB(l1: Chain) {
   const anchors = await l1.deploy(ROOT, op, "AnchorRegistry.sol", "AnchorRegistry");
   const codec = await l1.deploy(ROOT, op, "ClearingCodec.sol", "ClearingCodec");
   const token = await l1.deploy(ROOT, op, "Clearing.t.sol", "TestUSD");
-  const disputes = await l1.deploy(ROOT, op, "ClearingDisputes.sol", "ClearingDisputes", [{
-    operator: op.address, usd: token.address, anchors: anchors.address, codec: codec.address, priceAdapter: adapter.address, bandBps: 100n,
-    challengeWindow: 3600n, forceDelay: 86_400n, maxAnchorAge: 256n, minBond: parseEther("1"), takeoverDelay: 172_800n,
-    appChainId: 7001n, vault: zeroAddress, sessionId: 1n,
-  }]);
-  const core = await l1.deploy(ROOT, op, "ClearingChannel.sol", "ClearingChannel", [disputes.address]);
-  const ch = mergeAbi(core, disputes);
+  const vault = await l1.deploy(ROOT, op, "ClearingVault.sol", "ClearingVault", [op.address, token.address]);
+  const session = await openSession(l1, op, vault, await deploySessionCode(l1, op), {
+    operator: op.address, anchors: anchors.address, codec: codec.address, priceAdapter: adapter.address, bandBps: 100n,
+    challengeWindow: 3600n, forceDelay: 86_400n, maxAnchorAge: 256n, minBond: parseEther("1"), takeoverDelay: 172_800n, appChainId: 7001n,
+  });
+  const ch = session.channel;
   await l1.send(ch, "deposit", [0, parseEther("2")], alice, undefined, parseEther("2"));
   await l1.send(token, "mint", [bob.address, usd(10_000)], bob);
   await l1.send(token, "approve", [ch.address, usd(10_000)], bob);
   await l1.send(ch, "deposit", [1, usd(10_000)], bob);
 
-  const ex = await Chain.appExecutor(ROOT, 18973, 7001, l1.url, { readonly: [ch.address, disputes.address, proxy.address, agg.address] });
+  const ex = await Chain.appExecutor(ROOT, 18973, 7001, l1.url, { readonly: [...session.imports, proxy.address, agg.address] });
   chains.push(ex);
   const feed = { proxy: proxy.address, aggregator: agg.address };
   const book = await ClearingOperator.deployBook(ex, l1, op, ch, feed, MAX_STALE);

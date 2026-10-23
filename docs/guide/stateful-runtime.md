@@ -170,7 +170,16 @@ The verified prices are committed with the pending batch, and `challengeFill` ju
 
 ## Sessions: open, close, start again
 
-The app is stable; its execution sessions are disposable. One **`ClearingVault`** is the app's identity and holds users' free balances. Each **session** is a `ClearingChannel` registered in the vault with the next id. The session id is the `salt` of the standard EIP-712 domain, so an order signed for one session never verifies in another.
+The app is stable; its execution sessions are disposable. One **`ClearingVault`** is the app's identity and holds users' free balances.
+
+**Opening a session is registering configuration.**
+- The session code (`ClearingChannel` + `ClearingDisputes`, 23.6 KB) is deployed once per app.
+- `vault.openSession(implementation, config)` creates a 45-byte EIP-1167 proxy of it and initializes it in the same transaction, setting the vault, its token and the next id. That costs ~0.5M gas.
+- Before proxies, each session redeployed its code: ~35.7M gas on Sepolia under Amsterdam's code pricing.
+- Configuration lives in the session's storage, which costs about +1.7% per batch in reads.
+- Pointing `openSession` at a new implementation is how a new session opts into new code.
+
+The session id is the `salt` of the standard EIP-712 domain, so an order signed for one session never verifies in another.
 
 ```
 vault ── session 1: run → close ── session 2: run → close ── …

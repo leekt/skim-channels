@@ -2,23 +2,23 @@
   "note": "anvil L1 (chain 900) and anvil executors (chain 7001). Gas = L1 receipt gasUsed, summed per label; txs = count per label.",
   "users": 4,
   "appSetup": {
-    "gas": 5038325,
-    "txs": 4,
-    "what": "AnchorRegistry, ChainlinkAdapter, ClearingCodec, ClearingVault: once per app"
+    "gas": 10400022,
+    "txs": 6,
+    "what": "AnchorRegistry, ChainlinkAdapter, ClearingCodec, ClearingVault, and the session code (ClearingDisputes + ClearingChannel): once per app"
   },
   "sessionSetup": {
-    "gas": 2558799,
-    "txs": 3,
-    "what": "ClearingDisputes + ClearingChannel + vault.register, per session"
+    "gas": 499134,
+    "txs": 1,
+    "what": "vault.openSession: a 45-byte proxy of the session code plus its config, per session"
   },
   "perBatch": {
-    "proposeGas": 1251213,
-    "finalizeGas": 85407
+    "proposeGas": 1263362,
+    "finalizeGas": 89282
   },
   "idle": "no L1 transactions while idle (no batch, no proposal). An Active session must still be watched: after takeoverDelay anyone may propose",
   "close": {
-    "beginCloseGas": 49930,
-    "closeGas": 34365,
+    "beginCloseGas": 54765,
+    "closeGas": 39200,
     "txs": 2
   },
   "monitoring": {
@@ -29,49 +29,49 @@
   "recovery": {
     "packageBytes": 1341,
     "claimFileBytes": 1545,
-    "publishFinalGas": 108399,
+    "publishFinalGas": 114095,
     "publishChunks": 2,
     "publishedLeafBytes": 432,
     "bySize": "contracts/test/clearing/ClearingSession.t.sol test_publishFinalCost: ~5k execution gas + 108 calldata bytes per user, linear; 1024 users in one chunk = 5.1M execution gas + 110 KB"
   },
   "restart": {
-    "ms": 338,
-    "l1Txs": 3,
-    "executorSetupMs": 148,
-    "what": "deploy + register session 2, start an empty executor; no replay of session 1"
+    "ms": 198,
+    "l1Txs": 1,
+    "executorSetupMs": 138,
+    "what": "open session 2 (one transaction), start an empty executor; no replay of session 1"
   },
   "users_": {
-    "claimWhileActiveGas": 88863,
-    "redeemToWalletGas": 125568,
-    "redeemToVaultGas": 160886,
-    "vaultFundGas": 127574
+    "claimWhileActiveGas": 91699,
+    "redeemToWalletGas": 130588,
+    "redeemToVaultGas": 169366,
+    "vaultFundGas": 133114
   },
   "gas": {
     "app: ChainlinkAdapter": 1914405,
     "app: AnchorRegistry": 669126,
     "app: ClearingCodec": 1644905,
-    "app: ClearingVault": 809889,
-    "session 1: deploy": 2459191,
-    "session 1: register": 99608,
-    "user: deposit": 689682,
-    "AnchorRegistry.record": 469581,
-    "operator: propose": 2502426,
-    "operator: finalize": 256220,
-    "user: requestWithdraw": 249921,
-    "user: claim (active)": 88863,
-    "operator: beginClose": 49930,
-    "operator: close": 34365,
-    "optional: publishFinal": 108399,
-    "session 2: deploy": 2459191,
-    "session 2: register": 82508,
-    "operator: withdrawBond": 28740,
-    "user: redeem → vault": 160886,
-    "user: vault.fund": 255147,
-    "user: redeem → wallet": 376705
+    "app: ClearingVault": 951495,
+    "session code: ClearingDisputes": 2731382,
+    "session code: ClearingChannel": 2488709,
+    "session 1: open": 499134,
+    "user: deposit": 717263,
+    "AnchorRegistry.record": 469593,
+    "operator: propose": 2526723,
+    "operator: finalize": 267845,
+    "user: requestWithdraw": 255271,
+    "user: claim (active)": 91699,
+    "operator: beginClose": 54765,
+    "operator: close": 39200,
+    "optional: publishFinal": 114095,
+    "session 2: open": 482034,
+    "operator: withdrawBond": 31403,
+    "user: redeem → vault": 169366,
+    "user: vault.fund": 266228,
+    "user: redeem → wallet": 391765
   },
   "txs": {
-    "session 1: register": 1,
-    "session 1: deploy": 2,
+    "app: session code": 2,
+    "session 1: open": 1,
     "user: deposit": 7,
     "operator: propose": 2,
     "operator: finalize": 3,
@@ -80,8 +80,7 @@
     "operator: beginClose": 1,
     "operator: close": 1,
     "optional: publishFinal": 2,
-    "session 2: register": 1,
-    "session 2: deploy": 2,
+    "session 2: open": 1,
     "user: redeem → vault": 1,
     "user: vault.fund": 2,
     "operator: withdrawBond": 1

@@ -20,21 +20,20 @@ contract ClearingSessionTest is ClearingChannelBase {
         vaultAddr = address(vault);
     }
 
-    function setUp() public override {
-        super.setUp();
+    /// Sessions of this app are opened by its vault (the owner registers their configuration).
+    function _open(ClearingStorage.Config memory c) internal override returns (ClearingChannel s) {
         vm.prank(op);
-        vault.register(address(ch));
+        s = ClearingChannel(vault.openSession(address(impl), c));
     }
 
     function _phase(ClearingDisputes d) internal view returns (ClearingStorage.Phase p) {
         (,,,,, p,) = d.state();
     }
 
-    /// Session `id` of the same app (same vault and config otherwise).
+    /// The app's next session (the vault assigns id `id`).
     function _session(uint64 id) internal returns (ClearingChannel s) {
-        ClearingStorage.Config memory c = _config();
-        c.sessionId = id;
-        s = new ClearingChannel(new ClearingDisputes(c));
+        s = _open(_config());
+        assertEq(vault.sessionIdOf(address(s)), id);
     }
 
     function _closeNow() internal {
@@ -227,8 +226,6 @@ contract ClearingSessionTest is ClearingChannelBase {
         // Session 2: registered, then funded by alice herself.
         ClearingChannel s2 = _session(2);
         vm.prank(op);
-        vault.register(address(s2));
-        vm.prank(op);
         vm.expectRevert(ClearingVault.WrongState.selector); // the operator has no free balance of hers
         vault.fund(address(s2), R.ETH, 1 ether);
         vm.startPrank(who[0]);
@@ -261,18 +258,22 @@ contract ClearingSessionTest is ClearingChannelBase {
         assertEq(vault.free(who[1]).usd, 0);
     }
 
-    function test_vaultRegistrationAndCreditRules() public {
-        ClearingChannel s3 = _session(3);
-        vm.prank(op);
-        vm.expectRevert(ClearingVault.WrongState.selector); // ids are consecutive: 2 is next
-        vault.register(address(s3));
-        ClearingChannel s2 = _session(2);
+    function test_openingSessionsAndCreditRules() public {
+        // Only the app's owner opens sessions; ids are consecutive; the vault sets its own
+        // address, token and the id whatever the config says.
+        ClearingStorage.Config memory c = _config();
+        c.vault = watcher;
+        c.sessionId = 77;
         vm.prank(watcher);
-        vm.expectRevert(ClearingVault.WrongState.selector); // only the app's owner
-        vault.register(address(s2));
+        vm.expectRevert(ClearingVault.WrongState.selector);
+        vault.openSession(address(impl), c);
         vm.prank(op);
-        vm.expectRevert(ClearingVault.WrongState.selector); // already registered
-        vault.register(address(ch));
+        ClearingChannel s2 = ClearingChannel(vault.openSession(address(impl), c));
+        ClearingStorage.Config memory got = ClearingDisputes(address(s2)).config();
+        assertEq(got.vault, address(vault));
+        assertEq(got.sessionId, 2);
+        assertEq(address(got.usd), address(usd));
+        assertEq(address(s2).code.length, 45, "a session is a 45-byte minimal proxy");
         vm.deal(watcher, 1 ether);
         vm.prank(watcher);
         vm.expectRevert(ClearingVault.WrongState.selector); // credits only from sessions
@@ -286,8 +287,6 @@ contract ClearingSessionTest is ClearingChannelBase {
 
     function test_orderSignedForSession1IsAFaultInSession2() public {
         ClearingChannel s2 = _session(2);
-        vm.prank(op);
-        vault.register(address(s2));
         assertTrue(s2.domain() != ch.domain());
         // Same app, same users, same orders: signed in session 1's domain.
         bytes memory fills = _ab(1, 1);
@@ -387,7 +386,7 @@ contract ClearingPublishCost is ClearingChannelBase {
     function _many(uint256 n) internal returns (ClearingChannel s, bytes memory leaves) {
         ClearingStorage.Config memory c = _config();
         c.sessionId = 9;
-        s = new ClearingChannel(new ClearingDisputes(c));
+        s = _open(c);
         for (uint256 i; i < n; ++i) {
             address u = address(uint160(0x10000 + i));
             vm.deal(u, 1);
@@ -425,5 +424,22 @@ contract ClearingPublishCost is ClearingChannelBase {
                 string.concat("users ", vm.toString(sizes[k]), ": calldata gas, all non-zero"), leaves.length * 16
             );
         }
+    }
+}
+
+/// What opening a session costs: a clone plus its configuration. The session's code (the two
+/// implementations) is deployed once per app; on Sepolia under Amsterdam pricing deploying it per
+/// session cost ~35.7M gas (docs/experiments/sessions.md).
+contract ClearingOpenCost is ClearingChannelBase {
+    function test_openSessionCost() public {
+        uint256 g = gasleft();
+        ClearingChannel s = _open(_config());
+        g -= gasleft();
+        emit log_named_uint("open a session (clone + initialize): gas", g);
+        emit log_named_uint("open a session: runtime bytes deployed", address(s).code.length);
+        emit log_named_uint(
+            "session code, deployed once per app: runtime bytes",
+            address(impl).code.length + address(impl.disputes()).code.length
+        );
     }
 }

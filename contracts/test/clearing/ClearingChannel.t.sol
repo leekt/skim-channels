@@ -11,6 +11,7 @@ import {ClearingChannel} from "../../src/clearing/ClearingChannel.sol";
 import {ClearingDisputes} from "../../src/clearing/ClearingDisputes.sol";
 import {ClearingStorage, IERC20Lite} from "../../src/clearing/ClearingStorage.sol";
 import {ClearingCodec} from "../../src/clearing/ClearingCodec.sol";
+import {Clone1167} from "../../src/clearing/Clone1167.sol";
 import {AnchorRegistry} from "../../src/AnchorRegistry.sol";
 
 /// Shared setup for the v2 clearing channel: L1 price 7000 (fixture slot 0 at block 101),
@@ -48,6 +49,7 @@ abstract contract ClearingChannelBase is Test {
     address[3] who;
     L.Account[] fin; // finalized leaves by index
     address vaultAddr; // none unless a suite sets one up (_beforeChannel)
+    ClearingChannel impl; // the shared session implementation; sessions are clones of it
 
     function setUp() public virtual {
         vm.chainId(11155111);
@@ -63,8 +65,9 @@ abstract contract ClearingChannelBase is Test {
         vm.roll(200);
         vm.setBlockhash(101, keccak256(raw1));
         anchors.record(raw1);
+        impl = new ClearingChannel(new ClearingDisputes());
         _beforeChannel();
-        ch = new ClearingChannel(new ClearingDisputes(_config()));
+        ch = _open(_config());
         D = ClearingDisputes(address(ch));
         vm.deal(op, 100 ether);
         vm.deal(watcher, 10 ether);
@@ -78,6 +81,16 @@ abstract contract ClearingChannelBase is Test {
     }
 
     function _beforeChannel() internal virtual {}
+
+    /// A session: a minimal proxy of the implementation, initialized with `c`.
+    function _open(ClearingStorage.Config memory c) internal virtual returns (ClearingChannel s) {
+        s = ClearingChannel(Clone1167.clone(address(impl)));
+        s.initialize(c);
+    }
+
+    function tryOpen(ClearingStorage.Config memory c) external {
+        _open(c);
+    }
 
     // One oracle segment: the fixture's price (7000) at its anchor (block 101).
     function _w() internal view returns (bytes[] memory w) {
@@ -705,10 +718,15 @@ contract ClearingChannelTest is ClearingChannelBase {
     }
 
     function _deploys(ClearingStorage.Config memory c) internal returns (bool) {
-        try new ClearingDisputes(c) returns (ClearingDisputes) {
+        try this.tryOpen(c) {
             return true;
         } catch {
             return false;
         }
+    }
+
+    function test_aSessionInitializesOnce() public {
+        vm.expectRevert(ClearingStorage.WrongState.selector);
+        ch.initialize(_config());
     }
 }

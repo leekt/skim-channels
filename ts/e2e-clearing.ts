@@ -14,7 +14,7 @@ import { Chain, type C } from "./runtime/executor.ts";
 import { L1ReadView } from "./runtime/l1view.ts";
 import { EvidenceStore } from "./runtime/evidence.ts";
 import { levels, rootOf, siblings } from "./runtime/tree.ts";
-import { ClearingOperator, EMPTY, eip712Order, leafHash, mergeAbi, orderHash, type Account, type Order } from "./runtime/clearing.ts";
+import { ClearingOperator, deploySessionCode, openSession, EMPTY, eip712Order, leafHash, mergeAbi, orderHash, type Account, type Order } from "./runtime/clearing.ts";
 import { Gateway } from "./runtime/gateway.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
@@ -78,13 +78,13 @@ async function run(l1: Chain) {
   const anchors = await l1.deploy(ROOT, opA, "AnchorRegistry.sol", "AnchorRegistry");
   const codec = await l1.deploy(ROOT, opA, "ClearingCodec.sol", "ClearingCodec");
   const token = await l1.deploy(ROOT, opA, "Clearing.t.sol", "TestUSD");
-  const disputes = await l1.deploy(ROOT, opA, "ClearingDisputes.sol", "ClearingDisputes", [{
-    operator: opA.address, usd: token.address, anchors: anchors.address, codec: codec.address,
-    priceAdapter: adapter.address, bandBps: 100n, challengeWindow: BigInt(WINDOW), forceDelay: BigInt(DAY),
-    maxAnchorAge: 256n, minBond: parseEther("1"), takeoverDelay: BigInt(2 * DAY), appChainId: 7001n, vault: zeroAddress, sessionId: 1n,
-  }], "deploy ClearingDisputes");
-  const core = await l1.deploy(ROOT, opA, "ClearingChannel.sol", "ClearingChannel", [disputes.address], "deploy ClearingChannel");
-  const ch = mergeAbi(core, disputes);
+  const vault = await l1.deploy(ROOT, opA, "ClearingVault.sol", "ClearingVault", [opA.address, token.address]);
+  const code = await deploySessionCode(l1, opA);
+  const session = await openSession(l1, opA, vault, code, {
+    operator: opA.address, anchors: anchors.address, codec: codec.address, priceAdapter: adapter.address, bandBps: 100n,
+    challengeWindow: BigInt(WINDOW), forceDelay: BigInt(DAY), maxAnchorAge: 256n, minBond: parseEther("1"), takeoverDelay: BigInt(2 * DAY), appChainId: 7001n,
+  });
+  const ch = session.channel;
   // Time passes with blocks (12 s each), as on a real chain: anchors age by block number.
   // Up to 2 hours (challenge windows): every 12 s block is mined. Longer waits (days) mine
   // 600 such blocks — more than any anchor's age limit — then jump the rest of the time.
@@ -111,7 +111,7 @@ async function run(l1: Chain) {
 
   // ---- the app network: app executors (crates/app-executor), fees 0. They import the
   //      channel (both halves) and the feed (proxy and aggregator) read-only. ----
-  const IMPORTS = [ch.address, disputes.address, proxy.address, agg.address];
+  const IMPORTS = [...session.imports, proxy.address, agg.address];
   const executor = async (port: number, follow = "latest") => {
     const ex = await Chain.appExecutor(ROOT, port, 7001, l1.url, { readonly: IMPORTS, follow });
     extraChains.push(ex);

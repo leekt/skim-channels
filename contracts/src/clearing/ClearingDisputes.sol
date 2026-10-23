@@ -12,29 +12,14 @@ import {SparseTree16} from "../predict/SparseTree16.sol";
 contract ClearingDisputes is ClearingStorage {
     address private immutable self;
 
-    constructor(Config memory c) ClearingStorage(c) {
+    constructor() {
         self = address(this);
     }
 
     // ---- config and views (reached through the channel's address) -------------------------
 
     function config() external view returns (Config memory) {
-        return Config(
-            operator,
-            usd,
-            anchors,
-            codec,
-            priceAdapter,
-            bandBps,
-            challengeWindow,
-            forceDelay,
-            maxAnchorAge,
-            minBond,
-            takeoverDelay,
-            appChainId,
-            vault,
-            sessionId
-        );
+        return _cfg;
     }
 
     function state()
@@ -90,7 +75,7 @@ contract ClearingDisputes is ClearingStorage {
 
     function _live(bytes calldata fills) internal view {
         Pending storage p = _pending;
-        if (p.at == 0 || block.timestamp >= p.at + challengeWindow) revert WrongState();
+        if (p.at == 0 || block.timestamp >= p.at + _cfg.challengeWindow) revert WrongState();
         if (keccak256(fills) != p.fillsHash) revert BadProof();
     }
 
@@ -116,18 +101,19 @@ contract ClearingDisputes is ClearingStorage {
         if (!fault) {
             R.Order memory a = L.toOrder(pa, _users[pa.idx]);
             R.Order memory b = L.toOrder(pb, _users[pb.idx]);
-            fault = codec.fillFault(
-                a,
-                sa,
-                _forcedAuth[R.orderHash(a)],
-                b,
-                sb,
-                _forcedAuth[R.orderHash(b)],
-                prices[s],
-                bandBps,
-                anchorBlocks[s],
-                _domain()
-            );
+            fault = _cfg.codec
+                .fillFault(
+                    a,
+                    sa,
+                    _forcedAuth[R.orderHash(a)],
+                    b,
+                    sb,
+                    _forcedAuth[R.orderHash(b)],
+                    prices[s],
+                    _cfg.bandBps,
+                    anchorBlocks[s],
+                    _domain()
+                );
         }
         if (!fault) revert NotWrong();
         _discard(msg.sender, "fill");
@@ -174,7 +160,7 @@ contract ClearingDisputes is ClearingStorage {
             Request storage q = _requests[mine[o.requests + r]];
             reqs[r] = ClearingCodec.AppliedRequest(q.token, q.amount, q.inAt);
         }
-        (L.Account memory want, bool ok) = codec.replay(idx, o, nw.ethIn, nw.usdIn, reqs, fills);
+        (L.Account memory want, bool ok) = _cfg.codec.replay(idx, o, nw.ethIn, nw.usdIn, reqs, fills);
         return !ok || L.leafHash(want) != L.leafHash(nw);
     }
 
@@ -199,7 +185,7 @@ contract ClearingDisputes is ClearingStorage {
     ///         payout, so nothing can be redeemed twice either way.
     function redeem(uint32 idx, L.Account calldata leaf, bytes32[16] calldata sib, bool toVault) external viaChannel {
         if (_phase != Phase.Closed || idx >= _users.length) revert WrongState();
-        if (toVault && (vault == address(0) || msg.sender != _users[idx])) revert WrongState();
+        if (toVault && (_cfg.vault == address(0) || msg.sender != _users[idx])) revert WrongState();
         _prove(leaf, idx, sib, _finalizedRoot);
         Totals memory ins = _cumIn[idx];
         Totals storage pd = _paid[idx];

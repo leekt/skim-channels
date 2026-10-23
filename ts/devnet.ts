@@ -39,7 +39,7 @@ import { L1ReadView } from "./runtime/l1view.ts";
 import { EvidenceStore } from "./runtime/evidence.ts";
 import { Gateway } from "./runtime/gateway.ts";
 import { levels, siblings } from "./runtime/tree.ts";
-import { ClearingOperator, EMPTY, eip712Order, leafHash, mergeAbi, orderHash, type Account, type Feed, type Order } from "./runtime/clearing.ts";
+import { ClearingOperator, deploySessionCode, openSession, EMPTY, eip712Order, leafHash, mergeAbi, orderHash, type Account, type Feed, type Order } from "./runtime/clearing.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const CLI = `${ROOT}target/debug/skim-channels`;
@@ -90,9 +90,14 @@ async function main() {
   const codeHash = async (a: Address) => (await l1.rpc<any>("eth_getProof", [a, [], "latest"])).codeHash as Hex;
 
   // ---- the app: feed, adapter, infrastructure and vault (once per app) ----
-  type App = { token: Address; anchors: Address; codec: Address; adapter: Address; vault: Address; feed: Feed; sessions: { id: string; channel: Address; disputes: Address; startBlock?: string; makerRedeemed?: boolean }[] };
+  type App = {
+    token: Address; anchors: Address; codec: Address; adapter: Address; vault: Address; feed: Feed;
+    sessionCode?: { channel: Address; disputes: Address }; // deployed once; sessions are proxies of it
+    sessions: { id: string; channel: Address; disputes: Address; startBlock?: string; makerRedeemed?: boolean }[];
+  };
   // Each session's finalized leaves, kept on disk so a closed session can be redeemed after a restart.
-  const finFile = (sid: string) => join(homedir(), ".skim-devnet", `session-${sid}-fin.json`);
+  // Per-session files, keyed by the session's label (vault prefix and id: ids restart per vault).
+  const finFile = (sid: string) => join(homedir(), ".skim-devnet", `session-${sid.replace(/[^\w]/g, "-")}-fin.json`);
   const loadFin = (sid: string): Map<number, Account> => {
     if (NET !== "sepolia" || !existsSync(finFile(sid))) return new Map();
     return new Map(Object.entries(JSON.parse(readFileSync(finFile(sid), "utf8"))).map(([k, v]: [string, any]) => [Number(k), {
@@ -120,7 +125,19 @@ async function main() {
     const codec = await l1.deploy(ROOT, op, "ClearingCodec.sol", "ClearingCodec");
     const token = await l1.deploy(ROOT, op, "Clearing.t.sol", "TestUSD");
     const vault = await l1.deploy(ROOT, op, "ClearingVault.sol", "ClearingVault", [op.address, token.address]);
-    app = { token: token.address, anchors: anchors.address, codec: codec.address, adapter: adapter.address, vault: vault.address, feed, sessions: [] };
+    const code = await deploySessionCode(l1, op);
+    app = {
+      token: token.address, anchors: anchors.address, codec: codec.address, adapter: adapter.address, vault: vault.address, feed,
+      sessionCode: { channel: code.channel.address, disputes: code.disputes.address }, sessions: [],
+    };
+  }
+  // An app saved before sessions were proxies has no session code, and its vault can't open
+  // them: deploy a new vault and the session code (once); its old sessions are still closed.
+  if (!app.sessionCode) {
+    const code = await deploySessionCode(l1, op);
+    const v = await l1.deploy(ROOT, op, "ClearingVault.sol", "ClearingVault", [op.address, app.token]);
+    app = { ...app, vault: v.address, sessionCode: { channel: code.channel.address, disputes: code.disputes.address } };
+    note(`session code deployed once (${code.channel.address}); new vault ${v.address}`);
   }
   const save = () => {
     if (NET !== "sepolia") return;
@@ -140,26 +157,19 @@ async function main() {
   const last = app.sessions.at(-1);
   const resume = NET === "sepolia" && !process.env.NEW_SESSION && !!last
     && Number((await l1.read<any[]>(sessionC(last.channel), "state"))[5]) === 0;
-  if (!resume && NET === "sepolia" && (await l1.pub.getBalance({ address: op.address })) < parseEther("0.05")) {
-    throw new Error(`a new session needs ≥ 0.05 Sepolia ETH at ${op.address} (~36M gas to deploy under Amsterdam pricing)`);
-  }
   if (!resume) {
-    const sid = BigInt(Number(await l1.read(vault, "sessionCount")) + 1);
-    const d = await l1.deploy(ROOT, op, "ClearingDisputes.sol", "ClearingDisputes", [{
-      operator: op.address, usd: app.token, anchors: app.anchors, codec: app.codec, priceAdapter: app.adapter, bandBps: 100n,
-      challengeWindow: BigInt(WINDOW), forceDelay: BigInt(DAY), maxAnchorAge: 256n, minBond: P.bond, takeoverDelay: BigInt(2 * DAY),
-      appChainId: BigInt(APP_ID), vault: app.vault, sessionId: sid,
-    }]);
-    const c = await l1.deploy(ROOT, op, "ClearingChannel.sol", "ClearingChannel", [d.address]);
-    const startBlock = await l1.height();
-    await l1.send(vault, "register", [c.address], op);
-    app.sessions.push({ id: sid.toString(), channel: c.address, disputes: d.address, startBlock: startBlock.toString() });
+    // A session is one transaction: the vault opens a proxy of the session code with this config.
+    const code = { channel: at(abiOf("ClearingChannel.sol", "ClearingChannel"), app.sessionCode!.channel), disputes: at(abiOf("ClearingDisputes.sol", "ClearingDisputes"), app.sessionCode!.disputes) };
+    const s = await openSession(l1, op, vault, code, {
+      operator: op.address, anchors: app.anchors, codec: app.codec, priceAdapter: app.adapter, bandBps: 100n,
+      challengeWindow: BigInt(WINDOW), forceDelay: BigInt(DAY), maxAnchorAge: 256n, minBond: P.bond, takeoverDelay: BigInt(2 * DAY), appChainId: BigInt(APP_ID),
+    });
+    app.sessions.push({ id: `${app.vault.slice(0, 8)}/${s.id}`, channel: s.channel.address, disputes: app.sessionCode!.disputes, startBlock: s.startBlock.toString() });
     save();
   }
   const cur = app.sessions.at(-1)!;
-  const id = BigInt(cur.id);
-  const core = { address: cur.channel };
-  const disputes = { address: cur.disputes };
+  const id = BigInt(cur.id.split("/").pop()!);
+  const imports = [cur.channel, app.sessionCode!.channel, app.sessionCode!.disputes];
   const startBlock = BigInt(cur.startBlock ?? 0);
   const ch = sessionC(cur.channel);
   if (resume) note(`resuming session ${id} (${ch.address}) from its journal`);
@@ -198,18 +208,18 @@ async function main() {
   for (const s of app.sessions.slice(0, -1)) await closeOld(s);
 
   // ---- the app network: the executor imports the channel and the feed read-only ----
-  const ex = await Chain.appExecutor(ROOT, 18902, APP_ID, l1.url, { readonly: [core.address, disputes.address, app.feed.proxy, app.feed.aggregator] });
+  const ex = await Chain.appExecutor(ROOT, 18902, APP_ID, l1.url, { readonly: [...imports, app.feed.proxy, app.feed.aggregator] });
   process.on("SIGINT", () => { if (NET === "local") l1.stop(); ex.stop(); process.exit(0); });
   const book = await ClearingOperator.deployBook(ex, l1, op, ch, app.feed, P.maxStale);
   const reader = new L1ReadView({ url: l1.url, chainId: l1.chainId, cli: CLI });
   const A = new ClearingOperator({
     view: reader, exec: ex, book, op, l1, channel: ch, anchors, feed: app.feed, maxStaleness: P.maxStale,
-    evidence: new EvidenceStore(NET === "sepolia" ? join(homedir(), ".skim-devnet", `session-${id}-evidence`) : join(tmpdir(), `skim-devnet-evidence-${process.pid}`)),
+    evidence: new EvidenceStore(NET === "sepolia" ? join(homedir(), ".skim-devnet", `session-${cur.id.replace(/[^\w]/g, "-")}-evidence`) : join(tmpdir(), `skim-devnet-evidence-${process.pid}`)),
     policy: P.policy, bond: P.bond, maxAnchorAge: 256n, ageMargin: 32n, startBlock,
-    journal: NET === "sepolia" ? join(homedir(), ".skim-devnet", `session-${id}-journal.json`) : join(tmpdir(), `skim-devnet-journal-${process.pid}.json`),
+    journal: NET === "sepolia" ? join(homedir(), ".skim-devnet", `session-${cur.id.replace(/[^\w]/g, "-")}-journal.json`) : join(tmpdir(), `skim-devnet-journal-${process.pid}.json`),
   });
   if (resume) {
-    A.fin = loadFin(id.toString());
+    A.fin = loadFin(cur.id);
     await A.restart();
     note(`session ${id}: AppState rebuilt on a fresh executor (${A.batches.length} journaled batch(es))`);
   }
@@ -390,7 +400,7 @@ async function main() {
           at_("finalize"); await l1.send(ch, "finalize", [], op);
           await A.finalized();
           if ((await l1.read<bigint>(ch, "bondCredit", [op.address])) > 0n) await l1.send(ch, "withdrawBond", [], op);
-          if (NET === "sepolia") writeFileSync(finFile(id.toString()), JSON.stringify(Object.fromEntries(A.fin), (_k, v) => (typeof v === "bigint" ? v.toString() : v)));
+          if (NET === "sepolia") writeFileSync(finFile(cur.id), JSON.stringify(Object.fromEntries(A.fin), (_k, v) => (typeof v === "bigint" ? v.toString() : v)));
           note(`finalized on L1 (batches: ${(await l1.read<any[]>(ch, "state"))[3]})`);
         }
       }

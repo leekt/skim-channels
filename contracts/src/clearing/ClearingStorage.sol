@@ -116,20 +116,10 @@ abstract contract ClearingStorage {
     /// Forced orders were authorized by their trader's own L1 transaction (no typed signature).
     mapping(bytes32 => bool) internal _forcedAuth;
 
-    address internal immutable operator;
-    IERC20Lite internal immutable usd;
-    AnchorRegistry internal immutable anchors;
-    ClearingCodec internal immutable codec;
-    IPriceAdapter internal immutable priceAdapter;
-    uint256 internal immutable bandBps;
-    uint256 internal immutable challengeWindow;
-    uint256 internal immutable forceDelay;
-    uint256 internal immutable maxAnchorAge;
-    uint256 internal immutable minBond;
-    uint256 internal immutable takeoverDelay;
-    uint256 internal immutable appChainId;
-    address internal immutable vault;
-    uint64 internal immutable sessionId;
+    /// The session's configuration, set once by `_initialize` (sessions are minimal proxies of
+    /// one shared implementation, so it can't be immutable).
+    Config internal _cfg;
+    bool internal _initialized;
 
     event Deposited(uint32 indexed idx, address user, uint8 token, uint256 amount);
     event WithdrawRequested(uint256 indexed pos, uint32 indexed idx, uint8 token, uint256 amount);
@@ -160,7 +150,9 @@ abstract contract ClearingStorage {
     error Insolvent();
     error TransferFailed();
 
-    constructor(Config memory c) {
+    /// Once per session, by the vault that creates it (in the same transaction).
+    function _initialize(Config memory c) internal {
+        if (_initialized) revert WrongState();
         if (
             c.challengeWindow < MIN_CHALLENGE_WINDOW || c.challengeWindow > MAX_CHALLENGE_WINDOW
                 || c.forceDelay < MIN_FORCE_DELAY || c.forceDelay > MAX_FORCE_DELAY
@@ -169,24 +161,12 @@ abstract contract ClearingStorage {
         ) {
             revert BadPolicy();
         }
-        operator = c.operator;
-        usd = c.usd;
-        anchors = c.anchors;
-        codec = c.codec;
-        priceAdapter = c.priceAdapter;
-        bandBps = c.bandBps;
-        challengeWindow = c.challengeWindow;
-        forceDelay = c.forceDelay;
-        maxAnchorAge = c.maxAnchorAge;
-        minBond = c.minBond;
-        takeoverDelay = c.takeoverDelay;
-        appChainId = c.appChainId;
-        vault = c.vault;
-        sessionId = c.sessionId;
+        _initialized = true;
+        _cfg = c;
     }
 
     function _domain() internal view returns (bytes32) {
-        return R.domainSeparator(appChainId, address(this), bytes32(uint256(sessionId)));
+        return R.domainSeparator(_cfg.appChainId, address(this), bytes32(uint256(_cfg.sessionId)));
     }
 
     function _creditBond(address to, uint256 amount) internal {
@@ -198,9 +178,9 @@ abstract contract ClearingStorage {
     /// The oldest unserved request or forced order is past its deadline (fixed when made).
     function _overdue() internal view returns (bool) {
         uint256 r = _finalizedReq;
-        if (r < _requests.length && block.timestamp >= _requests[r].time + forceDelay) return true;
+        if (r < _requests.length && block.timestamp >= _requests[r].time + _cfg.forceDelay) return true;
         uint256 f = _finalizedForced;
-        return f < _forced.length && block.timestamp >= _forced[f].time + forceDelay;
+        return f < _forced.length && block.timestamp >= _forced[f].time + _cfg.forceDelay;
     }
 
     function _prove(L.Account memory a, uint32 idx, bytes32[16] calldata sib, bytes32 root) internal pure {
@@ -216,8 +196,8 @@ abstract contract ClearingStorage {
         f.usd -= dollars;
         address to = _users[idx];
         if (toVault) {
-            if (dollars > 0 && !usd.transfer(vault, dollars)) revert TransferFailed();
-            IClearingVault(vault).credit{value: eth}(to, dollars);
+            if (dollars > 0 && !_cfg.usd.transfer(_cfg.vault, dollars)) revert TransferFailed();
+            IClearingVault(_cfg.vault).credit{value: eth}(to, dollars);
             return;
         }
         if (eth > 0) {
@@ -227,7 +207,7 @@ abstract contract ClearingStorage {
         }
         if (dollars > 0) {
             emit Paid(idx, 1, dollars);
-            if (!usd.transfer(to, dollars)) revert TransferFailed();
+            if (!_cfg.usd.transfer(to, dollars)) revert TransferFailed();
         }
     }
 }

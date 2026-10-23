@@ -16,7 +16,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { Chain, type C } from "./runtime/executor.ts";
 import { L1ReadView } from "./runtime/l1view.ts";
 import { EvidenceStore } from "./runtime/evidence.ts";
-import { ClearingOperator, EMPTY, eip712Order, leafHash, mergeAbi, orderHash, type Order } from "./runtime/clearing.ts";
+import { ClearingOperator, deploySessionCode, openSession as openSessionOf, EMPTY, eip712Order, leafHash, mergeAbi, orderHash, type Order } from "./runtime/clearing.ts";
 import { levels, siblings } from "./runtime/tree.ts";
 import { buildSessionPackage, claimFromJson, claimPackage, publicationChunks, redeemArgs, toJson, verifySessionPackage, type SessionPackage } from "./runtime/recovery.ts";
 
@@ -126,22 +126,22 @@ async function run(l1: Chain) {
   const codec = await l1.deploy(ROOT, op, "ClearingCodec.sol", "ClearingCodec", [], "app: ClearingCodec");
   const token = await l1.deploy(ROOT, op, "Clearing.t.sol", "TestUSD");
   const vault = await l1.deploy(ROOT, op, "ClearingVault.sol", "ClearingVault", [op.address, token.address], "app: ClearingVault");
-  const appSetup = ["app: AnchorRegistry", "app: ChainlinkAdapter", "app: ClearingCodec", "app: ClearingVault"].reduce((a, k) => a + (l1.gas[k] ?? 0), 0);
+  const appSetupGas = () => ["app: AnchorRegistry", "app: ChainlinkAdapter", "app: ClearingCodec", "app: ClearingVault", "session code: ClearingDisputes", "session code: ClearingChannel"].reduce((a, k) => a + (l1.gas[k] ?? 0), 0);
 
-  /** A session: its own L1 contracts (config + collateral), registered in the vault. */
+  // The session code, once per app; each session is a 45-byte proxy of it.
+  const code = await deploySessionCode(l1, op);
+  l1Txs["app: session code"] = 2;
+  /** A session: the vault opens a proxy of the session code with this config (its collateral is its own). */
   async function openSession(id: bigint) {
     const tag = `session ${id}`;
-    const disputes = await l1.deploy(ROOT, op, "ClearingDisputes.sol", "ClearingDisputes", [{
-      operator: op.address, usd: token.address, anchors: anchors.address, codec: codec.address,
-      priceAdapter: adapter.address, bandBps: 100n, challengeWindow: BigInt(WINDOW), forceDelay: BigInt(DAY),
-      maxAnchorAge: 256n, minBond: parseEther("1"), takeoverDelay: BigInt(2 * DAY), appChainId: 7001n, vault: vault.address, sessionId: id,
-    }], `${tag}: deploy`);
-    const core = await l1.deploy(ROOT, op, "ClearingChannel.sol", "ClearingChannel", [disputes.address], `${tag}: deploy`);
-    await send(vault, "register", [core.address], op, `${tag}: register`);
-    l1Txs[`${tag}: deploy`] = 2;
-    const ch = mergeAbi(core, disputes);
-    imports.set(ch.address, [ch.address, disputes.address, proxy.address, agg.address]);
-    return ch;
+    const s = await openSessionOf(l1, op, vault, code, {
+      operator: op.address, anchors: anchors.address, codec: codec.address, priceAdapter: adapter.address, bandBps: 100n,
+      challengeWindow: BigInt(WINDOW), forceDelay: BigInt(DAY), maxAnchorAge: 256n, minBond: parseEther("1"), takeoverDelay: BigInt(2 * DAY), appChainId: 7001n,
+    }, `${tag}: open`);
+    l1Txs[`${tag}: open`] = 1;
+    if (s.id !== id) throw new Error(`expected session ${id}, got ${s.id}`);
+    imports.set(s.channel.address, [...s.imports, proxy.address, agg.address]);
+    return s.channel;
   }
   const imports = new Map<Address, Address[]>(); // per session: what its executor imports (read-only)
   const domainOf = (ch: C, id: bigint) => ({ name: "SkimClearing", version: "0", chainId: 7001, verifyingContract: ch.address, salt: pad(toHex(id), { size: 32 }) });
@@ -337,8 +337,8 @@ async function run(l1: Chain) {
   Object.assign(metrics, {
     note: "anvil L1 (chain 900) and anvil executors (chain 7001). Gas = L1 receipt gasUsed, summed per label; txs = count per label.",
     users: pkg.users.length,
-    appSetup: { gas: appSetup, txs: 4, what: "AnchorRegistry, ChainlinkAdapter, ClearingCodec, ClearingVault: once per app" },
-    sessionSetup: { gas: l1.gas["session 1: deploy"] + l1.gas["session 1: register"], txs: 3, what: "ClearingDisputes + ClearingChannel + vault.register, per session" },
+    appSetup: { gas: appSetupGas(), txs: 6, what: "AnchorRegistry, ChainlinkAdapter, ClearingCodec, ClearingVault, and the session code (ClearingDisputes + ClearingChannel): once per app" },
+    sessionSetup: { gas: l1.gas["session 1: open"], txs: 1, what: "vault.openSession: a 45-byte proxy of the session code plus its config, per session" },
     perBatch: { proposeGas: Math.round(l1.gas["operator: propose"] / l1Txs["operator: propose"]), finalizeGas: Math.round(l1.gas["operator: finalize"] / l1Txs["operator: finalize"]) },
     idle: "no L1 transactions while idle (no batch, no proposal). An Active session must still be watched: after takeoverDelay anyone may propose",
     close: { beginCloseGas: l1.gas["operator: beginClose"], closeGas: l1.gas["operator: close"], txs: 2 },
@@ -352,7 +352,7 @@ async function run(l1: Chain) {
       publishedLeafBytes: (pkg.leaves.length - 2) / 2,
       bySize: "contracts/test/clearing/ClearingSession.t.sol test_publishFinalCost: ~5k execution gas + 108 calldata bytes per user, linear; 1024 users in one chunk = 5.1M execution gas + 110 KB",
     },
-    restart: { ms: restartMs, l1Txs: 3, executorSetupMs: op2.startMs, what: "deploy + register session 2, start an empty executor; no replay of session 1" },
+    restart: { ms: restartMs, l1Txs: 1, executorSetupMs: op2.startMs, what: "open session 2 (one transaction), start an empty executor; no replay of session 1" },
     users_: {
       claimWhileActiveGas: l1.gas["user: claim (active)"],
       redeemToWalletGas: Math.round(l1Now.gas["user: redeem → wallet"] / 3), redeemToVaultGas: l1Now.gas["user: redeem → vault"],

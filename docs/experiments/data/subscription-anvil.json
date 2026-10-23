@@ -1,9 +1,9 @@
 {
   "note": "anvil L1 (no skim stream: the executor polls the head every 500 ms); app executor crates/app-executor",
   "executor": {
-    "coldReadMs": 3.9,
-    "warmReadMs": 0.84,
-    "followLatencyMs": 376,
+    "coldReadMs": 4.8,
+    "warmReadMs": 0.73,
+    "followLatencyMs": 383,
     "acrossOneUpdate": {
       "code_requests": 0,
       "cold_fetches": 0,
@@ -25,22 +25,22 @@
       "proofSlots": 1,
       "codeRequests": 0,
       "headerRequests": 1,
-      "provingMs": 2.6
+      "provingMs": 2.2
     }
   },
   "clearing": {
     "segments": [
       {
-        "anchorBlock": "20",
+        "anchorBlock": "22",
         "price": "2000000000",
         "firstFill": 0
       },
       {
-        "anchorBlock": "21",
+        "anchorBlock": "23",
         "price": "2100000000",
         "firstFill": 1
       }
     ],
-    "proposeGas": 1443596
+    "proposeGas": 1465874
   }
 }

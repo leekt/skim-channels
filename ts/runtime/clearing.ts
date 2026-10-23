@@ -104,6 +104,31 @@ export type Segment = { number: bigint; hash: Hex; time: bigint; snap: Snapshot;
 export type Feed = { proxy: Address; aggregator: Address };
 
 
+/** A clearing session's code, deployed once per app: sessions are minimal proxies of it. */
+export type SessionCode = { channel: C; disputes: C };
+
+export async function deploySessionCode(l1: Chain, from: PrivateKeyAccount): Promise<SessionCode> {
+  const disputes = await l1.deploy(ROOT_OF(l1), from, "ClearingDisputes.sol", "ClearingDisputes", [], "session code: ClearingDisputes");
+  const channel = await l1.deploy(ROOT_OF(l1), from, "ClearingChannel.sol", "ClearingChannel", [disputes.address], "session code: ClearingChannel");
+  return { channel, disputes };
+}
+
+/**
+ * Open the app's next session: the vault creates a 45-byte proxy of the session code and
+ * initializes it with `config` (it sets its own address, its token and the next id).
+ * `imports` are the L1 accounts the app executor imports for it: the session, both halves of
+ * its code (they run there by delegatecall), and whatever the caller adds (e.g. the feed).
+ */
+export async function openSession(l1: Chain, owner: PrivateKeyAccount, vault: C, code: SessionCode, config: Record<string, unknown>, label = "open session") {
+  const full = { vault: "0x0000000000000000000000000000000000000000", usd: "0x0000000000000000000000000000000000000000", sessionId: 0n, ...config };
+  const r = await l1.send(vault, "openSession", [code.channel.address, full], owner, label);
+  const ev = r.logs.map((l) => { try { return decodeEventLog({ abi: vault.abi, data: l.data, topics: l.topics }) as any; } catch { return undefined; } })
+    .find((e) => e?.eventName === "SessionOpened");
+  const address = ev.args.session as Address;
+  const channel = mergeAbi({ address, abi: code.channel.abi }, code.disputes);
+  return { channel, id: BigInt(ev.args.id), startBlock: r.blockNumber, imports: [address, code.channel.address, code.disputes.address] as Address[] };
+}
+
 export function mergeAbi(core: C, half: C): C {
   const names = new Set(core.abi.filter((x: any) => x.type === "function").map((x: any) => x.name));
   return { address: core.address, abi: [...core.abi, ...half.abi.filter((x: any) => x.type !== "function" || !names.has(x.name))] as Abi };
