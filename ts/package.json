@@ -15,7 +15,8 @@
     "live-executor": "node --experimental-strip-types live-executor.ts",
     "e2e-sessions": "node --experimental-strip-types e2e-sessions.ts",
     "e2e-subscription": "node --experimental-strip-types e2e-subscription.ts",
-    "live-subscription": "node --experimental-strip-types live-subscription.ts"
+    "live-subscription": "node --experimental-strip-types live-subscription.ts",
+    "test-runtime": "node --experimental-strip-types test-runtime.ts"
   },
   "dependencies": {
     "viem": "2.30.0"

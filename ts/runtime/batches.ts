@@ -4,8 +4,13 @@
 //   L1 transaction and block that proposed it, in a journal written atomically to disk;
 // - recovery starts at the EARLIEST affected batch and replays every later unproposed batch
 //   too (a later batch may spend what an earlier one produced);
+// - every L1 block a batch executed against is watched (its opening head and every
+//   execution segment's head), and the earliest batch with an orphaned one is recovered;
 // - the new snapshot and its proofs are obtained BEFORE anything is rolled back; if that
 //   fails, nothing changes;
+// - the original batches stay in the journal, untouched, until a recovery completes: the
+//   replay is built apart (`recovering.merged`) and swapped in with one save, so a crash
+//   mid-replay resumes from the full original log;
 // - only accepted actions are replayed; rejected ones are reported, never silently retried;
 // - a block the node doesn't know is "unknown", not "orphaned": proposing pauses and
 //   nothing is replayed.
@@ -31,7 +36,12 @@ export type JournalBatch<A, O> = {
 
 export type Journal<A, O> = {
   batches: JournalBatch<A, O>[];
-  recovering?: { from: string; reason: string; snap: Snapshot; prepared: unknown };
+  /**
+   * A recovery in progress. The affected batches (from `from` on) stay in `batches`
+   * unchanged until it completes; `merged` is the replay being built (discarded and rebuilt
+   * if the process stops before it's swapped in).
+   */
+  recovering?: { from: string; reason: string; snap: Snapshot; prepared: unknown; merged?: JournalBatch<A, O> };
 };
 
 export type RecoveryReport<A> = {
@@ -47,6 +57,7 @@ export type AnchorStatus = "canonical" | "orphaned" | "unknown";
 
 const big = (_k: string, v: unknown) => (typeof v === "bigint" ? { $big: v.toString() } : v);
 const unbig = (_k: string, v: any) => (v && typeof v === "object" && "$big" in v ? BigInt(v.$big) : v);
+const copy = <T>(x: T): T => JSON.parse(JSON.stringify(x, big), unbig);
 
 /**
  * The lifecycle engine. Subclasses supply the executor-specific steps; everything about
@@ -87,6 +98,17 @@ export abstract class BatchRuntime<A, O> {
     return undefined;
   }
   protected abstract run(action: A): Promise<void>;
+  /** Every L1 block batch `b` executed against after it opened (its execution segments). */
+  protected heads(_b: JournalBatch<A, O>): Snapshot[] {
+    return [];
+  }
+  /**
+   * An action that failed for a reason outside it (e.g. L1 reorganized under the batch): not
+   * logged as rejected; the error propagates and recovery replays the action later.
+   */
+  protected transient(_e: unknown): boolean {
+    return false;
+  }
   protected abstract sealOne(): Promise<void>;
   /** Rebuild the executor when its checkpoint is gone (e.g. it restarted). */
   protected abstract rebuild(): Promise<void>;
@@ -103,8 +125,9 @@ export abstract class BatchRuntime<A, O> {
     return this.journal.batches;
   }
 
+  /** The batch actions go into: during a recovery, the replay being built. */
   get current(): JournalBatch<A, O> {
-    return this.batches[this.batches.length - 1];
+    return this.journal.recovering?.merged ?? this.batches[this.batches.length - 1];
   }
 
   /** The latest batch with this executor number (a rebuilt executor numbers from 1 again). */
@@ -132,6 +155,7 @@ export abstract class BatchRuntime<A, O> {
       await this.run(action);
       out = { action, ok: true };
     } catch (e: any) {
+      if (this.transient(e)) throw e;
       out = { action, ok: false, error: e?.cause?.data?.errorName ?? e?.cause?.reason ?? e?.shortMessage ?? String(e) };
     }
     this.current.log.push(out);
@@ -160,15 +184,37 @@ export abstract class BatchRuntime<A, O> {
   // ---- watching ----------------------------------------------------------------------------
 
   /** skim's stream says so first (an explicit rewind); otherwise the node's block at that height. */
-  async anchorStatus(b: JournalBatch<A, O>): Promise<AnchorStatus> {
-    if (this.watched.length && (await this.view.skimRewound(b.snap, this.watched)) === "rewound") return "orphaned";
-    return this.view.canonicalStatus(b.snap);
+  async snapStatus(snap: Snapshot): Promise<AnchorStatus> {
+    if (this.watched.length && (await this.view.skimRewound(snap, this.watched)) === "rewound") return "orphaned";
+    return this.view.canonicalStatus(snap);
   }
 
   /**
-   * One pass: find the earliest unproposed batch whose anchor left the chain, or will be too
-   * old to propose (block-based maxAnchorAge, minus a margin), and recover from it. An
-   * unknown status pauses proposing and changes nothing.
+   * Every block batch `b` executed against: its opening head and each segment's head.
+   * Orphaned if any left the chain; unknown if none did but one can't be confirmed. A head
+   * that merely moved on is not a change: only a different block at a recorded height is.
+   */
+  async anchorStatus(b: JournalBatch<A, O>): Promise<AnchorStatus> {
+    let unknown = false;
+    for (const s of [b.snap, ...this.heads(b)]) {
+      const st = await this.snapStatus(s);
+      if (st === "orphaned") return st;
+      if (st === "unknown") unknown = true;
+    }
+    return unknown ? "unknown" : "canonical";
+  }
+
+  /** The oldest block batch `b` executed against. */
+  oldest(b: JournalBatch<A, O>): bigint {
+    return [b.snap, ...this.heads(b)].reduce((m, s) => (s.number < m ? s.number : m), b.snap.number);
+  }
+
+  /**
+   * One pass: find the earliest unproposed batch that executed against a block that left
+   * the chain (its opening head or any segment's head), or that will be too old to propose
+   * (block-based maxAnchorAge, minus a margin), and recover from it. The recovery replays
+   * that batch and every later one, so nothing that depended on the orphaned block survives.
+   * An unknown status pauses proposing and changes nothing.
    */
   async tick(): Promise<RecoveryReport<A>> {
     const head = await this.view.head();
@@ -181,7 +227,7 @@ export abstract class BatchRuntime<A, O> {
         return { status: "unknown", from: b.no, reason: "anchor status unknown", replayed: [], dropped: [], notRetried: [] };
       }
       if (s === "orphaned") return this.recover(b.no, "orphaned");
-      if (head - b.snap.number > this.maxAnchorAge - this.ageMargin) return this.recover(b.no, "aged");
+      if (head - this.oldest(b) > this.maxAnchorAge - this.ageMargin) return this.recover(b.no, "aged");
     }
     return { status: "nothing", replayed: [], dropped: [], notRetried: [] };
   }
@@ -211,16 +257,22 @@ export abstract class BatchRuntime<A, O> {
       return { status: "proof-unavailable", from, reason: String((e as Error).message), replayed: [], dropped: [], notRetried: [] };
     }
     // 2. Record the intent, so a crash from here on resumes instead of losing the batches.
-    this.journal.recovering = { from, reason, snap, prepared };
+    this.journal.recovering = { from, reason, snap, prepared: copy(prepared) };
     this.save();
     return this.resume();
   }
 
-  /** Finish a recorded recovery (also at startup, if the journal has one). */
+  /**
+   * Finish a recorded recovery (also at startup, if the journal has one). The affected
+   * batches are read, never modified, until the final swap; a replay a crash interrupted is
+   * discarded and redone from them.
+   */
   async resume(): Promise<RecoveryReport<A>> {
     const r = this.journal.recovering;
     if (!r) return { status: "nothing", replayed: [], dropped: [], notRetried: [] };
+    r.merged = undefined;
     const i = this.batches.findLastIndex((b) => b.no === r.from);
+    if (i < 0) throw new Error(`recovery from ${r.from}: the batch isn't in the journal`);
     const affected = this.batches.slice(i);
     // 3. Roll the executor back to just before the first affected batch.
     const cp = affected[0].checkpoint;
@@ -229,16 +281,20 @@ export abstract class BatchRuntime<A, O> {
       // rebuild() re-executes everything up to (not including) the first affected batch
     }
     const from = affected[0].openState;
-    // 4. Replay their accepted actions, in order, into one batch on the new snapshot.
+    // 4. Replay their accepted actions, in order, into one batch on the new snapshot, built
+    //    apart from the journal's batches (`current` is the replay while it's being built).
     const checkpoint = await this.exec.checkpoint();
-    const no = await this.openWith(r.prepared);
-    const merged: JournalBatch<A, O> = { no: `${no}`, state: "open", snap: this.openedAt(r.prepared) ?? r.snap, openState: from, prepared: r.prepared, log: [], checkpoint };
-    this.journal.batches = [...this.batches.slice(0, i), merged];
+    const prepared = copy(r.prepared);
+    const no = await this.openWith(prepared);
+    r.merged = { no: `${no}`, state: "open", snap: this.openedAt(prepared) ?? r.snap, openState: from, prepared, log: [], checkpoint };
+    this.save();
     const accepted = affected.flatMap((b) => b.log.filter((l) => l.ok));
     const notRetried = affected.flatMap((b) => b.log.filter((l) => !l.ok));
     const replayed: Logged<A>[] = [];
     for (const l of accepted) replayed.push(await this.apply(l.action));
     if (affected.some((b) => b.state === "sealed")) await this.seal();
+    // 5. One save swaps the originals for the replay and clears the intent.
+    this.journal.batches = [...this.batches.slice(0, i), r.merged];
     this.journal.recovering = undefined;
     this.save();
     return { status: "recovered", from: r.from, reason: r.reason, replayed, dropped: replayed.filter((x) => !x.ok), notRetried };

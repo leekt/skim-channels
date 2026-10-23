@@ -88,7 +88,7 @@ jobs:
       - name: e2e stateful clearing (optimistic settlement, recovery, handover, forced orders)
         working-directory: ts
         run: npm run -s e2e-clearing
-      - name: e2e app executor (imported L1 accounts, write rules, pin moves)
+      - name: e2e app executor (imported L1 accounts, write rules, following)
         working-directory: ts
         run: npm run -s e2e-executor
       - name: e2e sessions (close, forget, restart from recovery material)
@@ -97,3 +97,6 @@ jobs:
       - name: e2e subscription (the executor follows L1; oracle segments)
         working-directory: ts
         run: npm run -s e2e-subscription
+      - name: batch runtime control flow (segment reorgs, crash-safe recovery)
+        working-directory: ts
+        run: npm run -s test-runtime
