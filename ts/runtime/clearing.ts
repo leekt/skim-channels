@@ -104,6 +104,35 @@ export type Segment = { number: bigint; hash: Hex; time: bigint; snap: Snapshot;
 export type Feed = { proxy: Address; aggregator: Address };
 
 
+/** `propose` before oracle segments: one witness instead of witnesses and segment starts. */
+const LEGACY_PROPOSE = [{
+  type: "function", name: "propose", stateMutability: "payable", outputs: [],
+  inputs: ["bytes", "bytes", "bytes", "bytes32[]", "uint64", "uint64", "bytes"].map((type, i) => ({ type, name: `a${i}` })),
+}] as const;
+/** The `Proposed` event before oracle segments (one price and anchor). */
+const LEGACY_PROPOSED = [{
+  type: "event", name: "Proposed", anonymous: false,
+  inputs: [
+    { name: "batch", type: "uint256", indexed: true }, { name: "root", type: "bytes32", indexed: false },
+    { name: "proposer", type: "address", indexed: false }, { name: "price", type: "uint256", indexed: false },
+    { name: "anchorBlock", type: "uint64", indexed: false }, { name: "reqCursor", type: "uint64", indexed: false },
+    { name: "forcedCursor", type: "uint64", indexed: false },
+  ],
+}] as const;
+/** A channel's events, in any layout its session code has used. */
+const historyAbi = (channel: C) => [...channel.abi, ...LEGACY_PROPOSED] as any;
+
+/** The packed account updates of a `propose` call, in any layout a session's code has used. */
+function proposalUpdates(channel: C, input: Hex): Hex {
+  try {
+    const { args } = decodeFunctionData({ abi: channel.abi, data: input }) as any;
+    return args[3]; // propose(witnesses, firstFills, fills, updates, …)
+  } catch {
+    const { args } = decodeFunctionData({ abi: LEGACY_PROPOSE, data: input }) as any;
+    return args[2]; // propose(witness, fills, updates, …)
+  }
+}
+
 /** A clearing session's code, deployed once per app: sessions are minimal proxies of it. */
 export type SessionCode = { channel: C; disputes: C };
 
@@ -326,7 +355,12 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
    * its old block); its proposed leaves are adopted, checked against L1's pending root.
    */
   protected async rebuild() {
-    this.book = await ClearingOperator.deployBook(this.exec, this.l1, this.op, this.channel, this.feed, this.maxStaleness);
+    // A book already on this executor that nothing has happened in yet is reused (its address is
+    // the one wallets were given); otherwise a fresh one is deployed.
+    const unused = (await this.exec.pub.getCode({ address: this.book.address }).catch(() => undefined))
+      && BigInt(await this.exec.read(this.book, "current").catch(() => 1n)) === 0n
+      && (await this.exec.read<Hex>(this.book, "stateDigest").catch(() => "0x1")) === zeroHash;
+    if (!unused) this.book = await ClearingOperator.deployBook(this.exec, this.l1, this.op, this.channel, this.feed, this.maxStaleness);
     // The finalized leaves this operator kept (adopt checks them against L1's root), else L1's history.
     const fin = this.fin.size ? new Map(this.fin) : await ClearingOperator.recover(this.l1, this.channel, this.startBlock);
     const pend = await this.l1.read<any>(this.channel, "pending");
@@ -436,7 +470,7 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
     for (let f = fromBlock; f <= head; f += LOG_RANGE) {
       for (const log of await l1.pub.getLogs({ address: channel.address, fromBlock: f, toBlock: f + LOG_RANGE - 1n < head ? f + LOG_RANGE - 1n : head })) {
         try {
-          const ev = decodeEventLog({ abi: channel.abi, data: log.data, topics: log.topics }) as any;
+          const ev = decodeEventLog({ abi: historyAbi(channel), data: log.data, topics: log.topics }) as any;
           if (ev.eventName === "Proposed") tx = log.transactionHash;
         } catch { /* other */ }
       }
@@ -444,8 +478,7 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
     const out = new Map<number, Account>();
     if (!tx) return out;
     const t = await l1.pub.getTransaction({ hash: tx });
-    const { args } = decodeFunctionData({ abi: channel.abi, data: t.input }) as any;
-    const raw = (args[3] as Hex).slice(2); // updates
+    const raw = proposalUpdates(channel, t.input).slice(2);
     for (let o = 0; o < raw.length; o += 440) {
       const u = raw.slice(o, o + 440);
       out.set(Number(BigInt(`0x${u.slice(0, 8)}`)), unpackLeaf(`0x${u.slice(224)}`));
@@ -464,7 +497,7 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
     const finalizedBatches: bigint[] = [];
     for (const log of logs) {
       try {
-        const ev = decodeEventLog({ abi: channel.abi, data: log.data, topics: log.topics }) as any;
+        const ev = decodeEventLog({ abi: historyAbi(channel), data: log.data, topics: log.topics }) as any;
         if (ev.eventName === "Proposed") proposed.set(ev.args.batch, log.transactionHash);
         if (ev.eventName === "Finalized") finalizedBatches.push(ev.args.batch);
       } catch { /* other */ }
@@ -472,8 +505,7 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
     const fin = new Map<number, Account>();
     for (const b of finalizedBatches) {
       const tx = await l1.pub.getTransaction({ hash: proposed.get(b)! });
-      const { args } = decodeFunctionData({ abi: channel.abi, data: tx.input }) as any;
-      const updates: Hex = args[3]; // propose(witnesses, firstFills, fills, updates, …)
+      const updates = proposalUpdates(channel, tx.input);
       const raw = updates.slice(2);
       for (let o = 0; o < raw.length; o += 440) {
         const u = raw.slice(o, o + 440);

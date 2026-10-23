@@ -38,7 +38,7 @@ import { artifact, Chain, type C } from "./runtime/executor.ts";
 import { L1ReadView } from "./runtime/l1view.ts";
 import { EvidenceStore } from "./runtime/evidence.ts";
 import { Gateway } from "./runtime/gateway.ts";
-import { levels, siblings } from "./runtime/tree.ts";
+import { levels, rootOf, siblings } from "./runtime/tree.ts";
 import { ClearingOperator, deploySessionCode, openSession, EMPTY, eip712Order, leafHash, mergeAbi, orderHash, type Account, type Feed, type Order } from "./runtime/clearing.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
@@ -60,7 +60,7 @@ const maker = privateKeyToAccount(OPERATOR_KEY ? keccak256(concat([OPERATOR_KEY,
 // What each network can afford: the maker's float, the faucet, and how stale a price may be.
 const P = NET === "local"
   ? { makerEth: parseEther("50"), makerUsd: usd(500_000), faucetEth: parseEther("5"), faucetUsd: usd(20_000), bond: parseEther("1"), maxStale: BigInt(DAY), policy: { kind: "confirmations", n: 2 } as const }
-  : { makerEth: parseEther("0.02"), makerUsd: usd(50_000), faucetEth: parseEther("0.005"), faucetUsd: usd(20_000), bond: parseEther("0.01"), maxStale: BigInt(6 * 3600), policy: { kind: "safe" } as const };
+  : { makerEth: parseEther("0.02"), makerUsd: usd(50_000), faucetEth: parseEther("0.005"), faucetUsd: usd(20_000), bond: parseEther("0.003"), maxStale: BigInt(6 * 3600), policy: { kind: "safe" } as const };
 
 type Known = { hash: Hex; order: Order; from: Address; maker: boolean; answered?: boolean; at: number };
 const log: string[] = [];
@@ -93,7 +93,7 @@ async function main() {
   type App = {
     token: Address; anchors: Address; codec: Address; adapter: Address; vault: Address; feed: Feed;
     sessionCode?: { channel: Address; disputes: Address }; // deployed once; sessions are proxies of it
-    sessions: { id: string; channel: Address; disputes: Address; startBlock?: string; makerRedeemed?: boolean }[];
+    sessions: { id: string; channel: Address; disputes: Address; vault?: Address; startBlock?: string; makerRedeemed?: boolean }[];
   };
   // Each session's finalized leaves, kept on disk so a closed session can be redeemed after a restart.
   // Per-session files, keyed by the session's label (vault prefix and id: ids restart per vault).
@@ -155,7 +155,8 @@ async function main() {
 
   // ---- the session: resume the active one, or open a new one (the previous one starts closing) ----
   const last = app.sessions.at(-1);
-  const resume = NET === "sepolia" && !process.env.NEW_SESSION && !!last
+  // Only a session of the current vault resumes (an older generation's sessions are only closed).
+  const resume = NET === "sepolia" && !process.env.NEW_SESSION && !!last && last.vault === app.vault
     && Number((await l1.read<any[]>(sessionC(last.channel), "state"))[5]) === 0;
   if (!resume) {
     // A session is one transaction: the vault opens a proxy of the session code with this config.
@@ -164,7 +165,7 @@ async function main() {
       operator: op.address, anchors: app.anchors, codec: app.codec, priceAdapter: app.adapter, bandBps: 100n,
       challengeWindow: BigInt(WINDOW), forceDelay: BigInt(DAY), maxAnchorAge: 256n, minBond: P.bond, takeoverDelay: BigInt(2 * DAY), appChainId: BigInt(APP_ID),
     });
-    app.sessions.push({ id: `${app.vault.slice(0, 8)}/${s.id}`, channel: s.channel.address, disputes: app.sessionCode!.disputes, startBlock: s.startBlock.toString() });
+    app.sessions.push({ id: `${app.vault.slice(0, 8)}/${s.id}`, channel: s.channel.address, disputes: app.sessionCode!.disputes, vault: app.vault, startBlock: s.startBlock.toString() });
     save();
   }
   const cur = app.sessions.at(-1)!;
@@ -195,8 +196,13 @@ async function main() {
     if (ph === 2 && !s.makerRedeemed) {
       const ip = Number(await l1.read(c, "indexPlusOne", [maker.address]));
       if (ip) {
-        const fin = loadFin(s.id);
         const n = Number(await l1.read(c, "userCount"));
+        const root = (await l1.read<any[]>(c, "state"))[0];
+        // The leaves kept on disk, if they rebuild the final root; otherwise L1's own history.
+        let fin = loadFin(s.id);
+        if (rootOf(levels(Array.from({ length: n }, (_, i) => leafHash(fin.get(i) ?? EMPTY)))) !== root) {
+          fin = await ClearingOperator.recover(l1, c, BigInt(s.startBlock ?? 0));
+        }
         const dense = Array.from({ length: n }, (_, i) => leafHash(fin.get(i) ?? EMPTY));
         await l1.send(c, "redeem", [ip - 1, fin.get(ip - 1) ?? EMPTY, siblings(levels(dense), ip - 1), false], maker);
         note(`session ${s.id}: the maker redeemed its float`);
@@ -205,7 +211,7 @@ async function main() {
       save();
     }
   }
-  for (const s of app.sessions.slice(0, -1)) await closeOld(s);
+  for (const s of app.sessions.slice(0, -1)) await closeOld(s).catch((e) => note(`session ${s.id}: ${String(e?.shortMessage ?? e?.message ?? e).slice(0, 120)} (retried later)`));
 
   // ---- the app network: the executor imports the channel and the feed read-only ----
   const ex = await Chain.appExecutor(ROOT, 18902, APP_ID, l1.url, { readonly: [...imports, app.feed.proxy, app.feed.aggregator] });
@@ -336,7 +342,9 @@ async function main() {
 
   /** Earlier sessions still closing: finish them (see closeOld). */
   async function settleOld() {
-    for (const s of app.sessions.slice(0, -1)) if (!s.makerRedeemed) await closeOld(s);
+    for (const s of app.sessions.slice(0, -1)) {
+      if (!s.makerRedeemed) await closeOld(s).catch((e) => note(`session ${s.id}: ${String(e?.shortMessage ?? e?.message ?? e).slice(0, 120)}`));
+    }
   }
 
   /** Local only: Chainlink feeds update on a heartbeat; the local one re-transmits hourly (L1 time). */
@@ -349,6 +357,7 @@ async function main() {
 
   // ---- the operator loop ----
   let openedAt = 0;
+  let waitNoted = 0;
   let busy = false;
   let stage = "", stageAt = 0; // what the loop is waiting on (the watchdog reports it)
   const at_ = (x: string) => { stage = x; stageAt = Date.now(); };
@@ -396,6 +405,13 @@ async function main() {
         }
       } else {
         const now = (await l1.pub.getBlock()).timestamp;
+        if (now < pend.at + BigInt(WINDOW) && A.batches.some((x) => x.state === "sealed")) {
+          const t = Number(pend.at + BigInt(WINDOW) - now);
+          if (Date.now() - waitNoted > 600_000) {
+            waitNoted = Date.now();
+            note(`waiting on L1: the pending batch finalizes in ${Math.ceil(t / 60)} min; sealed batches propose after it`);
+          }
+        }
         if (now >= pend.at + BigInt(WINDOW)) {
           at_("finalize"); await l1.send(ch, "finalize", [], op);
           await A.finalized();

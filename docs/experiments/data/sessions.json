@@ -2,7 +2,7 @@
   "note": "anvil L1 (chain 900) and anvil executors (chain 7001). Gas = L1 receipt gasUsed, summed per label; txs = count per label.",
   "users": 4,
   "appSetup": {
-    "gas": 10400022,
+    "gas": 10400034,
     "txs": 6,
     "what": "AnchorRegistry, ChainlinkAdapter, ClearingCodec, ClearingVault, and the session code (ClearingDisputes + ClearingChannel): once per app"
   },
@@ -12,7 +12,7 @@
     "what": "vault.openSession: a 45-byte proxy of the session code plus its config, per session"
   },
   "perBatch": {
-    "proposeGas": 1263362,
+    "proposeGas": 1263350,
     "finalizeGas": 89282
   },
   "idle": "no L1 transactions while idle (no batch, no proposal). An Active session must still be watched: after takeoverDelay anyone may propose",
@@ -22,8 +22,8 @@
     "txs": 2
   },
   "monitoring": {
-    "lastProposalToClosedSeconds": 3600,
-    "beginCloseToClosedSeconds": 0,
+    "lastProposalToClosedSeconds": 3601,
+    "beginCloseToClosedSeconds": 1,
     "rule": "Active (even idle): watch, proposals stay possible. Closing: watch until nothing is pending. Closed: nothing to watch once the close transaction is final on L1"
   },
   "recovery": {
@@ -35,9 +35,9 @@
     "bySize": "contracts/test/clearing/ClearingSession.t.sol test_publishFinalCost: ~5k execution gas + 108 calldata bytes per user, linear; 1024 users in one chunk = 5.1M execution gas + 110 KB"
   },
   "restart": {
-    "ms": 198,
+    "ms": 206,
     "l1Txs": 1,
-    "executorSetupMs": 138,
+    "executorSetupMs": 144,
     "what": "open session 2 (one transaction), start an empty executor; no replay of session 1"
   },
   "users_": {
@@ -51,12 +51,12 @@
     "app: AnchorRegistry": 669126,
     "app: ClearingCodec": 1644905,
     "app: ClearingVault": 951495,
-    "session code: ClearingDisputes": 2731382,
+    "session code: ClearingDisputes": 2731394,
     "session code: ClearingChannel": 2488709,
     "session 1: open": 499134,
     "user: deposit": 717263,
-    "AnchorRegistry.record": 469593,
-    "operator: propose": 2526723,
+    "AnchorRegistry.record": 469569,
+    "operator: propose": 2526699,
     "operator: finalize": 267845,
     "user: requestWithdraw": 255271,
     "user: claim (active)": 91699,
