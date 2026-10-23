@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {Test, console} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
 import {Tree} from "../predict/PredictionBase.sol";
-import {TestUSD} from "./Clearing.t.sol";
+import {SlotPriceAdapter, TestUSD} from "./Clearing.t.sol";
 import {ClearingRules as R} from "../../src/clearing/ClearingRules.sol";
 import {ClearingLedger as L} from "../../src/clearing/ClearingLedger.sol";
 import {ClearingChannel} from "../../src/clearing/ClearingChannel.sol";
@@ -63,10 +63,8 @@ contract ClearingCompareTest is Test {
                     operator: op,
                     usd: IERC20Lite(address(usd)),
                     anchors: anchors,
-                    witnessVerifier: wv,
                     codec: codec,
-                    priceFeed: oracle,
-                    priceSlot: bytes32(0),
+                    priceAdapter: new SlotPriceAdapter(oracle, bytes32(0)),
                     bandBps: 100,
                     challengeWindow: 1 hours,
                     forceDelay: 1 days,

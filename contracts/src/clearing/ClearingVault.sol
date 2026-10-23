@@ -12,10 +12,8 @@ interface IClearingSession {
             address operator,
             address usd,
             address anchors,
-            address witnessVerifier,
             address codec,
-            address priceFeed,
-            bytes32 priceSlot,
+            address priceAdapter,
             uint256 bandBps,
             uint256 challengeWindow,
             uint256 forceDelay,
@@ -82,7 +80,7 @@ contract ClearingVault {
     ///         the next id.
     function register(address session) external {
         if (msg.sender != owner || sessionIdOf[session] != 0) revert WrongState();
-        (, address u,,,,,,,,,,,,, address v, uint64 id) = IClearingSession(session).config();
+        (, address u,,,,,,,,,,, address v, uint64 id) = IClearingSession(session).config();
         if (v != address(this) || u != address(usd) || id != sessions.length + 1) revert WrongState();
         sessions.push(session);
         sessionIdOf[session] = id;

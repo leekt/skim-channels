@@ -4,14 +4,12 @@ pragma solidity ^0.8.28;
 import {ClearingLedger as L} from "./ClearingLedger.sol";
 import {ClearingRules as R} from "./ClearingRules.sol";
 import {SparseTree16} from "../predict/SparseTree16.sol";
-import {AnchorRegistry} from "../AnchorRegistry.sol";
-import {WitnessVerifier} from "../verifiers/WitnessVerifier.sol";
-import {WitnessLib} from "../libraries/WitnessLib.sol";
 import {ChannelTypes} from "../libraries/ChannelTypes.sol";
 
 /// @notice Stateless helpers for the clearing channel, split out for code size: the
-///         account-root transition of a proposal, the L1 price at a recorded anchor, and the
-///         replay of one account through a batch (ClearingLedger) for disputes.
+///         account-root transition of a proposal, a fill's fault check, and the replay of
+///         one account through a batch (ClearingLedger) for disputes. The batch price comes
+///         from the session's price adapter (ChainlinkAdapter).
 contract ClearingCodec {
     /// A request as an account replay needs it.
     struct AppliedRequest {
@@ -21,7 +19,6 @@ contract ClearingCodec {
     }
 
     error BadEncoding();
-    error BadAnchor();
 
     /// @return oldRoot root the old leaves belong to (caller: must be finalized)
     /// @return newRoot root after the update
@@ -45,24 +42,6 @@ contract ClearingCodec {
         }
         lastIdx = n == 0 ? 0 : idxs[n - 1];
         (oldRoot, newRoot) = SparseTree16.transition(idxs, olds, news, proof);
-    }
-
-    /// The price slot at a recorded anchor of this chain, at most `maxAge` blocks old.
-    function price(
-        bytes calldata witness,
-        AnchorRegistry anchors,
-        WitnessVerifier verifier,
-        address feed,
-        bytes32 slot,
-        uint256 maxAge
-    ) external view returns (uint256 value, uint64 anchorBlock) {
-        (ChannelTypes.L1Anchor memory a, WitnessLib.Read[] memory reads) = verifier.verify(witness);
-        if (
-            a.chainId != block.chainid || a.stateRoot == 0
-                || anchors.stateRootOf(ChannelTypes.anchorId(a)) != a.stateRoot || block.number > a.blockNumber + maxAge
-        ) revert BadAnchor();
-        value = WitnessLib.find(reads, feed, slot);
-        anchorBlock = a.blockNumber;
     }
 
     /// Whether a fill breaks ClearingRules (band against the batch's L1 price, limits,

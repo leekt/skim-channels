@@ -3,29 +3,45 @@ pragma solidity ^0.8.28;
 
 import {ClearingRules as R} from "./ClearingRules.sol";
 import {ClearingLedger as L} from "./ClearingLedger.sol";
-import {L1View} from "./L1View.sol";
+import {ClearingStorage as S} from "./ClearingStorage.sol";
 import {SparseTree16} from "../predict/SparseTree16.sol";
 import {ChannelTypes} from "../libraries/ChannelTypes.sol";
 
-/// @notice The clearing app for ClearingChannel, on the app's executor (local, not
-///         trusted by L1). AppState: every account exactly as L1 commits it (ClearingLedger),
-///         the order book, and the open batch. Each batch pins one L1 anchor in L1View and
-///         reads only what it needs there: the price, the channel's user list, the deposits
-///         of the users it names, and the withdrawal and forced-order queues. Balances move
-///         only through ClearingLedger, the function L1 replays in disputes.
+/// The L1 channel's views, called at their L1 address: on the app executor the channel (and
+/// its disputes half) are imported read-only, so each call runs L1's code on L1's state at
+/// the executor's pin.
+interface IClearingL1 {
+    function users(uint256 i) external view returns (address);
+    function userCount() external view returns (uint256);
+    function cumIn(uint32 idx) external view returns (S.Totals memory);
+    function requests(uint256 i) external view returns (S.Request memory);
+    function requestCount() external view returns (uint256);
+    function forced(uint256 i) external view returns (S.Forced memory);
+    function forcedCount() external view returns (uint256);
+    function state() external view returns (bytes32, uint256, uint256, uint256, uint256, S.Phase, uint64);
+}
+
+/// Chainlink's feed interface (the proxy apps call).
+interface IAggregatorV3 {
+    function latestRoundData() external view returns (uint80, int256, uint256, uint256, uint80);
+    function decimals() external view returns (uint8);
+}
+
+/// @notice The clearing app for ClearingChannel, on the app executor (crates/app-executor,
+///         not trusted by L1). AppState: every account exactly as L1 commits it
+///         (ClearingLedger), the order book, and the open batch. L1 state is read with
+///         ordinary calls at L1 addresses: the channel's users, deposits and queues, and the
+///         price from the real Chainlink feed (`latestRoundData()` through its proxy), all at
+///         the executor's pin. Balances move only through ClearingLedger, the function L1
+///         replays in disputes.
+///
+/// Price rule (the same one ChainlinkAdapter enforces on L1 from proofs at the batch's
+/// anchor): the feed's latest round at the pin, answered no later than the pin's block time
+/// and no more than `maxStaleness` before it, scaled to 6 decimals.
 ///
 /// A new operator can take over from L1 data alone: `adopt` imports the finalized leaves
-/// (from published proposals) and checks them against the finalized root read on L1.
+/// (from published proposals or a session package) and checks them against L1's root.
 contract ClearingBook {
-    // ClearingChannel storage slots (ClearingStorage, slots 0–6).
-    uint256 internal constant SLOT_USERS = 0;
-    uint256 internal constant SLOT_CUMIN = 1;
-    uint256 internal constant SLOT_REQUESTS = 2;
-    uint256 internal constant SLOT_FORCED = 3;
-    uint256 internal constant SLOT_ROOT = 4;
-    uint256 internal constant SLOT_REQ_CURSOR = 5;
-    uint256 internal constant SLOT_FORCED_CURSOR = 6;
-
     struct Resting {
         L.PackedOrder o;
         bytes sig; // 65 zero bytes for a forced order (its trader authorized it on L1)
@@ -34,9 +50,9 @@ contract ClearingBook {
     }
 
     struct Batch {
-        bytes32 anchorId;
-        uint256 price;
         uint64 anchorBlock;
+        uint64 anchorTime;
+        uint256 price;
         bytes fills; // packed, as L1 takes them
         uint32[] touched;
         uint64 reqFrom;
@@ -46,10 +62,9 @@ contract ClearingBook {
         bool sealed_;
     }
 
-    L1View public immutable l1;
-    address public immutable channel; // on L1
-    address public immutable priceFeed;
-    bytes32 public immutable priceSlot;
+    IClearingL1 public immutable channel; // its L1 address
+    IAggregatorV3 public immutable priceFeed; // the Chainlink proxy's L1 address
+    uint256 public immutable maxStaleness;
     uint256 public immutable bandBps;
     address public immutable operator;
     bytes32 public immutable domain;
@@ -69,7 +84,7 @@ contract ClearingBook {
     mapping(uint256 => mapping(uint256 => uint16)) internal forcedStatus; // batch → forced pos → status
     bytes32 public stateDigest;
 
-    event Opened(uint256 indexed batch, bytes32 anchorId, uint256 price);
+    event Opened(uint256 indexed batch, uint64 anchorBlock, uint256 price);
     event Filled(uint256 indexed batch, bytes32 a, bytes32 b);
     event Sealed(uint256 indexed batch, uint256 fills, uint256 accounts);
 
@@ -86,20 +101,19 @@ contract ClearingBook {
     error Insufficient(uint32 idx);
     error ForcedMismatch(uint256 pos);
     error RootMismatch(bytes32 computed, bytes32 onL1);
+    error StalePrice(uint256 updatedAt, uint64 anchorTime);
 
     constructor(
-        L1View l1_,
         address channel_,
         address priceFeed_,
-        bytes32 priceSlot_,
+        uint256 maxStaleness_,
         uint256 bandBps_,
         address operator_,
         uint64 sessionId_
     ) {
-        l1 = l1_;
-        channel = channel_;
-        priceFeed = priceFeed_;
-        priceSlot = priceSlot_;
+        channel = IClearingL1(channel_);
+        priceFeed = IAggregatorV3(priceFeed_);
+        maxStaleness = maxStaleness_;
         bandBps = bandBps_;
         operator = operator_;
         // Orders are signed for this chain (the network wallets connect to), the L1 channel
@@ -114,21 +128,22 @@ contract ClearingBook {
 
     // ---- reading L1 --------------------------------------------------------------------------
 
-    function _l1(bytes32 anchor, uint256 slot) internal view returns (uint256) {
-        return l1.read(anchor, channel, bytes32(slot));
-    }
-
-    function _arraySlot(uint256 slot, uint256 i, uint256 width) internal pure returns (uint256) {
-        return uint256(keccak256(abi.encode(slot))) + i * width;
-    }
-
-    function _syncUsers(bytes32 anchor) internal {
-        uint256 n = _l1(anchor, SLOT_USERS);
+    function _syncUsers() internal {
+        uint256 n = channel.userCount();
         for (uint256 i = users.length; i < n; ++i) {
-            address u = address(uint160(_l1(anchor, _arraySlot(SLOT_USERS, i, 1))));
+            address u = channel.users(i);
             users.push(u);
             indexPlusOne[u] = uint32(i + 1);
         }
+    }
+
+    /// The feed's latest round at the pin, fresh at `anchorTime`, in 6 decimals.
+    function _price(uint64 anchorTime) internal view returns (uint256) {
+        (, int256 answer,, uint256 updatedAt,) = priceFeed.latestRoundData();
+        if (answer <= 0 || updatedAt > anchorTime || anchorTime > updatedAt + maxStaleness) {
+            revert StalePrice(updatedAt, anchorTime);
+        }
+        return uint256(answer) * 1e6 / 10 ** priceFeed.decimals();
     }
 
     // ---- handover ----------------------------------------------------------------------------
@@ -136,9 +151,9 @@ contract ClearingBook {
     /// @notice Start from L1's finalized state (a new operator, or a restart): the leaves of
     ///         every account (`idx` ascending), checked against the finalized root, and the
     ///         finalized queue cursors.
-    function adopt(bytes32 anchor, uint32[] calldata idx, L.Account[] calldata leaves) external onlyOperator {
+    function adopt(uint32[] calldata idx, L.Account[] calldata leaves) external onlyOperator {
         if (current != 0) revert Adopted();
-        _syncUsers(anchor);
+        _syncUsers();
         uint256[] memory ii = new uint256[](idx.length);
         bytes32[] memory hs = new bytes32[](idx.length);
         for (uint256 i; i < idx.length; ++i) {
@@ -148,63 +163,64 @@ contract ClearingBook {
             hs[i] = L.leafHash(leaves[i]);
         }
         bytes32 root = SparseTree16.build(ii, hs);
-        bytes32 onL1 = bytes32(_l1(anchor, SLOT_ROOT));
+        (bytes32 onL1, uint256 req, uint256 frc,,,,) = channel.state();
         if (root != onL1) revert RootMismatch(root, onL1);
-        reqCursor = uint64(_l1(anchor, SLOT_REQ_CURSOR));
-        forcedCursor = uint64(_l1(anchor, SLOT_FORCED_CURSOR));
-        _step(keccak256(abi.encode("adopt", anchor, root)));
+        reqCursor = uint64(req);
+        forcedCursor = uint64(frc);
+        _step(keccak256(abi.encode("adopt", root)));
     }
 
     // ---- batches -----------------------------------------------------------------------------
 
-    /// @notice Open the next batch on a pinned L1 anchor. Applies, in order: deposits of
+    /// @notice Open the next batch at the executor's pin (`anchorBlock`, with its header time
+    ///         `anchorTime`; the price witness L1 checks is for that block). Applies, in order: deposits of
     ///         `depositUsers` (any user may be left for later; nothing is lost), every queued
     ///         withdrawal request (as far as a user's per-batch limit allows), and takes the
     ///         new forced orders (data relayed from L1 events, checked against L1's hashes)
     ///         into the book.
-    function openBatch(bytes32 anchor, uint32[] calldata depositUsers, bytes[] calldata forcedOrders)
-        external
-        onlyOperator
-    {
+    function openBatch(
+        uint64 anchorBlock,
+        uint64 anchorTime,
+        uint32[] calldata depositUsers,
+        bytes[] calldata forcedOrders
+    ) external onlyOperator {
         if (current != 0 && !batches[current].sealed_) revert BatchOpen();
         uint256 b = ++current;
         Batch storage bt = batches[b];
-        bt.anchorId = anchor;
-        bt.price = l1.read(anchor, priceFeed, priceSlot);
-        (bt.anchorBlock,,) = l1.anchors(anchor);
-        _syncUsers(anchor);
+        bt.anchorBlock = anchorBlock;
+        bt.anchorTime = anchorTime;
+        bt.price = _price(anchorTime);
+        _syncUsers();
         for (uint256 i; i < depositUsers.length; ++i) {
-            _deposit(b, anchor, depositUsers[i]);
+            _deposit(b, depositUsers[i]);
         }
-        _serveRequests(b, anchor);
-        _takeForced(b, anchor, forcedOrders);
-        _step(keccak256(abi.encode("open", b, anchor)));
-        emit Opened(b, anchor, bt.price);
+        _serveRequests(b);
+        _takeForced(b, forcedOrders);
+        _step(keccak256(abi.encode("open", b, anchorBlock, bt.price)));
+        emit Opened(b, anchorBlock, bt.price);
     }
 
-    function _deposit(uint256 b, bytes32 anchor, uint32 idx) internal {
-        uint256 t = _l1(anchor, uint256(keccak256(abi.encode(idx, SLOT_CUMIN))));
+    function _deposit(uint256 b, uint32 idx) internal {
+        S.Totals memory t = channel.cumIn(idx);
         L.Account memory a = _touch(b, idx);
-        L.applyDeposits(a, uint128(t), uint128(t >> 128)); // never backwards: L1 only adds
+        L.applyDeposits(a, t.eth, t.usd); // never backwards: L1 only adds
         accounts[idx] = a;
     }
 
-    function _serveRequests(uint256 b, bytes32 anchor) internal {
+    function _serveRequests(uint256 b) internal {
         Batch storage bt = batches[b];
-        uint256 n = _l1(anchor, SLOT_REQUESTS);
+        uint256 n = channel.requestCount();
         uint64 pos = reqCursor;
         bt.reqFrom = pos;
         mapping(uint32 => uint256) storage perUser = _perUser[b];
         for (; pos < n; ++pos) {
-            uint256 w0 = _l1(anchor, _arraySlot(SLOT_REQUESTS, pos, 2));
-            uint32 idx = uint32(w0);
+            S.Request memory q = channel.requests(pos);
+            uint32 idx = q.idx;
             if (perUser[idx] == 16) break; // ClearingStorage.MAX_REQUESTS_PER_BATCH
             perUser[idx] += 1;
-            uint8 token = uint8(w0 >> 32);
-            uint128 amount = uint128(w0 >> 104);
-            _deposit(b, anchor, idx); // the request covers every earlier deposit
+            _deposit(b, idx); // the request covers every earlier deposit
             L.Account memory a = accounts[idx];
-            L.applyRequest(a, token, amount);
+            L.applyRequest(a, q.token, q.amount);
             accounts[idx] = a;
         }
         reqCursor = pos;
@@ -213,9 +229,9 @@ contract ClearingBook {
 
     mapping(uint256 => mapping(uint32 => uint256)) internal _perUser;
 
-    function _takeForced(uint256 b, bytes32 anchor, bytes[] calldata orders) internal {
+    function _takeForced(uint256 b, bytes[] calldata orders) internal {
         Batch storage bt = batches[b];
-        uint256 n = _l1(anchor, SLOT_FORCED);
+        uint256 n = channel.forcedCount();
         uint64 pos = forcedCursor;
         bt.forcedFrom = pos;
         if (orders.length != n - pos) revert ForcedMismatch(pos);
@@ -223,7 +239,7 @@ contract ClearingBook {
             L.PackedOrder memory p = L.decodeOrder(orders[k]);
             if (p.idx >= users.length) revert UnknownTrader();
             bytes32 h = R.orderHash(L.toOrder(p, users[p.idx]));
-            if (bytes32(_l1(anchor, _arraySlot(SLOT_FORCED, pos, 2))) != h) revert ForcedMismatch(pos);
+            if (channel.forced(pos).hash != h) revert ForcedMismatch(pos);
             if (book[h].live) {
                 book[h].forcedPlusOne = pos + 1; // already relayed off-chain: now also forced
             } else if (!consumed[h]) {
@@ -304,12 +320,13 @@ contract ClearingBook {
 
     // ---- views for the proposal --------------------------------------------------------------
 
-    /// Everything L1's `propose` needs for batch `b` (the price witness comes from the runtime).
+    /// Everything L1's `propose` needs for batch `b` (the price witness at `anchorBlock` comes
+    /// from the runtime).
     function proposal(uint256 b)
         external
         view
         returns (
-            bytes32 anchorId,
+            uint64 anchorBlock,
             bytes memory fills,
             uint32[] memory idx,
             L.Account[] memory olds,
@@ -330,7 +347,7 @@ contract ClearingBook {
         for (uint64 j = bt.forcedFrom; j < bt.forcedTo; ++j) {
             statuses = bytes.concat(statuses, bytes2(forcedStatus[b][j]));
         }
-        return (bt.anchorId, bt.fills, idx, olds, news, bt.reqTo, bt.forcedTo, statuses);
+        return (bt.anchorBlock, bt.fills, idx, olds, news, bt.reqTo, bt.forcedTo, statuses);
     }
 
     /// An account's leaf at the end of batch `b`: its leaf before the next batch that touched
@@ -340,6 +357,12 @@ contract ClearingBook {
             if (touchedIn[k][i]) return before[k][i];
         }
         return accounts[i];
+    }
+
+    /// What batch `b` was opened at: the L1 block and time, and the price it used.
+    function batchInfo(uint256 b) external view returns (uint64 anchorBlock, uint64 anchorTime, uint256 price) {
+        Batch storage bt = batches[b];
+        return (bt.anchorBlock, bt.anchorTime, bt.price);
     }
 
     function account(uint32 idx) external view returns (L.Account memory) {

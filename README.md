@@ -54,7 +54,7 @@ Three pieces arrived at once:
 
 | | Where it lives | Lifetime |
 |---|---|---|
-| L1 reads | One pinned, proven snapshot per batch (`L1View`) | Per batch |
+| L1 reads | Calls into imported L1 contracts at their L1 addresses, at the executor's pin; every value proven (`crates/app-executor`) | Per pin (moves forward; app state is kept) |
 | AppState (accounts, book, nonces) | `ClearingBook` on a local executor, which L1 doesn't trust | Across batches and L1 snapshots |
 | Escrow, the account root, queues, payouts | L1 `ClearingChannel` (optimistic; one-transaction challenges per fill or account) | Permanent |
 
@@ -87,9 +87,10 @@ Three pieces arrived at once:
 | `contracts/src/verifiers` | `WitnessVerifier`, `ReceiptVerifier`, `ExecuteVerifier` (EXECUTE), `ProofDependencyVerifier` (EIP-8288 adapter, not deployable yet) |
 | `crates/channel-app` | App channels: exit/credit trees, the reference ledger (mock prover), net diffs, recovery from L1 data |
 | `contracts/src/app` | `AppChannelVault`, `AppLeaves`, `IAppCheckpointVerifier`, `MockAppCheckpointVerifier` (labeled mock) |
-| `contracts/src/predict`, `contracts/src/clearing` | Prediction rounds (optimistic); clearing (`ClearingBook` and `L1View` for the executor; `ClearingChannel` + `ClearingDisputes` + `ClearingCodec` on L1; `ClearingLedger` shared; cost controls `ClearingDirectBatch`, `ClearingL1`) |
+| `contracts/src/predict`, `contracts/src/clearing` | Prediction rounds (optimistic); clearing (`ClearingBook` on the app executor; `ClearingChannel` + `ClearingDisputes` + `ClearingCodec` on L1, `ChainlinkAdapter` for the price, `ClearingVault` across sessions; `ClearingLedger` shared; cost controls `ClearingDirectBatch`, `ClearingL1`) |
 | `ts/runtime` | The stateful runtime: `L1ReadView` (skim snapshots, readiness, rewinds), executor checkpoints, the batch journal and recovery engine, the clearing operator, the evidence store |
-| `ts/` | viem cross-checks of every commitment; `e2e.ts` (two anvil chains), `e2e-native.ts` (ethrex), `e2e-app.ts` (app-channel recovery), `e2e-predict.ts`, `e2e-clearing.ts`, `live-skim-clearing.ts` (needs `SKIM_RPC`) |
+| `ts/` | viem cross-checks of every commitment; `e2e.ts` (two anvil chains), `e2e-native.ts` (ethrex), `e2e-app.ts` (app-channel recovery), `e2e-predict.ts`, `e2e-clearing.ts`, `e2e-sessions.ts`, `e2e-executor.ts`, `live-executor.ts` (needs `SKIM_RPC`), `devnet.ts` |
+| `crates/app-executor` | The app network's EVM (revm): app state over imported L1 accounts, read lazily with proofs at a pinned block; write rules; standard JSON-RPC |
 
 ## Quick start
 

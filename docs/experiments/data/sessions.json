@@ -2,17 +2,17 @@
   "note": "anvil L1 (chain 900) and anvil executors (chain 7001). Gas = L1 receipt gasUsed, summed per label; txs = count per label.",
   "users": 4,
   "appSetup": {
-    "gas": 4774027,
+    "gas": 5038325,
     "txs": 4,
-    "what": "AnchorRegistry, WitnessVerifier, ClearingCodec, ClearingVault: once per app"
+    "what": "AnchorRegistry, ChainlinkAdapter, ClearingCodec, ClearingVault: once per app"
   },
   "sessionSetup": {
-    "gas": 2396790,
+    "gas": 2378869,
     "txs": 3,
     "what": "ClearingDisputes + ClearingChannel + vault.register, per session"
   },
   "perBatch": {
-    "proposeGas": 703994,
+    "proposeGas": 1240320,
     "finalizeGas": 85510
   },
   "idle": "no L1 transactions while idle (no batch, no proposal). An Active session must still be watched: after takeoverDelay anyone may propose",
@@ -35,9 +35,9 @@
     "bySize": "contracts/test/clearing/ClearingSession.t.sol test_publishFinalCost: ~5k execution gas + 108 calldata bytes per user, linear; 1024 users in one chunk = 5.1M execution gas + 110 KB"
   },
   "restart": {
-    "ms": 1860,
+    "ms": 327,
     "l1Txs": 3,
-    "executorSetupMs": 1678,
+    "executorSetupMs": 137,
     "what": "deploy + register session 2, start an empty executor; no replay of session 1"
   },
   "users_": {
@@ -47,24 +47,23 @@
     "vaultFundGas": 127574
   },
   "gas": {
-    "app: price fixture": 138909,
-    "app: AnchorRegistry": 652735,
-    "app: WitnessVerifier": 1418974,
-    "app: ClearingCodec": 1889657,
-    "app: ClearingVault": 812661,
-    "session 1: deploy": 2296798,
-    "session 1: register": 99992,
+    "app: ChainlinkAdapter": 1914405,
+    "app: AnchorRegistry": 669126,
+    "app: ClearingCodec": 1644905,
+    "app: ClearingVault": 809889,
+    "session 1: deploy": 2279265,
+    "session 1: register": 99604,
     "user: deposit": 689682,
-    "AnchorRegistry.record": 402918,
-    "operator: propose": 1407987,
+    "AnchorRegistry.record": 469593,
+    "operator: propose": 2480640,
     "operator: finalize": 256529,
     "user: requestWithdraw": 249921,
     "user: claim (active)": 88859,
     "operator: beginClose": 49952,
     "operator: close": 34320,
     "optional: publishFinal": 108485,
-    "session 2: deploy": 2296798,
-    "session 2: register": 82892,
+    "session 2: deploy": 2279265,
+    "session 2: register": 82504,
     "operator: withdrawBond": 28762,
     "user: redeem → vault": 160870,
     "user: vault.fund": 255147,

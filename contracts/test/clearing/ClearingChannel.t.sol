@@ -3,7 +3,8 @@ pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
 import {Tree} from "../predict/PredictionBase.sol";
-import {TestUSD} from "./Clearing.t.sol";
+import {TestUSD, SlotPriceAdapter} from "./Clearing.t.sol";
+import {ChainlinkAdapter} from "../../src/clearing/ChainlinkAdapter.sol";
 import {ClearingRules as R} from "../../src/clearing/ClearingRules.sol";
 import {ClearingLedger as L} from "../../src/clearing/ClearingLedger.sol";
 import {ClearingChannel} from "../../src/clearing/ClearingChannel.sol";
@@ -11,7 +12,6 @@ import {ClearingDisputes} from "../../src/clearing/ClearingDisputes.sol";
 import {ClearingStorage, IERC20Lite} from "../../src/clearing/ClearingStorage.sol";
 import {ClearingCodec} from "../../src/clearing/ClearingCodec.sol";
 import {AnchorRegistry} from "../../src/AnchorRegistry.sol";
-import {WitnessVerifier} from "../../src/verifiers/WitnessVerifier.sol";
 
 /// Shared setup for the v2 clearing channel: L1 price 7000 (fixture slot 0 at block 101),
 /// three users, and a model of the finalized account tree.
@@ -37,7 +37,7 @@ abstract contract ClearingChannelBase is Test {
     ClearingDisputes D; // the channel's address, typed for its delegatecalled half
     ClearingCodec codec;
     AnchorRegistry anchors;
-    WitnessVerifier wv;
+    SlotPriceAdapter priceAdapter;
     TestUSD usd;
     address op = address(0x0FE7);
     address watcher = address(0x5EE);
@@ -57,7 +57,7 @@ abstract contract ClearingChannelBase is Test {
         bytes memory raw1 = vm.parseJsonBytes(fx, ".h1.rawHeader");
         pkg1 = vm.parseJsonBytes(fx, ".h1.package");
         anchors = new AnchorRegistry();
-        wv = new WitnessVerifier();
+        priceAdapter = new SlotPriceAdapter(oracle, bytes32(0));
         codec = new ClearingCodec();
         usd = new TestUSD();
         vm.roll(200);
@@ -84,10 +84,8 @@ abstract contract ClearingChannelBase is Test {
             operator: op,
             usd: IERC20Lite(address(usd)),
             anchors: anchors,
-            witnessVerifier: wv,
             codec: codec,
-            priceFeed: oracle,
-            priceSlot: bytes32(0),
+            priceAdapter: priceAdapter,
             bandBps: 100,
             challengeWindow: 1 hours,
             forceDelay: 1 days,
@@ -368,7 +366,7 @@ contract ClearingChannelTest is ClearingChannelBase {
         ch.propose{value: 1 ether}(pkg1, fills, u, proof, 1, 0, "");
         vm.roll(101 + 257);
         vm.prank(op);
-        vm.expectRevert(ClearingCodec.BadAnchor.selector);
+        vm.expectRevert(ChainlinkAdapter.BadAnchor.selector);
         ch.propose{value: 1 ether}(pkg1, fills, u, proof, 0, 0, "");
     }
 
@@ -505,7 +503,7 @@ contract ClearingChannelTest is ClearingChannelBase {
         (bytes memory fills, L.Account[] memory n) = _batch1();
         (bytes memory u, bytes32[] memory proof) = _updates(n);
         vm.prank(op);
-        vm.expectRevert(ClearingCodec.BadAnchor.selector); // block 100: never recorded
+        vm.expectRevert(ChainlinkAdapter.BadAnchor.selector); // block 100: never recorded
         ch.propose{value: 1 ether}(vm.parseJsonBytes(fx, ".h0.package"), fills, u, proof, 0, 0, "");
     }
 

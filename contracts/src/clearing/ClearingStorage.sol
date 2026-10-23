@@ -6,7 +6,7 @@ import {ClearingCodec} from "./ClearingCodec.sol";
 import {ClearingRules as R} from "./ClearingRules.sol";
 import {SparseTree16} from "../predict/SparseTree16.sol";
 import {AnchorRegistry} from "../AnchorRegistry.sol";
-import {WitnessVerifier} from "../verifiers/WitnessVerifier.sol";
+import {IPriceAdapter} from "./ChainlinkAdapter.sol";
 
 interface IERC20Lite {
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
@@ -38,10 +38,8 @@ abstract contract ClearingStorage {
         address operator;
         IERC20Lite usd;
         AnchorRegistry anchors;
-        WitnessVerifier witnessVerifier;
         ClearingCodec codec;
-        address priceFeed;
-        bytes32 priceSlot;
+        IPriceAdapter priceAdapter; // the batch price, from a witness at the batch's anchor
         uint256 bandBps;
         uint256 challengeWindow; // proposals stay challengeable this long
         uint256 forceDelay; // a request or forced order must be served by a finalized batch within this
@@ -120,10 +118,8 @@ abstract contract ClearingStorage {
     address internal immutable operator;
     IERC20Lite internal immutable usd;
     AnchorRegistry internal immutable anchors;
-    WitnessVerifier internal immutable witnessVerifier;
     ClearingCodec internal immutable codec;
-    address internal immutable priceFeed;
-    bytes32 internal immutable priceSlot;
+    IPriceAdapter internal immutable priceAdapter;
     uint256 internal immutable bandBps;
     uint256 internal immutable challengeWindow;
     uint256 internal immutable forceDelay;
@@ -179,10 +175,8 @@ abstract contract ClearingStorage {
         operator = c.operator;
         usd = c.usd;
         anchors = c.anchors;
-        witnessVerifier = c.witnessVerifier;
         codec = c.codec;
-        priceFeed = c.priceFeed;
-        priceSlot = c.priceSlot;
+        priceAdapter = c.priceAdapter;
         bandBps = c.bandBps;
         challengeWindow = c.challengeWindow;
         forceDelay = c.forceDelay;

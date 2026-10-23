@@ -1,52 +1,64 @@
-// A persistent devnet for trying the clearing app with a real wallet (MetaMask, Rabby…):
-//   Sepolia   the price: Chainlink ETH/USD on Sepolia, followed through a skim node (SKIM_RPC)
-//   relay     proves the feed's slots at skim's `safe` block into FeedMirror on the L1 devnet
-//   L1        anvil (chain 900, a block every 2 s): FeedMirror, AnchorRegistry, ClearingChannel, test USD
-//   app       a local executor (chain 7001, fees 0) with L1View + ClearingBook, behind the
-//             standard JSON-RPC gateway (runtime/gateway.ts)
-//   operator  a loop: open batches, match crossing orders, seal, propose, finalize, recover
-//   maker     a bot that answers any user order at the L1 price, so one person can trade
-// One HTTP server (default :8787) serves the test app, /rpc/l1 (filtered: no anvil cheats),
-// /rpc/app (the gateway), and /api/* (faucet, state, claim/exit arguments, devnet controls).
-// Expose it with `tailscale serve --bg 8787` (HTTPS on your tailnet).
+// A persistent devnet for trying the clearing app with a real wallet (MetaMask, Rabby…).
 //
-// The clearing app reads the price from FeedMirror's slot on the L1 devnet, proven per batch as
-// before. FeedMirror verifies every Sepolia storage proof on-chain; that the Sepolia header is
-// canonical is the relay's word (the devnet has no Sepolia BLOCKHASH).
+// Two networks, one code path:
+//   local    (default)  L1 = anvil (chain 900, a block every 2 s) with a Chainlink-layout feed
+//                        (an aggregator behind a proxy) whose price the devnet controls.
+//   sepolia  (SEPOLIA_OPERATOR_KEY set)  L1 = Sepolia through a skim node (SKIM_RPC): the
+//                        session's contracts live on Sepolia, the price is Chainlink's real
+//                        ETH/USD feed there, and every L1 read and write goes through skim.
 //
-// DEVNET ONLY: in-memory chains; the faucet and the time control exist only here.
-// Run: SKIM_RPC=http://127.0.0.1:18545 npm run devnet  (needs anvil, forge build, cargo build,
-// and a skim node following Sepolia)
+// Either way:
+//   app       crates/app-executor (chain 7001, fees 0): ClearingBook reads the channel and the
+//             feed at their L1 addresses (imported read-only, verified at the pin), behind the
+//             standard JSON-RPC gateway (runtime/gateway.ts) wallets connect to
+//   operator  a loop: open batches, match, seal, propose (with the price witness L1's
+//             ChainlinkAdapter checks), finalize, re-pin when idle (no L1 transaction)
+//   maker     a bot that answers any user order inside the band, so one person can trade
+//   sessions  on Sepolia, the app's vault and infrastructure are deployed once
+//             (~/.skim-devnet/sepolia.json); each start opens a new session and closes the
+//             previous one, whose users then redeem or roll over (docs/guide/stateful-runtime.md)
+//
+// One HTTP server (default :8787) serves the test app, /rpc/l1 (filtered), /rpc/app (the
+// gateway) and /api/*. Expose it with `tailscale serve --bg 8787`.
+//
+// Run: npm run devnet                                         (local)
+//      SEPOLIA_OPERATOR_KEY=0x… SKIM_RPC=http://127.0.0.1:18545 npm run devnet   (sepolia)
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  createWalletClient, decodeFunctionData, defineChain, http, pad, parseEther, zeroAddress, parseTransaction, toHex, type Address, type Hex,
+  concat, createWalletClient, decodeFunctionData, defineChain, http, keccak256, pad, parseEther, parseTransaction, toHex,
+  type Address, type Hex,
 } from "viem";
-import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { Chain, type C } from "./runtime/executor.ts";
+import { privateKeyToAccount } from "viem/accounts";
+import { artifact, Chain, type C } from "./runtime/executor.ts";
 import { L1ReadView } from "./runtime/l1view.ts";
-import { FeedRelay, HOT_SLOT, transmissionSlot, type Mirrored } from "./runtime/mirror.ts";
 import { EvidenceStore } from "./runtime/evidence.ts";
 import { Gateway } from "./runtime/gateway.ts";
 import { levels, siblings } from "./runtime/tree.ts";
-import { ClearingOperator, EMPTY, eip712Order, leafHash, mergeAbi, orderHash, type Order } from "./runtime/clearing.ts";
+import { ClearingOperator, EMPTY, eip712Order, leafHash, mergeAbi, orderHash, type Feed, type Order } from "./runtime/clearing.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const CLI = `${ROOT}target/debug/skim-channels`;
 const PORT = Number(process.env.PORT ?? 8787);
-const L1_ID = 900, APP_ID = 7001, WINDOW = 3600, DAY = 86400;
-const SLOT0: Hex = `0x${"0".repeat(64)}`;
+const APP_ID = 7001, WINDOW = 3600, DAY = 86400;
 const SKIM_RPC = process.env.SKIM_RPC ?? "http://127.0.0.1:18545";
+const OPERATOR_KEY = process.env.SEPOLIA_OPERATOR_KEY as Hex | undefined;
+const NET: "local" | "sepolia" = OPERATOR_KEY ? "sepolia" : "local";
 const SEPOLIA = 11155111;
-// Chainlink ETH/USD on Sepolia: the proxy apps call, and the aggregator that holds the answer.
-const FEED_PROXY: Address = "0x694AA1769357215DE4FAC081bf1f309aDC325306";
-const FEED_AGGREGATOR: Address = "0x719E22E3D4b690E5d96cCb40619180B5427F14AE";
+// Chainlink ETH/USD on Sepolia: the proxy apps call.
+const SEPOLIA_FEED_PROXY: Address = "0x694AA1769357215DE4FAC081bf1f309aDC325306";
+const STATE_FILE = join(homedir(), ".skim-devnet", "sepolia.json");
 const usd = (x: number) => BigInt(Math.round(x * 1e6));
-// anvil's well-known dev keys: the operator, and the market maker. Devnet only.
-const op = privateKeyToAccount("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80");
-const maker = privateKeyToAccount("0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba");
+const answer8 = (x: number) => BigInt(Math.round(x * 1e8));
+// Local: anvil's well-known dev keys. Sepolia: the operator's key, and a maker key derived from it.
+const op = privateKeyToAccount(OPERATOR_KEY ?? "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80");
+const maker = privateKeyToAccount(OPERATOR_KEY ? keccak256(concat([OPERATOR_KEY, toHex("maker")])) : "0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba");
+// What each network can afford: the maker's float, the faucet, and how stale a price may be.
+const P = NET === "local"
+  ? { makerEth: parseEther("50"), makerUsd: usd(500_000), faucetEth: parseEther("5"), faucetUsd: usd(20_000), bond: parseEther("1"), maxStale: BigInt(DAY), policy: { kind: "confirmations", n: 2 } as const }
+  : { makerEth: parseEther("0.05"), makerUsd: usd(50_000), faucetEth: parseEther("0.01"), faucetUsd: usd(20_000), bond: parseEther("0.01"), maxStale: BigInt(6 * 3600), policy: { kind: "safe" } as const };
 
 type Known = { hash: Hex; order: Order; from: Address; maker: boolean; answered?: boolean; at: number };
 const log: string[] = [];
@@ -57,60 +69,108 @@ function note(s: string) {
   console.log(line);
 }
 
+const at = (abiOf: C, address: Address): C => ({ address, abi: abiOf.abi });
+const abiOf = (file: string, name: string): C => ({ address: "0x0000000000000000000000000000000000000000", abi: artifact(ROOT, file, name).abi });
+
 async function main() {
-  const l1 = await Chain.anvil(18901, L1_ID, ["--block-time", "2"]);
-  const ex = await Chain.anvil(18902, APP_ID, ["--base-fee", "0", "--gas-limit", "10000000000"]);
-  process.on("SIGINT", () => { l1.stop(); ex.stop(); process.exit(0); });
-
-  // ---- Sepolia, through skim ----
-  const sepolia = new L1ReadView({ url: SKIM_RPC, chainId: SEPOLIA, cli: CLI });
-  const srcId = await sepolia.client.getChainId().catch((e) => { throw new Error(`no skim node at ${SKIM_RPC}: ${e.message}`); });
-  if (Number(srcId) !== SEPOLIA) throw new Error(`${SKIM_RPC} follows chain ${Number(srcId)}, not Sepolia`);
-
   // ---- L1 ----
-  // The relay has its own key, so its transactions never race the operator's nonces.
-  const relayer = privateKeyToAccount(generatePrivateKey());
-  await l1.wallet(op).sendTransaction({ to: relayer.address, value: parseEther("100") }).then((h) => l1.pub.waitForTransactionReceipt({ hash: h }));
-  const oracle = await l1.deploy(ROOT, op, "FeedMirror.sol", "FeedMirror", [BigInt(SEPOLIA), FEED_AGGREGATOR, relayer.address]);
-  const relay = new FeedRelay(sepolia, l1, oracle, relayer, FEED_AGGREGATOR);
-  const relayed: Mirrored[] = [];
-  const first = await relay.step();
-  if (!first) throw new Error("no Sepolia price to start with");
-  relayed.push(first);
-  note(`Sepolia block ${first.sourceBlock} (safe): ETH/USD ${fmtPrice(first.answer)} proven into FeedMirror (${first.proofBytes} B of proofs)`);
-  const anchors = await l1.deploy(ROOT, op, "AnchorRegistry.sol", "AnchorRegistry");
-  const wv = await l1.deploy(ROOT, op, "WitnessVerifier.sol", "WitnessVerifier");
-  const codec = await l1.deploy(ROOT, op, "ClearingCodec.sol", "ClearingCodec");
-  const token = await l1.deploy(ROOT, op, "Clearing.t.sol", "TestUSD");
+  let l1: Chain;
+  if (NET === "local") {
+    l1 = await Chain.anvil(18901, 900, ["--block-time", "2"]);
+  } else {
+    l1 = new Chain(SKIM_RPC, SEPOLIA);
+    const id = await l1.pub.getChainId().catch((e) => { throw new Error(`no skim node at ${SKIM_RPC}: ${e.message}`); });
+    if (id !== SEPOLIA) throw new Error(`${SKIM_RPC} follows chain ${id}, not Sepolia`);
+    const bal = await l1.pub.getBalance({ address: op.address });
+    note(`Sepolia operator ${op.address}: ${Number(bal) / 1e18} ETH`);
+    if (bal < parseEther("0.2")) throw new Error(`fund ${op.address} with Sepolia ETH (≥ 0.2; deployments and proposals cost gas)`);
+  }
+  const codeHash = async (a: Address) => (await l1.rpc<any>("eth_getProof", [a, [], "latest"])).codeHash as Hex;
+
+  // ---- the app: feed, adapter, infrastructure and vault (once per app) ----
+  type App = { token: Address; anchors: Address; codec: Address; adapter: Address; vault: Address; feed: Feed; sessions: { id: string; channel: Address; disputes: Address }[] };
+  let app: App;
+  const saved: App | undefined = NET === "sepolia" && existsSync(STATE_FILE) ? JSON.parse(readFileSync(STATE_FILE, "utf8")) : undefined;
+  if (saved) {
+    app = saved;
+    note(`reusing the app's contracts on Sepolia (vault ${app.vault}, ${app.sessions.length} earlier session(s))`);
+  } else {
+    let feed: Feed;
+    if (NET === "local") {
+      const agg = await l1.deploy(ROOT, op, "ChainlinkMocks.sol", "MockOffchainAggregator", [answer8(2000)]);
+      const proxy = await l1.deploy(ROOT, op, "ChainlinkMocks.sol", "MockFeedProxy", [agg.address]);
+      feed = { proxy: proxy.address, aggregator: agg.address };
+    } else {
+      const aggregator = await l1.pub.readContract({ address: SEPOLIA_FEED_PROXY, abi: abiOf("ChainlinkMocks.sol", "MockFeedProxy").abi, functionName: "aggregator" }) as Address;
+      feed = { proxy: SEPOLIA_FEED_PROXY, aggregator };
+    }
+    const adapter = await l1.deploy(ROOT, op, "ChainlinkAdapter.sol", "ChainlinkAdapter",
+      [feed.proxy, await codeHash(feed.proxy), feed.aggregator, await codeHash(feed.aggregator), 8, P.maxStale]);
+    const anchors = await l1.deploy(ROOT, op, "AnchorRegistry.sol", "AnchorRegistry");
+    const codec = await l1.deploy(ROOT, op, "ClearingCodec.sol", "ClearingCodec");
+    const token = await l1.deploy(ROOT, op, "Clearing.t.sol", "TestUSD");
+    const vault = await l1.deploy(ROOT, op, "ClearingVault.sol", "ClearingVault", [op.address, token.address]);
+    app = { token: token.address, anchors: anchors.address, codec: codec.address, adapter: adapter.address, vault: vault.address, feed, sessions: [] };
+  }
+  const save = () => {
+    if (NET !== "sepolia") return;
+    mkdirSync(join(homedir(), ".skim-devnet"), { recursive: true });
+    writeFileSync(STATE_FILE, JSON.stringify(app, null, 2) + "\n");
+  };
+  save();
+  const token = at(abiOf("Clearing.t.sol", "TestUSD"), app.token);
+  const anchors = at(abiOf("AnchorRegistry.sol", "AnchorRegistry"), app.anchors);
+  const vault = at(abiOf("ClearingVault.sol", "ClearingVault"), app.vault);
+  const feedProxy = at(abiOf("ChainlinkMocks.sol", "MockFeedProxy"), app.feed.proxy);
+  const feedAgg = at(abiOf("ChainlinkMocks.sol", "MockOffchainAggregator"), app.feed.aggregator);
+  const chAbi = mergeAbi(abiOf("ClearingChannel.sol", "ClearingChannel"), abiOf("ClearingDisputes.sol", "ClearingDisputes")).abi;
+  const sessionC = (a: Address): C => ({ address: a, abi: chAbi });
+
+  // ---- a new session; the previous one starts closing ----
+  const id = BigInt(Number(await l1.read(vault, "sessionCount")) + 1);
   const disputes = await l1.deploy(ROOT, op, "ClearingDisputes.sol", "ClearingDisputes", [{
-    operator: op.address, usd: token.address, anchors: anchors.address, witnessVerifier: wv.address, codec: codec.address,
-    priceFeed: oracle.address, priceSlot: SLOT0, bandBps: 100n, challengeWindow: BigInt(WINDOW), forceDelay: BigInt(DAY),
-    maxAnchorAge: 256n, minBond: parseEther("1"), takeoverDelay: BigInt(2 * DAY), appChainId: BigInt(APP_ID), vault: zeroAddress, sessionId: 1n,
+    operator: op.address, usd: app.token, anchors: app.anchors, codec: app.codec, priceAdapter: app.adapter, bandBps: 100n,
+    challengeWindow: BigInt(WINDOW), forceDelay: BigInt(DAY), maxAnchorAge: 256n, minBond: P.bond, takeoverDelay: BigInt(2 * DAY),
+    appChainId: BigInt(APP_ID), vault: app.vault, sessionId: id,
   }]);
   const core = await l1.deploy(ROOT, op, "ClearingChannel.sol", "ClearingChannel", [disputes.address]);
-  const ch = mergeAbi(core, disputes);
+  await l1.send(vault, "register", [core.address], op);
+  const ch = sessionC(core.address);
+  app.sessions.push({ id: id.toString(), channel: core.address, disputes: disputes.address });
+  save();
+  for (const s of app.sessions.slice(0, -1)) {
+    const st = await l1.read<any[]>(sessionC(s.channel), "state");
+    if (Number(st[5]) === 0) {
+      await l1.send(sessionC(s.channel), "beginClose", [], op);
+      note(`session ${s.id}: closing (it closes once nothing is pending; its users then redeem or roll over)`);
+    }
+  }
 
-  // ---- app network ----
-  const view = await ex.deploy(ROOT, op, "L1View.sol", "L1View", [BigInt(L1_ID)]);
-  const book = await ex.deploy(ROOT, op, "ClearingBook.sol", "ClearingBook", [view.address, ch.address, oracle.address, SLOT0, 100n, op.address, 1n]);
-  const reader = new L1ReadView({ url: l1.url, chainId: L1_ID, cli: CLI });
+  // ---- the app network: the executor imports the channel and the feed read-only ----
+  const ex = await Chain.appExecutor(ROOT, 18902, APP_ID, l1.url, { readonly: [core.address, disputes.address, app.feed.proxy, app.feed.aggregator] });
+  process.on("SIGINT", () => { if (NET === "local") l1.stop(); ex.stop(); process.exit(0); });
+  const book = await ClearingOperator.deployBook(ex, l1, op, ch, app.feed, P.maxStale);
+  const reader = new L1ReadView({ url: l1.url, chainId: l1.chainId, cli: CLI });
   const A = new ClearingOperator({
-    view: reader, exec: ex, book, l1view: view, op, l1, channel: ch, anchors, priceFeed: oracle.address, priceSlot: SLOT0,
-    evidence: new EvidenceStore(join(tmpdir(), `skim-devnet-evidence-${process.pid}`)), policy: { kind: "confirmations", n: 2 },
-    bond: parseEther("1"), journal: join(tmpdir(), `skim-devnet-journal-${process.pid}.json`), maxAnchorAge: 256n, ageMargin: 32n,
+    view: reader, exec: ex, book, op, l1, channel: ch, anchors, feed: app.feed, maxStaleness: P.maxStale,
+    evidence: new EvidenceStore(join(tmpdir(), `skim-devnet-evidence-${process.pid}`)), policy: P.policy,
+    bond: P.bond, journal: join(tmpdir(), `skim-devnet-journal-${process.pid}.json`), maxAnchorAge: 256n, ageMargin: 32n,
   });
   const gw = new Gateway(A, 18903);
   await gw.start();
 
   // ---- the market maker: funded on L1 like any user ----
-  await l1.send(ch, "deposit", [0, parseEther("50")], maker, undefined, parseEther("50"));
-  await l1.send(token, "mint", [maker.address, usd(500_000)], maker);
-  await l1.send(token, "approve", [ch.address, usd(500_000)], maker);
-  await l1.send(ch, "deposit", [1, usd(500_000)], maker);
+  if (NET === "sepolia" && (await l1.pub.getBalance({ address: maker.address })) < P.makerEth + parseEther("0.02")) {
+    await l1.wallet(op).sendTransaction({ to: maker.address, value: P.makerEth + parseEther("0.02") }).then((h) => l1.pub.waitForTransactionReceipt({ hash: h }));
+  }
+  await l1.send(ch, "deposit", [0, P.makerEth], maker, undefined, P.makerEth);
+  await l1.send(token, "mint", [maker.address, P.makerUsd], maker);
+  await l1.send(token, "approve", [ch.address, P.makerUsd], maker);
+  await l1.send(ch, "deposit", [1, P.makerUsd], maker);
   const appChain = defineChain({ id: APP_ID, name: "skim clearing (devnet)", nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 }, rpcUrls: { default: { http: [gw.url] } } });
   const makerWallet = createWalletClient({ account: maker, chain: appChain, transport: http(gw.url), pollingInterval: 50 });
-  const domain = { name: "SkimClearing", version: "0", chainId: APP_ID, verifyingContract: ch.address, salt: pad(toHex(1n), { size: 32 }) };
-  note(`L1 channel ${ch.address}, app book ${book.address}, maker ${maker.address}`);
+  const domain = { name: "SkimClearing", version: "0", chainId: APP_ID, verifyingContract: ch.address, salt: pad(toHex(id), { size: 32 }) };
+  note(`${NET}: session ${id} channel ${ch.address}, book ${book.address}, feed ${app.feed.proxy}, maker ${maker.address}`);
 
   // ---- orders seen on the app network (from the journal's raw transactions) ----
   const known = new Map<Hex, Known>();
@@ -126,62 +186,37 @@ async function main() {
       } catch { /* not ours */ }
     }
   }
-  const price = async () => BigInt(await l1.read<bigint>(oracle, "price"));
-
-  // ---- the relay: a new Sepolia safe block → a new proven price on L1 ----
-  let sepoliaHead: { block: string; round: number; answer: string; at: number } | undefined;
-  let relayBusy = false;
-  async function relayStep() {
-    if (relayBusy) return;
-    relayBusy = true;
-    try {
-      // The head, unproven: what skim has now (state-ready). Shown, never used for settlement.
-      const head = await sepolia.snapshot({ kind: "latest" });
-      const round = Number(((await sepolia.value(head, FEED_AGGREGATOR, HOT_SLOT)) >> 176n) & 0xffffffffn);
-      const t = await sepolia.value(head, FEED_AGGREGATOR, transmissionSlot(round));
-      sepoliaHead = { block: head.number.toString(), round, answer: ((t & ((1n << 192n) - 1n)) / 100n).toString(), at: Date.now() };
-      const m = await relay.step();
-      if (m) {
-        relayed.push(m);
-        if (relayed.length > 20) relayed.shift();
-        note(`relay: Sepolia block ${m.sourceBlock} (safe), round ${m.round}, ETH/USD ${fmtPrice(m.answer)}: proven into FeedMirror`);
-      }
-    } catch (e: any) {
-      note(`relay: ${String(e?.shortMessage ?? e?.message ?? e).slice(0, 160)}`);
-    } finally {
-      relayBusy = false;
-    }
+  /** The feed now, as any L1 caller sees it (latest block; batches use their pinned block). */
+  async function feedNow() {
+    const [round, ans, , updatedAt] = await l1.read<any[]>(feedProxy, "latestRoundData");
+    return { round: BigInt(round), price: BigInt(ans) / 100n, updatedAt: BigInt(updatedAt) };
   }
-  setInterval(relayStep, 12_000);
-  void relayStep();
-
-  // What each batch read from L1, cached by anchor (an anchor's state never changes).
-  const custody = new Map<Hex, any>();
-  async function batchCustody(b: (typeof A.batches)[number]) {
-    let c = custody.get(b.snap.hash);
-    if (!c) {
-      const at = { blockNumber: b.snap.number };
-      const rd = (fn: string) => l1.pub.readContract({ address: oracle.address, abi: oracle.abi, functionName: fn, ...at }) as Promise<any>;
-      const [p, sb, sh, rnd] = await Promise.all([rd("price"), rd("sourceBlock"), rd("sourceBlockHash"), rd("round")]);
-      const prep = b.prepared as any;
-      const bytes = (h?: Hex) => (h ? (h.length - 2) / 2 : 0);
-      c = {
-        price: p.toString(), sepoliaBlock: sb.toString(), sepoliaHash: sh, round: Number(rnd),
-        priceProofBytes: bytes(prep?.l1Witness?.package) + bytes(prep?.l1Witness?.rawHeader),
-        stateProofBytes: bytes(prep?.witness?.package) + bytes(prep?.witness?.rawHeader),
-      };
-      custody.set(b.snap.hash, c);
+  /** The open batch's price (what the maker quotes against): the one the book pinned. */
+  async function price() {
+    const cur = A.batches.length ? A.current : undefined;
+    if (cur) {
+      const [, , p] = await ex.read<any[]>(book, "batchInfo", [BigInt(cur.no)]);
+      if (p > 0n) return BigInt(p);
     }
+    return (await feedNow()).price;
+  }
+
+  // Per batch: the L1 block it pinned, the price it used there, and every fill against it.
+  async function batchView(b: (typeof A.batches)[number]) {
+    const [anchorBlock, anchorTime, p] = await ex.read<any[]>(book, "batchInfo", [BigInt(b.no)]).catch(() => [0n, 0n, 0n]);
+    const prep = b.prepared as any;
     const fills = b.log.filter((l) => (l.action as any).kind === "fill").map((l) => {
       const a = known.get((l.action as any).a)?.order, o = known.get((l.action as any).b)?.order;
-      if (!a || !o) return { ok: l.ok, error: l.error };
+      if (!a || !o || !p) return { ok: l.ok, error: l.error };
       const [e, u] = a.sellToken === 0 ? [a, o] : [o, a];
       const fp = (u.sellAmount * 10n ** 18n) / e.sellAmount;
-      const p = BigInt(c.price);
-      const diffPct = Number(((fp > p ? fp - p : p - fp) * 100_000n) / p) / 1000;
+      const diffPct = Number(((fp > p ? fp - p : p - fp) * 100_000n) / BigInt(p)) / 1000;
       return { ok: l.ok, error: l.error, seller: e.trader, buyer: u.trader, eth: e.sellAmount.toString(), price: fp.toString(), diffPct };
     });
-    return { ...c, fills };
+    return {
+      anchorBlock: String(anchorBlock), anchorTime: String(anchorTime), price: String(p),
+      priceWitnessBytes: prep?.priceWitness ? (prep.priceWitness.package.length - 2) / 2 : 0, fills,
+    };
   }
 
   /** Answer each new user order with the opposite order at the user's own limit, if it's within the band. */
@@ -226,36 +261,64 @@ async function main() {
     }
   }
 
+  /** Earlier sessions: finalize what's pending, then close them (nothing else to do there). */
+  async function settleOld() {
+    for (const s of app.sessions.slice(0, -1)) {
+      const c = sessionC(s.channel);
+      const st = await l1.read<any[]>(c, "state");
+      if (Number(st[5]) !== 1) continue;
+      const pend = await l1.read<any>(c, "pending");
+      const now = (await l1.pub.getBlock()).timestamp;
+      if (pend.at !== 0n && now >= pend.at + BigInt(WINDOW)) await l1.send(c, "finalize", [], op);
+      else if (pend.at === 0n) {
+        await l1.send(c, "close", [], op);
+        note(`session ${s.id}: closed. Its users redeem to their wallet or roll over into the vault`);
+      }
+    }
+  }
+
+  /** Local only: Chainlink feeds update on a heartbeat; the local one re-transmits hourly (L1 time). */
+  async function heartbeat() {
+    if (NET !== "local") return;
+    const f = await feedNow();
+    const now = (await l1.pub.getBlock()).timestamp;
+    if (now - f.updatedAt > 3600n) await l1.send(feedAgg, "transmit", [f.price * 100n], op);
+  }
+
   // ---- the operator loop ----
   let openedAt = 0;
   let busy = false;
+  let stage = "", stageAt = 0; // what the loop is waiting on (the watchdog reports it)
+  const at_ = (x: string) => { stage = x; stageAt = Date.now(); };
+  setInterval(() => { if (busy && Date.now() - stageAt > 60_000) note(`operator: still waiting on ${stage} after ${Math.round((Date.now() - stageAt) / 1000)} s`); }, 30_000);
   async function step() {
     if (busy) return;
     busy = true;
     try {
-      const st = await l1.read<any[]>(ch, "state");
-      if (st[5] === 2) return; // closed: users redeem on L1
-      const t = await A.tick();
+      at_("heartbeat"); await heartbeat();
+      at_("earlier sessions"); await settleOld();
+      at_("state"); const st = await l1.read<any[]>(ch, "state");
+      if (Number(st[5]) === 2) return; // closed: users redeem on L1
+      at_("tick"); const t = await A.tick();
       if (t.status === "recovered") note(`recovered batch ${t.from} (${t.reason}): ${t.dropped.length} action(s) dropped`);
       if (!A.batches.length || A.current.state !== "open") {
-        await A.open();
+        at_("open"); await A.open();
         openedAt = Date.now();
       }
       learn();
-      await makeMarket();
+      at_("maker"); await makeMarket();
       learn();
-      await match();
-      // Seal every 15 s; propose the oldest sealed batch when nothing is pending on L1.
+      at_("match"); await match();
+      // Seal every 15 s when something happened; idle batches only re-pin the executor (no L1 tx).
       const cur = A.current;
-      const did = cur.log.length > 0 || ((cur.prepared as any).depositUsers?.length ?? 0) > 0 || ((cur.prepared as any).forced?.orders?.length ?? 0) > 0;
+      const pr = cur.prepared as any;
+      const did = cur.log.length > 0 || (pr.depositUsers?.length ?? 0) > 0 || (pr.requests ?? 0) > 0 || (pr.forced?.orders?.length ?? 0) > 0;
       if (Date.now() - openedAt > 15_000) {
         if (did) {
-          await A.seal();
-          await A.open();
+          at_("seal"); await A.seal();
+          at_("open"); await A.open();
         } else {
-          // Nothing happened: re-pin the open batch on a fresh snapshot, taking in new
-          // deposits, withdrawal requests and forced orders.
-          const r = await A.recover(A.current.no, "refresh");
+          at_("refresh"); const r = await A.recover(A.current.no, "refresh");
           if (r.status !== "recovered") note(`refresh: ${r.status}`);
         }
         openedAt = Date.now();
@@ -265,14 +328,14 @@ async function main() {
         const next = A.batches.find((b) => b.state === "sealed");
         if (next) {
           try {
-            await A.propose(BigInt(next.no));
+            at_("propose"); await A.propose(BigInt(next.no));
             note(`proposed batch ${next.no} to L1 (finalizable after the ${WINDOW / 60}-minute window)`);
           } catch (e: any) { note(`propose ${next.no}: ${String(e?.message ?? e).slice(0, 100)}`); }
         }
       } else {
         const now = (await l1.pub.getBlock()).timestamp;
         if (now >= pend.at + BigInt(WINDOW)) {
-          await l1.send(ch, "finalize", [], op);
+          at_("finalize"); await l1.send(ch, "finalize", [], op);
           await A.finalized();
           note(`finalized on L1 (batches: ${(await l1.read<any[]>(ch, "state"))[3]})`);
         }
@@ -283,12 +346,13 @@ async function main() {
       busy = false;
     }
   }
-  setInterval(step, 2000);
+  setInterval(step, NET === "local" ? 2000 : 6000);
 
   // ---- HTTP: the app, the RPCs, the API ----
   const L1_ALLOWED = /^(eth_|net_|web3_)/;
   const L1_DENIED = new Set(["eth_sendTransaction", "eth_sign", "eth_signTransaction", "eth_signTypedData_v4", "eth_accounts"]);
   const page = () => readFileSync(new URL("./devnet/app.html", import.meta.url), "utf8");
+  const lastFaucet = new Map<string, number>();
   const server = createServer(async (req, res) => {
     cors(res);
     if (req.method === "OPTIONS") return res.writeHead(204).end();
@@ -307,37 +371,40 @@ async function main() {
       if (url.pathname === "/rpc/l1") return proxy(req, res, l1.url, (m) => L1_ALLOWED.test(m) && !L1_DENIED.has(m));
       if (url.pathname === "/api/config") {
         return json(res, {
-          l1: { chainId: L1_ID, rpc: "/rpc/l1", channel: ch.address, token: token.address, oracle: oracle.address },
-          sepolia: { chainId: SEPOLIA, proxy: FEED_PROXY, aggregator: FEED_AGGREGATOR, skim: "safe", relayer: relayer.address },
+          network: NET,
+          l1: { chainId: l1.chainId, name: NET === "local" ? "Skim L1 devnet" : "Sepolia", rpc: "/rpc/l1", channel: ch.address, token: app.token, vault: app.vault, adapter: app.adapter, explorer: NET === "sepolia" ? "https://sepolia.etherscan.io" : null },
+          feed: { ...app.feed, maxStaleness: Number(P.maxStale) },
+          session: { id: id.toString(), previous: app.sessions.slice(0, -1) },
           bandBps: 100, maxAnchorAge: 256,
           app: { chainId: APP_ID, rpc: "/rpc/app", book: book.address },
+          faucet: { eth: P.faucetEth.toString(), usd: P.faucetUsd.toString() },
           maker: maker.address, domain, challengeWindow: WINDOW, forceDelay: DAY,
-          abi: { channel: ch.abi, book: book.abi, token: token.abi },
+          abi: { channel: ch.abi, book: book.abi, token: token.abi, vault: vault.abi },
         });
       }
       if (url.pathname === "/api/state") {
-        const p = await price();
         const st = await l1.read<any[]>(ch, "state");
         const pend = await l1.read<any>(ch, "pending");
         const orders = [];
         for (const k of known.values()) orders.push({ ...k, resting: await ex.read<boolean>(book, "resting", [k.hash]) });
+        const f = await feedNow();
+        const ev = await ex.rpc<any>("executor_evidence").catch(() => undefined);
+        const head = await l1.pub.getBlock();
         return json(res, {
-          price: p.toString(), l1Block: (await l1.height()).toString(), l1Time: (await l1.pub.getBlock()).timestamp.toString(),
-          frozen: st[5] === 2, finalizedBatches: st[3].toString(),
+          network: NET, price: (await price()).toString(), l1Block: head.number.toString(), l1Time: head.timestamp.toString(),
+          phase: Number(st[5]), frozen: Number(st[5]) === 2, finalizedBatches: st[3].toString(),
           pending: pend.at === 0n ? null : { at: pend.at.toString(), proposer: pend.proposer, finalizableAt: (pend.at + BigInt(WINDOW)).toString() },
-          sepolia: {
-            mirrored: relayed.slice(-8).reverse().map((m) => ({ ...str(m) })),
-            head: sepoliaHead,
-          },
+          feed: { round: f.round.toString(), price: f.price.toString(), updatedAt: f.updatedAt.toString() },
+          executor: ev && { pin: ev.anchor, accounts: ev.accounts, slots: ev.slots.length, evidenceBytes: (ev.package.length - 2) / 2 },
           batches: await Promise.all(A.batches.slice(-8).map(async (b) => ({
             no: b.no, state: b.state, anchor: b.snap.number.toString(), anchorHash: b.snap.hash, actions: b.log.length,
-            proposal: b.proposal, custody: await batchCustody(b).catch(() => undefined),
+            proposal: b.proposal, custody: await batchView(b).catch(() => undefined),
           }))),
           orders: orders.filter((o) => o.resting).slice(-30), log: log.slice(-40),
         });
       }
       if (url.pathname === "/api/leaf") {
-        // The finalized leaf and its path, for claim (and exit after a freeze).
+        // The finalized leaf and its path, for claim (and redeem after close).
         const a = url.searchParams.get("address") as Address;
         const ip = Number(await l1.read(ch, "indexPlusOne", [a]));
         if (!ip) return json(res, { registered: false });
@@ -348,16 +415,28 @@ async function main() {
       }
       if (req.method === "POST" && url.pathname === "/api/faucet") {
         const { address } = await body(req);
-        await l1.wallet(op).sendTransaction({ to: address, value: parseEther("5") }).then((h) => l1.pub.waitForTransactionReceipt({ hash: h }));
-        await l1.send(token, "mint", [address, usd(20_000)], op);
-        note(`faucet: 5 ETH and 20,000 USD (on L1) to ${address.slice(0, 8)}`);
+        if (!/^0x[0-9a-fA-F]{40}$/.test(String(address))) return json(res, { error: "not an address" }, 400);
+        const last = lastFaucet.get(address.toLowerCase()) ?? 0;
+        if (NET === "sepolia" && Date.now() - last < 3600_000) return json(res, { error: "one faucet request per address per hour on Sepolia" }, 429);
+        lastFaucet.set(address.toLowerCase(), Date.now());
+        if (P.faucetEth > 0n && (await l1.pub.getBalance({ address: op.address })) > P.faucetEth + parseEther("0.2")) {
+          await l1.wallet(op).sendTransaction({ to: address, value: P.faucetEth }).then((h) => l1.pub.waitForTransactionReceipt({ hash: h }));
+        }
+        await l1.send(token, "mint", [address, P.faucetUsd], op);
+        note(`faucet: ${fmtEth(P.faucetEth)} ETH and ${fmtUsd(P.faucetUsd)} USD (on ${NET === "local" ? "the L1 devnet" : "Sepolia"}) to ${address.slice(0, 8)}`);
         return json(res, { ok: true });
       }
-      if (req.method === "POST" && url.pathname === "/api/devnet/advance") {
+      if (NET === "local" && req.method === "POST" && url.pathname === "/api/devnet/advance") {
         const { seconds } = await body(req);
         await l1.rpc("evm_increaseTime", [Number(seconds)]);
         await l1.rpc("anvil_mine", [toHex(1)]);
         note(`devnet: L1 time advanced ${seconds} s`);
+        return json(res, { ok: true });
+      }
+      if (NET === "local" && req.method === "POST" && url.pathname === "/api/devnet/price") {
+        const { price: p } = await body(req);
+        await l1.send(feedAgg, "transmit", [answer8(Number(p))], op);
+        note(`devnet: the local feed's aggregator transmitted ${p}`);
         return json(res, { ok: true });
       }
       res.writeHead(404).end("not found");
@@ -366,7 +445,7 @@ async function main() {
     }
   });
   server.listen(PORT, "127.0.0.1", () => {
-    note(`devnet ready: http://127.0.0.1:${PORT}  (tailscale serve --bg ${PORT})`);
+    note(`devnet (${NET}) ready: http://127.0.0.1:${PORT}  (tailscale serve --bg ${PORT})`);
   });
 }
 

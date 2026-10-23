@@ -8,7 +8,7 @@
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { createPublicClient, createWalletClient, defineChain, encodeAbiParameters, encodeFunctionData, http, pad, parseEther, toHex, zeroAddress, zeroHash, type Address, type Hex } from "viem";
+import { createPublicClient, createWalletClient, defineChain, encodeAbiParameters, encodeFunctionData, http, keccak256, pad, parseEther, toHex, zeroAddress, zeroHash, type Address, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { Chain, type C } from "./runtime/executor.ts";
 import { L1ReadView } from "./runtime/l1view.ts";
@@ -56,26 +56,31 @@ const extraChains: Chain[] = []; // started during the run (e.g. a restarted exe
 async function main() {
   // L1 keeps the last 512 states (like a non-archive node): older proofs are refused.
   const l1 = await Chain.anvil(18690, 900, ["--prune-history", "512"]);
-  // The app network: fees are 0 (gas there settles nowhere).
-  const exA = await Chain.anvil(18691, 7001, ["--base-fee", "0", "--gas-limit", "10000000000"]);
-  const exB = await Chain.anvil(18692, 7001, ["--base-fee", "0", "--gas-limit", "10000000000"]);
   try {
-    await run(l1, exA, exB);
+    await run(l1);
   } finally {
-    [l1, exA, exB, ...extraChains].forEach((c) => c.stop());
+    [l1, ...extraChains].forEach((c) => c.stop());
   }
 }
 
-async function run(l1: Chain, exA: Chain, exB: Chain) {
+/** Chainlink's layout on a local L1: an aggregator behind a proxy (test/clearing/ChainlinkMocks.sol). */
+const answer = (x: number) => BigInt(Math.round(x * 1e8));
+
+async function run(l1: Chain) {
   // ---- L1 ----
-  const oracle = await l1.deploy(ROOT, opA, "AllocationFixture.sol", "AllocationFixture", [usd(2000)]);
+  const agg = await l1.deploy(ROOT, opA, "ChainlinkMocks.sol", "MockOffchainAggregator", [answer(2000)]);
+  const proxy = await l1.deploy(ROOT, opA, "ChainlinkMocks.sol", "MockFeedProxy", [agg.address]);
+  const codeHash = async (a: Address) => keccak256((await l1.pub.getCode({ address: a }))!);
+  const MAX_STALE = BigInt(3 * DAY);
+  const adapter = await l1.deploy(ROOT, opA, "ChainlinkAdapter.sol", "ChainlinkAdapter",
+    [proxy.address, await codeHash(proxy.address), agg.address, await codeHash(agg.address), 8, MAX_STALE]);
+  const feed = { proxy: proxy.address, aggregator: agg.address };
   const anchors = await l1.deploy(ROOT, opA, "AnchorRegistry.sol", "AnchorRegistry");
-  const wv = await l1.deploy(ROOT, opA, "WitnessVerifier.sol", "WitnessVerifier");
   const codec = await l1.deploy(ROOT, opA, "ClearingCodec.sol", "ClearingCodec");
   const token = await l1.deploy(ROOT, opA, "Clearing.t.sol", "TestUSD");
   const disputes = await l1.deploy(ROOT, opA, "ClearingDisputes.sol", "ClearingDisputes", [{
-    operator: opA.address, usd: token.address, anchors: anchors.address, witnessVerifier: wv.address, codec: codec.address,
-    priceFeed: oracle.address, priceSlot: SLOT0, bandBps: 100n, challengeWindow: BigInt(WINDOW), forceDelay: BigInt(DAY),
+    operator: opA.address, usd: token.address, anchors: anchors.address, codec: codec.address,
+    priceAdapter: adapter.address, bandBps: 100n, challengeWindow: BigInt(WINDOW), forceDelay: BigInt(DAY),
     maxAnchorAge: 256n, minBond: parseEther("1"), takeoverDelay: BigInt(2 * DAY), appChainId: 7001n, vault: zeroAddress, sessionId: 1n,
   }], "deploy ClearingDisputes");
   const core = await l1.deploy(ROOT, opA, "ClearingChannel.sol", "ClearingChannel", [disputes.address], "deploy ClearingChannel");
@@ -104,17 +109,21 @@ async function run(l1: Chain, exA: Chain, exB: Chain) {
   await fund(dave, 0n, usd(1_000));
   const totalEth = parseEther("3"), totalUsd = usd(12_000);
 
-  // ---- operator A's executor ----
-  async function deployBook(ex: Chain, operator: typeof opA) {
-    const view = await ex.deploy(ROOT, operator, "L1View.sol", "L1View", [900n]);
-    const book = await ex.deploy(ROOT, operator, "ClearingBook.sol", "ClearingBook", [view.address, ch.address, oracle.address, SLOT0, 100n, operator.address, 1n]);
-    return { view, book };
-  }
+  // ---- the app network: app executors (crates/app-executor), fees 0. They import the
+  //      channel (both halves) and the feed (proxy and aggregator) read-only. ----
+  const IMPORTS = [ch.address, disputes.address, proxy.address, agg.address];
+  const executor = async (port: number) => {
+    const ex = await Chain.appExecutor(ROOT, port, 7001, l1.url, { readonly: IMPORTS });
+    extraChains.push(ex);
+    return ex;
+  };
+  const exA = await executor(18691);
+  const exB = await executor(18692);
   const reader = new L1ReadView({ url: l1.url, chainId: 900, cli: CLI });
   const mkOp = async (ex: Chain, who: typeof opA) => {
-    const { view, book } = await deployBook(ex, who);
+    const book = await ClearingOperator.deployBook(ex, l1, who, ch, feed, MAX_STALE);
     return new ClearingOperator({
-      view: reader, exec: ex, book, l1view: view, op: who, l1, channel: ch, anchors, priceFeed: oracle.address, priceSlot: SLOT0,
+      view: reader, exec: ex, book, op: who, l1, channel: ch, anchors, feed, maxStaleness: MAX_STALE,
       evidence: new EvidenceStore(join(tmpdir(), `skim-clearing-${who.address.slice(2, 8)}-${process.pid}`)),
       policy: { kind: "confirmations", n: 1 }, bond: parseEther("1"),
       journal: join(tmpdir(), `skim-clearing-journal-${who.address.slice(2, 8)}-${process.pid}.json`),
@@ -194,7 +203,7 @@ async function run(l1: Chain, exA: Chain, exB: Chain) {
   await settle(A, 1n, "#1 (2 fills)");
 
   // ==== L1 moves; alice asks for 0.2 ETH; batch 2 at H+1 (2100) ==============================
-  await l1.send(oracle, "setShareBps", [usd(2100)], opA);
+  await l1.send(agg, "transmit", [answer(2100)], opA);
   await l1.send(ch, "requestWithdraw", [ETH, parseEther("0.2")], alice, "requestWithdraw");
   await l1.rpc("anvil_mine", [toHex(2)]);
   await A.open();
@@ -244,35 +253,32 @@ async function run(l1: Chain, exA: Chain, exB: Chain) {
   const digestAfter2 = await A.exec.read<Hex>(A.book, "stateDigest");
 
   // ---- the same journal replayed on a fresh executor gives the same AppState ----
-  const exC = await Chain.anvil(18693, 7001, ["--base-fee", "0", "--gas-limit", "10000000000"]);
+  const exC = await executor(18693);
   try {
-    const fresh = await deployBook(exC, opA);
+    const fresh = await ClearingOperator.deployBook(exC, l1, opA, ch, feed, MAX_STALE);
     for (const b of A.batches.slice(0, 2)) {
       const pr = b.prepared as any;
-      await exC.send(fresh.view, "pin", [pr.witness.rawHeader, pr.witness.package], opA);
-      await exC.send(fresh.book, "openBatch", [pr.witness.anchorId, pr.depositUsers, pr.forced.orders], opA);
+      await exC.rpc("executor_pin", [pr.anchor.hash]); // the same L1 block, re-read and re-verified
+      await exC.send(fresh, "openBatch", [pr.anchor.number, pr.anchor.time, pr.depositUsers, pr.forced.orders], opA);
       for (const l of b.log) {
         if (!l.ok) continue;
         const a = l.action as any;
-        if (a.kind === "order") await exC.send(fresh.book, "submitOrder", [a.order, a.sig], opA);
-        else if (a.kind === "fill") await exC.send(fresh.book, "fill", [a.a, a.b], opA);
+        if (a.kind === "order") await exC.send(fresh, "submitOrder", [a.order, a.sig], opA);
+        else if (a.kind === "fill") await exC.send(fresh, "fill", [a.a, a.b], opA);
         else await exC.pub.waitForTransactionReceipt({ hash: await exC.rpc<Hex>("eth_sendRawTransaction", [a.tx]) }); // users' own txs, byte for byte
       }
-      await exC.send(fresh.book, "seal", [], opA);
+      await exC.send(fresh, "seal", [], opA);
     }
-    check((await exC.read<Hex>(fresh.book, "stateDigest")) === digestAfter2, "the journal replayed on a fresh executor, from the pinned proofs, gives the same AppState digest");
+    check((await exC.read<Hex>(fresh, "stateDigest")) === digestAfter2, "the journal replayed on a fresh executor, pinned to the same L1 blocks, gives the same AppState digest");
   } finally {
     exC.stop();
   }
 
-  // ---- reads fail closed on the executor ----
-  const w2 = (A.batches[1].prepared as any).witness;
-  const w1 = (A.batches[0].prepared as any).witness;
-  const tampered = (w2.package.slice(0, w2.package.length - 70) + (w2.package.slice(-70, -68) === "00" ? "01" : "00") + w2.package.slice(-68)) as Hex;
+  // ---- the executor's L1 view fails closed and is read-only ----
   const refuses = async (fn: () => Promise<unknown>) => { try { await fn(); return false; } catch { return true; } };
-  check(await refuses(() => A.exec.send(A.l1view, "pin", [w2.rawHeader, tampered], opA)), "a tampered witness is refused by L1View");
-  check(await refuses(() => A.exec.send(A.l1view, "pin", [w1.rawHeader, w2.package], opA)), "a header that isn't the witness's anchor is refused");
-  check(await refuses(() => A.exec.read(A.l1view, "read", [w2.anchorId, oracle.address, `0x${"0".repeat(63)}1`])), "a slot that wasn't proven can't be read (missing state fails closed)");
+  check(await refuses(() => A.exec.rpc("executor_pin", [keccak256("0x01")])), "pinning to a block L1 doesn't have is refused");
+  check(await refuses(() => A.exec.send(ch, "requestWithdraw", [ETH, 1n], alice)), "the channel is read-only on the app network: nothing there can write to it");
+  check((await A.exec.rpc<any>("executor_status")).overlay.length === 0, "and no overlay was ever written into an imported account");
 
   await settle(A, 2n, "#2 (1 fill + 1 request)");
   const before = await l1.pub.getBalance({ address: alice.address });
@@ -419,9 +425,7 @@ async function run(l1: Chain, exA: Chain, exB: Chain) {
   await A.seal();
   A.exec.stop();
   await new Promise((r) => setTimeout(r, 500));
-  const exA2 = await Chain.anvil(18691, 7001, ["--base-fee", "0", "--gas-limit", "10000000000"]);
-  extraChains.push(exA2);
-  A.exec = exA2;
+  A.exec = await executor(18691);
   const r5 = await A.recover(A.current.no, "executor restarted");
   check(r5.status === "recovered", "the runtime rebuilt a fresh executor (adopt from L1 + the pending batch from the journal) and replayed the unproposed one");
   await time(WINDOW);
@@ -449,6 +453,22 @@ async function run(l1: Chain, exA: Chain, exB: Chain) {
   await settle(B, BigInt(B.current.no), "#11 by B");
   const pend = await l1.read<any[]>(ch, "state");
   check(Number(pend[3]) === 11, `L1 counts ${pend[3]} finalized batches across the recoveries and the handover`);
+
+  // ==== the feed's proxy switches aggregators: neither side follows ==========================
+  const agg2 = await l1.deploy(ROOT, opA, "ChainlinkMocks.sol", "MockOffchainAggregator", [answer(5000)]);
+  await l1.send(proxy, "setAggregator", [agg2.address], opA);
+  await l1.rpc("anvil_mine", [toHex(2)]);
+  const snapUp = await reader.snapshot({ kind: "confirmations", n: 1 });
+  const wUp = reader.witness(snapUp, [
+    { account: proxy.address, slots: [toHex(2n, { size: 32 })] },
+    { account: agg2.address, slots: [toHex(0x2bn, { size: 32 })] },
+  ]);
+  await l1.send(anchors, "record", [wUp.rawHeader], opA);
+  check(await refuses(() => l1.read(adapter, "price", [wUp.package, anchors.address, 256n])), "L1's adapter refuses a price from the new aggregator (unsupported feed)");
+  check(await refuses(() => B.open()), "and the executor can't price a batch from it (the new aggregator isn't imported)");
+  await l1.send(proxy, "setAggregator", [agg.address], opA); // back to the supported one
+  await l1.rpc("anvil_mine", [toHex(2)]);
+  if (B.batches.length && B.current.state === "open") await B.recover(B.current.no, "feed restored");
 
   // ==== a forced order nobody serves: freeze closes the session, everyone redeems ============
   const cg = await order(carol, USD, usd(100), parseEther("0.04"), 5n);

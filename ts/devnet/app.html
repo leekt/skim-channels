@@ -118,31 +118,31 @@
     </div>
   </header>
 
-  <div class="source" role="note" aria-label="Price source">
-    <div class="mark" aria-hidden="true">SEP</div>
+  <div class="source" role="note" aria-label="Where this app's state comes from">
+    <div class="mark" aria-hidden="true" id="bannerMark">L1</div>
     <div>
-      <h3>Prices come from Sepolia's live state</h3>
-      <p>Every trade is checked against Chainlink's ETH/USD feed <b>on Sepolia</b>, read through a skim light-client node and proven slot by slot. Your funds, deposits and trades live on a <b>local devnet</b>. Nothing here touches your Sepolia balance.</p>
+      <h3 id="bannerTitle">—</h3>
+      <p id="bannerText"></p>
     </div>
     <div class="figure">
-      <div class="label">ETH/USD · Sepolia, proven</div>
+      <div class="label" id="bannerLabel">ETH/USD</div>
       <div class="big" id="bannerPrice">—</div>
-      <div class="small muted" id="bannerMeta">Waiting for the first proof</div>
+      <div class="small muted" id="bannerMeta">—</div>
     </div>
   </div>
 
   <div class="ds-page-header">
     <div>
-      <p class="ds-eyebrow">App network · chain <span id="appId"></span> · fees 0</p>
-      <h1>Trade ETH against Sepolia's price</h1>
-      <p class="ds-page-description">Use a normal wallet. Deposits and withdrawals happen on the L1 devnet; orders are signed as typed data and sent as ordinary transactions on the app network. Every batch settles on L1 and can be challenged there. Chains reset when the devnet restarts.</p>
+      <p class="ds-eyebrow">App network · chain <span id="appId"></span> · fees 0 · session <span id="sessionId"></span></p>
+      <h1 id="pageTitle">Trade ETH against Chainlink's price</h1>
+      <p class="ds-page-description" id="pageText"></p>
     </div>
   </div>
 
   <div class="grid" id="trade">
     <div class="stack">
       <div class="ds-panel">
-        <div class="ds-panel-head"><h2>Place an order</h2><span class="ds-meta">Band ±1% of the Sepolia price</span></div>
+        <div class="ds-panel-head"><h2>Place an order</h2><span class="ds-meta">Band ±1% of the feed's price</span></div>
         <div class="ds-panel-body ticket">
           <div class="seg" role="group" aria-label="Side">
             <button id="sideSell" aria-pressed="true">Sell ETH</button><button id="sideBuy" aria-pressed="false">Buy ETH</button>
@@ -156,7 +156,7 @@
           <div class="summary"><dl class="kv">
             <dt id="payLabel">You sell</dt><dd id="sumPay">—</dd>
             <dt id="getLabel">You receive</dt><dd id="sumGet">—</dd>
-            <dt>Distance from Sepolia price <button class="ds-button ds-button--ghost inline" id="useMark">use it</button></dt><dd id="sumBand">—</dd>
+            <dt>Distance from the feed's price <button class="ds-button ds-button--ghost inline" id="useMark">use it</button></dt><dd id="sumBand">—</dd>
           </dl></div>
           <button class="ds-button ds-button--primary ds-button--lg ds-button--block" id="place">Sign and place order</button>
           <p class="note">Your wallet asks for a typed-data signature (the order, which L1 checks in a dispute) and then a transaction on the app network, with no fee. The devnet's market maker answers orders inside the band, and the operator fills them in the next batch. If the operator ignores your order, <button class="ds-button ds-button--ghost inline" id="force">force it on L1 →</button></p>
@@ -181,7 +181,7 @@
           <dl class="kv">
             <dt>Final on L1</dt><dd id="fin">—</dd>
             <dt>Released, claimable</dt><dd id="released">—</dd>
-            <dt>Wallet on L1 devnet</dt><dd id="l1bal">—</dd>
+            <dt>Wallet on <span id="l1Name1">L1</span></dt><dd id="l1bal">—</dd>
           </dl>
         </div>
       </div>
@@ -202,7 +202,7 @@
               <div class="ds-field"><label class="ds-label" for="depUsd">USD (test token)</label><input class="ds-input" id="depUsd" value="5000" inputmode="decimal"></div>
               <button class="ds-button" id="depositUsd">Approve and deposit</button>
             </div>
-            <p class="note">Deposits go to the L1 escrow and reach the app at its next batch, usually within 20 seconds. No funds? <button class="ds-button ds-button--ghost inline" id="faucet">Get 5 ETH and 20 000 USD</button> or open the <a href="/faucet" id="faucetLink">faucet page</a>.</p>
+            <p class="note">Deposits go to the L1 escrow and reach the app at its next batch, usually within 20 seconds. No funds? <button class="ds-button ds-button--ghost inline" id="faucet">Use the faucet</button> or open the <a href="/faucet" id="faucetLink">faucet page</a>.</p>
           </div>
         </div>
         <div class="ds-panel-body" data-panel="wd" hidden>
@@ -213,18 +213,17 @@
               <button class="ds-button" id="request">Request on L1</button>
             </div>
             <div class="row"><button class="ds-button" id="claim">Claim released funds</button><button class="ds-button ds-button--destructive" id="exit">Redeem after close</button></div>
-            <p class="note">A request is served at the start of the next batch and becomes claimable once that batch is final on L1, after a 1-hour challenge window. On the devnet, skip ahead with “+1 hour” under Batches.</p>
+            <p class="note">A request is served at the start of the next batch and becomes claimable once that batch is final on L1, after a 1-hour challenge window<span class="localOnly"> (on the local devnet, skip ahead with “+1 hour” under Batches)</span>. After a session closes, “Redeem” pays everything you're owed there.</p>
           </div>
         </div>
         <div class="ds-panel-body" data-panel="net" hidden>
           <div class="stack tight">
             <dl class="kv">
-              <dt><span class="chain"><b>L1</b>L1 devnet</span></dt><dd>chain <span id="l1Id"></span> · deposits, withdrawals</dd>
+              <dt><span class="chain"><b>L1</b><span id="l1Name2">L1</span></span></dt><dd>chain <span id="l1Id"></span> · deposits, withdrawals, settlement, the price feed</dd>
               <dt><span class="chain"><b>APP</b>App network</span></dt><dd>chain <span id="appId2"></span> · trading, no fees</dd>
-              <dt><span class="chain"><b>SEP</b>Sepolia</span></dt><dd>chain 11155111 · price only, read through skim</dd>
             </dl>
-            <div class="row"><button class="ds-button" id="addL1">Switch to L1 devnet</button><button class="ds-button" id="addApp">Switch to app network</button></div>
-            <p class="note">The app switches networks for you before each action. You never need Sepolia ETH: Sepolia is only read.</p>
+            <div class="row"><button class="ds-button" id="addL1">Switch to <span id="l1Name3">L1</span></button><button class="ds-button" id="addApp">Switch to app network</button></div>
+            <p class="note" id="netNote">The app switches networks for you before each action.</p>
           </div>
         </div>
       </div>
@@ -234,44 +233,44 @@
   <h2 class="section" id="price">Where the price comes from</h2>
   <div class="grid">
     <div class="ds-panel">
-      <div class="ds-panel-head"><h2>From Sepolia to each fill</h2><span class="ds-meta">Latest batch</span></div>
+      <div class="ds-panel-head"><h2>From the feed to each fill</h2><span class="ds-meta">Latest batch</span></div>
       <ol class="custody">
         <li><span class="no">1</span><div>
-          <strong>Sepolia · Chainlink ETH/USD</strong>
-          <div class="what">The feed's aggregator keeps the latest answer in two storage slots: the round id, and that round's answer.</div>
+          <strong id="c1Title">Chainlink ETH/USD</strong>
+          <div class="what">Apps read it with <span class="mono">latestRoundData()</span> on its proxy, which asks the current aggregator for its latest round.</div>
           <div class="vals" id="c1"></div></div></li>
         <li><span class="no">2</span><div>
-          <strong>skim node · Sepolia light client</strong>
-          <div class="what">skim follows Sepolia's head and serves storage proofs at the <b>safe</b> block, which the beacon chain has justified.</div>
+          <strong id="c2Title">The L1 node</strong>
+          <div class="what" id="c2What"></div>
           <div class="vals" id="c2"></div></div></li>
         <li><span class="no">3</span><div>
-          <strong>FeedMirror on the L1 devnet</strong>
-          <div class="what">A contract verifies both proofs against the Sepolia header's state root and stores the price.</div>
-          <div class="vals" id="c3"></div>
-          <div class="trust">Trusted: that this header is on Sepolia's canonical chain. The devnet can't check Sepolia block hashes, so only the relay may submit headers. Every step after this one is verified.</div></div></li>
+          <strong>The app executor calls the feed at its L1 address</strong>
+          <div class="what">The proxy and aggregator (and the channel) are imported read-only: their real code runs against L1 storage at the executor's pinned block, every value fetched with a proof and checked against that block's state root. Nothing is copied or relayed.</div>
+          <div class="vals" id="c3"></div></div></li>
         <li><span class="no">4</span><div>
-          <strong>The batch pins an L1 block and proves the price slot</strong>
-          <div class="what">The executor reads FeedMirror only through a storage proof at one L1 block. L1 checks the same proof again when the batch is proposed.</div>
+          <strong>L1 checks the same price when the batch is proposed</strong>
+          <div class="what">The session's ChainlinkAdapter verifies proofs of the slots that call read, at the same block: the proxy's code and its aggregator are the pinned ones, the round is the latest at that block, and it was fresh at that block's time.</div>
           <div class="vals" id="c4"></div></div></li>
         <li><span class="no">5</span><div>
           <strong>Each fill is checked against that price</strong>
-          <div class="what">The executor refuses a fill more than 1% from the proven price, and anyone can prove such a fill on L1 with <span class="mono">challengeFill</span>.</div>
+          <div class="what">The executor refuses a fill more than 1% from it, and anyone can prove such a fill on L1 with <span class="mono">challengeFill</span>.</div>
           <div class="vals" id="c5"></div></div></li>
       </ol>
     </div>
     <div class="stack">
       <div class="ds-panel">
-        <div class="ds-panel-head"><h2>Sepolia right now</h2><span class="chip wait">Live, not proven</span></div>
+        <div class="ds-panel-head"><h2>The feed right now</h2><span class="chip wait">Latest block, for comparison</span></div>
         <div class="ds-panel-body" style="padding-block: 4px"><dl class="kv">
-          <dt>Head block</dt><dd id="hBlock">—</dd>
           <dt>Round</dt><dd id="hRound">—</dd>
-          <dt>ETH/USD at head</dt><dd id="hPrice">—</dd>
+          <dt>ETH/USD</dt><dd id="hPrice">—</dd>
+          <dt>Answered</dt><dd id="hAt">—</dd>
         </dl></div>
-        <div class="ds-panel-foot">For comparison only. Trades use the value proven at the safe block.</div>
+        <div class="ds-panel-foot">Batches use the round at their pinned block, checked again on L1.</div>
       </div>
       <div class="ds-panel">
-        <div class="ds-panel-head"><h2>Proven into L1</h2><span class="ds-meta">Recent relays</span></div>
-        <div class="table-wrap"><table><thead><tr><th>Sepolia block</th><th>Round</th><th>Price</th><th>Proof</th></tr></thead><tbody id="relays"></tbody></table></div>
+        <div class="ds-panel-head"><h2>The executor's L1 view</h2><span class="ds-meta" id="pinMeta"></span></div>
+        <div class="table-wrap"><table><thead><tr><th>Imported account</th><th>Code</th></tr></thead><tbody id="imports"></tbody></table></div>
+        <div class="ds-panel-foot" id="evMeta"></div>
       </div>
     </div>
   </div>
@@ -281,7 +280,7 @@
     <div class="ds-panel">
       <div class="ds-panel-head"><h2>Recent batches</h2><span class="ds-meta" id="finCount"></span></div>
       <div class="table-wrap"><table>
-        <thead><tr><th>Batch</th><th>State</th><th>L1 block</th><th>Sepolia block</th><th>Price used</th><th>Fills</th></tr></thead>
+        <thead><tr><th>Batch</th><th>State</th><th>L1 block</th><th>Price used</th><th>Price witness</th><th>Fills</th></tr></thead>
         <tbody id="batchRows"></tbody>
       </table></div>
     </div>
@@ -292,9 +291,10 @@
         <dt>L1 time</dt><dd id="blkTime">—</dd>
         <dt>Waiting on L1</dt><dd id="pend">—</dd>
       </dl></div>
-      <div class="ds-panel-foot" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
-        <span>Devnet only: move L1 time past the challenge window.</span>
-        <button class="ds-button ds-button--sm" id="ff">+1 hour</button>
+      <div class="ds-panel-foot localOnly" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+        <span>Local devnet only: L1 time, and the local feed's price.</span>
+        <span class="row" style="align-items:center"><button class="ds-button ds-button--sm" id="ff">+1 hour</button>
+        <input class="ds-input ds-input--dense" id="mockPrice" placeholder="price" style="width:90px"><button class="ds-button ds-button--sm" id="setPrice">Set feed price</button></span>
       </div>
     </div>
   </div>
@@ -302,11 +302,11 @@
   <h2 class="section">Activity</h2>
   <div class="grid-2">
     <div class="ds-panel"><div class="ds-panel-head"><h2>Your actions</h2></div><div class="log" id="events"><div class="muted">Nothing yet.</div></div></div>
-    <div class="ds-panel"><div class="ds-panel-head"><h2>Operator</h2><span class="ds-meta">relay, batches, maker</span></div><div class="log" id="log"></div></div>
+    <div class="ds-panel"><div class="ds-panel-head"><h2>Operator</h2><span class="ds-meta">batches, maker, sessions</span></div><div class="log" id="log"></div></div>
   </div>
 
   <footer class="ds-footer">
-    <span>Skim Execution Channels · clearing devnet · L1 chain <span id="l1Id2"></span>, app chain <span id="appId3"></span>, price from Sepolia via skim.</span>
+    <span>Skim Execution Channels · clearing · <span id="footNet"></span> · L1 chain <span id="l1Id2"></span>, app chain <span id="appId3"></span>.</span>
     <a href="/faucet">Faucet</a>
   </footer>
 </div>
@@ -317,14 +317,15 @@ import { createPublicClient, createWalletClient, custom, http, parseEther, parse
 const $ = (id) => document.getElementById(id);
 const cfg = await (await fetch("/api/config")).json();
 const origin = location.origin;
-const l1Chain = defineChain({ id: cfg.l1.chainId, name: "Skim L1 devnet", nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 }, rpcUrls: { default: { http: [origin + cfg.l1.rpc] } } });
+const SEPOLIA = cfg.network === "sepolia";
+const l1Chain = defineChain({ id: cfg.l1.chainId, name: cfg.l1.name, nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 }, rpcUrls: { default: { http: [origin + cfg.l1.rpc] } } });
 const appChain = defineChain({ id: cfg.app.chainId, name: "Skim Clearing (devnet)", nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 }, rpcUrls: { default: { http: [origin + cfg.app.rpc] } } });
 const l1 = createPublicClient({ chain: l1Chain, transport: http(origin + cfg.l1.rpc) });
 const app = createPublicClient({ chain: appChain, transport: http(origin + cfg.app.rpc) });
 const types = { Order: [
   { name: "trader", type: "address" }, { name: "sellToken", type: "uint8" }, { name: "sellAmount", type: "uint128" },
   { name: "buyAmount", type: "uint128" }, { name: "nonce", type: "uint64" }, { name: "expiry", type: "uint64" } ] };
-const SEPOLIA_SCAN = "https://sepolia.etherscan.io";
+const SCAN = cfg.l1.explorer;
 let account, wallet, lastPrice = 0n, side = "sell";
 
 for (const id of ["appId", "appId2", "appId3"]) $(id).textContent = cfg.app.chainId;
@@ -339,8 +340,36 @@ const short = (a) => a ? `${a.slice(0, 6)}…${a.slice(-4)}` : "";
 const bytes = (n) => n >= 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`;
 const ago = (sec) => { const d = Math.max(0, Math.round(Date.now() / 1000 - sec)); return d < 90 ? `${d} s ago` : d < 5400 ? `${Math.round(d / 60)} min ago` : `${(d / 3600).toFixed(1)} h ago`; };
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-const blockLink = (n) => `<a class="ext" href="${SEPOLIA_SCAN}/block/${n}" target="_blank" rel="noopener">${int(n)}</a>`;
-const addrLink = (a) => `<a class="ext" href="${SEPOLIA_SCAN}/address/${a}" target="_blank" rel="noopener">${short(a)}</a>`;
+const blockLink = (n) => SCAN ? `<a class="ext" href="${SCAN}/block/${n}" target="_blank" rel="noopener">${int(n)}</a>` : int(n);
+const addrLink = (a) => SCAN ? `<a class="ext" href="${SCAN}/address/${a}" target="_blank" rel="noopener">${short(a)}</a>` : short(a);
+
+// What this server runs on, said plainly.
+$("sessionId").textContent = cfg.session.id;
+for (const id of ["l1Name1", "l1Name2", "l1Name3"]) $(id).textContent = cfg.l1.name;
+$("footNet").textContent = SEPOLIA ? "settled on Sepolia, priced by Sepolia's Chainlink feed through skim" : "local devnet with a Chainlink-layout feed (not Sepolia)";
+document.querySelectorAll(".localOnly").forEach((e) => e.hidden = SEPOLIA);
+if (SEPOLIA) {
+  $("bannerMark").textContent = "SEP";
+  $("bannerTitle").textContent = "Running on Sepolia's live state";
+  $("bannerText").innerHTML = "Prices come from Chainlink's ETH/USD feed <b>on Sepolia</b>, which the app's executor calls at its Sepolia address through a skim node. Deposits, withdrawals and settlement are <b>Sepolia transactions</b> from your wallet; trading happens on the app network.";
+  $("bannerLabel").textContent = "ETH/USD · Sepolia";
+  $("pageTitle").textContent = "Trade ETH against Sepolia's price";
+  $("pageText").textContent = "Use a normal wallet on Sepolia. Deposit into the session's escrow on Sepolia; orders are signed as typed data and sent as ordinary transactions on the app network. Every batch settles on Sepolia and can be challenged there.";
+  $("c1Title").textContent = "Sepolia · Chainlink ETH/USD";
+  $("c2Title").textContent = "skim node · Sepolia light client";
+  $("c2What").textContent = "skim follows Sepolia's head; the executor pins a block it serves and fetches every value it reads there with a storage proof.";
+  $("netNote").textContent = "The app switches networks for you before each action. You need a little Sepolia ETH for L1 transactions; the faucet sends some, and test USD.";
+} else {
+  $("bannerMark").textContent = "L1";
+  $("bannerTitle").textContent = "Local devnet: no Sepolia here";
+  $("bannerText").innerHTML = "This server runs without a Sepolia key, so its L1 is a <b>local chain</b> with a feed laid out exactly like Chainlink's (an aggregator behind a proxy), priced from the controls below. Start it with <span class=\"mono\">SEPOLIA_OPERATOR_KEY</span> to run on Sepolia's live state. Chains reset when it restarts.";
+  $("bannerLabel").textContent = "ETH/USD · local feed";
+  $("pageTitle").textContent = "Trade ETH on a local devnet";
+  $("pageText").textContent = "Use a normal wallet. Deposits and withdrawals happen on the local L1; orders are signed as typed data and sent as ordinary transactions on the app network. Every batch settles on L1 and can be challenged there.";
+  $("c1Title").textContent = "Local L1 · a Chainlink-layout feed";
+  $("c2Title").textContent = "The local L1 node";
+  $("c2What").textContent = "The executor pins a recent block and fetches every value it reads there with a storage proof (eth_getProof), checked against that block's state root.";
+}
 const STATE = { open: ["wait", "Open"], sealed: ["wait", "Sealed"], proposed: ["wait", "Challenge window"], finalized: ["done", "Final"], discarded: ["fail", "Discarded"] };
 const chip = (cls, text) => `<span class="chip ${cls}">${esc(text)}</span>`;
 
@@ -364,7 +393,7 @@ function showNet(id) {
   const n = Number(id);
   const known = n === cfg.app.chainId || n === cfg.l1.chainId;
   $("netChip").className = "chip " + (known ? "ok" : "wait");
-  $("netChip").textContent = n === cfg.app.chainId ? "App network" : n === cfg.l1.chainId ? "L1 devnet" : `Chain ${n}`;
+  $("netChip").textContent = n === cfg.app.chainId ? "App network" : n === cfg.l1.chainId ? cfg.l1.name : `Chain ${n}`;
 }
 
 async function act(label, fn, btn, needsWallet = true) {
@@ -431,7 +460,7 @@ function showAccount() {
   $("connect").hidden = !!account;
   $("faucetLink").href = $("faucetNav").href = `/faucet?address=${account}`;
 }
-on("addL1", "Switch to L1 devnet", () => ensureChain(l1Chain));
+on("addL1", `Switch to ${cfg.l1.name}`, () => ensureChain(l1Chain));
 on("addApp", "Switch to app network", () => ensureChain(appChain));
 on("faucet", "Faucet", async () => {
   const r = await fetch("/api/faucet", { method: "POST", body: JSON.stringify({ address: account }) });
@@ -465,33 +494,36 @@ on("place", "Place order", async () => {
 });
 on("force", "Forced order on L1", () => send(l1Chain, cfg.l1.channel, cfg.abi.channel, "forceOrder", [buildOrder()]));
 $("ff").onclick = () => act("+1 hour of L1 time", () => fetch("/api/devnet/advance", { method: "POST", body: JSON.stringify({ seconds: 3600 }) }), $("ff"), false);
+$("setPrice").onclick = () => act("Set the local feed's price", () => fetch("/api/devnet/price", { method: "POST", body: JSON.stringify({ price: $("mockPrice").value }) }), $("setPrice"), false);
 window.cancelOrder = (h) => act("Cancel order", () => send(appChain, cfg.app.book, cfg.abi.book, "cancel", [h]));
 
 // ---- state ----
-function renderSepolia(s) {
-  const m = s.sepolia.mirrored[0];
-  if (m) {
-    $("bannerPrice").textContent = "$" + dollars(m.answer);
-    $("bannerMeta").innerHTML = `Sepolia block ${blockLink(m.sourceBlock)} · round ${int(m.round)} · answered ${ago(Number(m.answeredAt))}`;
-    $("c1").innerHTML = `<span><i>proxy</i> ${addrLink(cfg.sepolia.proxy)}</span><span><i>aggregator</i> ${addrLink(cfg.sepolia.aggregator)}</span>`
-      + `<span><i>round</i> ${int(m.round)}</span><span><i>answer</i> $${dollars(m.answer)}</span><span><i>answered</i> ${ago(Number(m.answeredAt))}</span>`;
-    $("c2").innerHTML = `<span><i>safe block</i> ${blockLink(m.sourceBlock)}</span><span><i>hash</i> ${short(m.sourceBlockHash)}</span>`
-      + `<span><i>proofs</i> ${bytes(m.proofBytes)}</span><span><i>fetched in</i> ${int(m.proveMs)} ms</span>`;
-    $("c3").innerHTML = `<span><i>contract</i> ${short(cfg.l1.oracle)}</span><span><i>verified on-chain for</i> ${int(m.gas)} gas</span><span><i>tx</i> ${short(m.tx)}</span>`;
+function renderFeed(s) {
+  const f = s.feed;
+  $("bannerPrice").textContent = "$" + dollars(f.price);
+  $("bannerMeta").innerHTML = `round ${int(BigInt(f.round) & 0xffffffffn)} · answered ${ago(Number(f.updatedAt))} · L1 block ${blockLink(s.l1Block)}`;
+  $("hRound").textContent = int(BigInt(f.round) & 0xffffffffn); $("hPrice").textContent = "$" + dollars(f.price); $("hAt").textContent = ago(Number(f.updatedAt));
+  $("c1").innerHTML = `<span><i>proxy</i> ${addrLink(cfg.feed.proxy)}</span><span><i>aggregator</i> ${addrLink(cfg.feed.aggregator)}</span>`
+    + `<span><i>freshness</i> within ${Math.round(cfg.feed.maxStaleness / 3600)} h of the pinned block</span>`;
+  const ex = s.executor;
+  if (ex) {
+    $("c2").innerHTML = `<span><i>pinned block</i> ${blockLink(ex.pin.number)}</span><span><i>hash</i> ${short(ex.pin.hash)}</span>`;
+    $("c3").innerHTML = `<span><i>verified at this pin</i> ${ex.accounts.length} accounts, ${ex.slots} slots</span><span><i>evidence</i> ${bytes(ex.evidenceBytes)}</span>`;
+    $("pinMeta").textContent = `pinned at ${int(ex.pin.number)}`;
+    const names = { [cfg.feed.proxy.toLowerCase()]: "feed proxy", [cfg.feed.aggregator.toLowerCase()]: "aggregator", [cfg.l1.channel.toLowerCase()]: "channel" };
+    $("imports").innerHTML = ex.accounts.map((a) => `<tr><td class="n">${addrLink(a.address)} <span class="muted">${names[a.address.toLowerCase()] ?? "channel (disputes)"}</span></td><td class="n">${bytes(a.codeBytes)}</td></tr>`).join("");
+    $("evMeta").textContent = "Read-only imports: no write to them is possible on the app network.";
   }
-  const latest = [...s.batches].reverse().find((b) => b.custody);
+  const latest = [...s.batches].reverse().find((b) => b.custody && b.custody.price !== "0");
   if (latest) {
     const c = latest.custody;
-    $("c4").innerHTML = `<span><i>batch</i> ${latest.no}</span><span><i>L1 block</i> ${int(latest.anchor)} · ${short(latest.anchorHash)}</span>`
-      + `<span><i>FeedMirror price</i> $${dollars(c.price)}</span><span><i>from Sepolia block</i> ${blockLink(c.sepoliaBlock)}</span><span><i>price proof</i> ${bytes(c.priceProofBytes)}</span>`;
+    $("c4").innerHTML = `<span><i>batch</i> ${latest.no}</span><span><i>L1 block</i> ${blockLink(c.anchorBlock)}</span><span><i>price there</i> $${dollars(c.price)}</span>`
+      + `<span><i>witness for L1</i> ${bytes(c.priceWitnessBytes)}</span><span><i>adapter</i> ${addrLink(cfg.l1.adapter)}</span>`;
   }
   const fills = s.batches.flatMap((b) => (b.custody?.fills ?? []).filter((x) => x.price).map((x) => ({ ...x, no: b.no, mark: b.custody.price }))).slice(-3).reverse();
   $("c5").innerHTML = fills.length
     ? fills.map((x) => `<span><i>batch ${x.no}</i> ${eth(x.eth)} ETH at $${dollars(x.price)} · ${x.diffPct.toFixed(2)}% from $${dollars(x.mark)} ${x.ok ? "✓" : "✕"}</span>`).join("")
     : `<span><i>No fills yet. Place an order to see one checked here.</i></span>`;
-  const h = s.sepolia.head;
-  if (h) { $("hBlock").innerHTML = blockLink(h.block); $("hRound").textContent = int(h.round); $("hPrice").textContent = "$" + dollars(h.answer); }
-  $("relays").innerHTML = s.sepolia.mirrored.map((r) => `<tr><td class="n">${blockLink(r.sourceBlock)}</td><td class="n">${int(r.round)}</td><td class="n">$${dollars(r.answer)}</td><td class="n">${bytes(r.proofBytes)}</td></tr>`).join("");
 }
 
 function renderBatches(s) {
@@ -499,8 +531,8 @@ function renderBatches(s) {
     const [cls, label] = STATE[b.state] ?? ["unknown", b.state];
     const c = b.custody;
     const fills = (c?.fills ?? []).filter((f) => f.price);
-    const row = `<tr><td class="n">${b.no}</td><td>${chip(cls, label)}</td><td class="n">${int(b.anchor)}</td>`
-      + `<td class="n">${c ? blockLink(c.sepoliaBlock) : "—"}</td><td class="n">${c ? "$" + dollars(c.price) : "—"}</td><td class="n">${fills.length}</td></tr>`;
+    const row = `<tr><td class="n">${b.no}</td><td>${chip(cls, label)}</td><td class="n">${blockLink(b.anchor)}</td>`
+      + `<td class="n">${c && c.price !== "0" ? "$" + dollars(c.price) : "—"}</td><td class="n">${c?.priceWitnessBytes ? bytes(c.priceWitnessBytes) : "—"}</td><td class="n">${fills.length}</td></tr>`;
     const detail = fills.length ? `<tr class="fills"><td></td><td colspan="5">${fills.map((f) =>
       `<div class="mono">${short(f.seller)} → ${short(f.buyer)} · ${eth(f.eth)} ETH at $${dollars(f.price)} · <span class="${f.diffPct <= 1 ? "band-ok" : "band-bad"}">${f.diffPct.toFixed(2)}% from $${dollars(c.price)}</span></div>`).join("")}</td></tr>` : "";
     return row + detail;
@@ -509,8 +541,9 @@ function renderBatches(s) {
   $("blk").textContent = int(s.l1Block);
   $("blkTime").textContent = new Date(Number(s.l1Time) * 1000).toLocaleString();
   $("pend").innerHTML = s.pending ? `${chip("wait", "Challenge window")} until ${new Date(Number(s.pending.finalizableAt) * 1000).toLocaleTimeString()}` : "nothing";
-  $("frozen").className = "chip " + (s.frozen ? "fail" : "ok");
-  $("frozen").textContent = s.frozen ? "Closed: redeem on L1" : "Running";
+  const PH = [["ok", "Active"], ["wait", "Closing"], ["fail", "Closed: redeem on L1"]][s.phase] ?? ["unknown", "?"];
+  $("frozen").className = "chip " + PH[0];
+  $("frozen").textContent = PH[1];
 }
 
 async function refresh() {
@@ -519,7 +552,7 @@ async function refresh() {
     lastPrice = BigInt(s.price);
     if (!$("limit").value) $("limit").value = (Number(s.price) / 1e6).toFixed(2);
     ticket();
-    renderSepolia(s);
+    renderFeed(s);
     renderBatches(s);
     $("log").innerHTML = s.log.slice().reverse().map((l) => `<div>${esc(l)}</div>`).join("");
     if (!account) return;

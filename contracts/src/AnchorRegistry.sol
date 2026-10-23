@@ -17,6 +17,8 @@ contract AnchorRegistry {
     mapping(bytes32 anchorId => bytes32) public stateRootOf;
     /// The anchor recorded for each L1 block number (canonical, so at most one).
     mapping(uint256 blockNumber => bytes32 anchorId) public anchorIdAt;
+    /// Each recorded anchor's header timestamp (for freshness rules evaluated at the anchor).
+    mapping(bytes32 anchorId => uint256) public timestampOf;
 
     event AnchorRecorded(bytes32 indexed anchorId, uint64 blockNumber, bytes32 blockHash, bytes32 stateRoot);
 
@@ -29,6 +31,7 @@ contract AnchorRegistry {
         recorded[anchorId] = true;
         stateRootOf[anchorId] = h.stateRoot;
         anchorIdAt[h.number] = anchorId;
+        timestampOf[anchorId] = h.timestamp;
         emit AnchorRecorded(anchorId, uint64(h.number), h.hash, h.stateRoot);
     }
 

@@ -22,20 +22,20 @@
   </header>
   <div class="ds-page-header">
     <div>
-      <p class="ds-eyebrow">L1 devnet · chain 900</p>
+      <p class="ds-eyebrow" id="net">—</p>
       <h1>Faucet</h1>
-      <p class="ds-page-description">Sends 5 ETH and 20 000 USD (a test token) on the L1 devnet, where you deposit into the channel. These are devnet funds only: not Sepolia ETH, and gone when the devnet restarts.</p>
+      <p class="ds-page-description" id="what">—</p>
     </div>
   </div>
   <div class="ds-panel">
-    <div class="ds-panel-head"><h2>Send test funds</h2><span class="ds-meta">5 ETH · 20 000 USD</span></div>
+    <div class="ds-panel-head"><h2>Send test funds</h2><span class="ds-meta" id="amounts">—</span></div>
     <div class="ds-panel-body stack">
       <div class="ds-field">
         <label class="ds-label" for="addr">Your address</label>
         <input class="ds-input ds-mono" id="addr" placeholder="0x…" autocomplete="off" spellcheck="false">
       </div>
       <div class="ds-actions">
-        <button class="ds-button ds-button--primary" id="go">Send 5 ETH and 20 000 USD</button>
+        <button class="ds-button ds-button--primary" id="go">Send test funds</button>
         <button class="ds-button" id="useWallet">Use my wallet's address</button>
       </div>
       <div class="out" id="out" role="status"></div>
@@ -45,6 +45,17 @@
 </div>
 <script>
   const $ = (id) => document.getElementById(id);
+  let amounts = "";
+  fetch("/api/config").then((r) => r.json()).then((cfg) => {
+    const eth = Number(cfg.faucet.eth) / 1e18, usd = (Number(cfg.faucet.usd) / 1e6).toLocaleString("en-US").replace(/,/g, " ");
+    amounts = `${eth} ETH and ${usd} USD`;
+    $("net").textContent = `${cfg.l1.name} · chain ${cfg.l1.chainId}`;
+    $("amounts").textContent = `${eth} ETH · ${usd} USD`;
+    $("go").textContent = `Send ${amounts}`;
+    $("what").textContent = cfg.network === "sepolia"
+      ? `Sends ${amounts} (a test token) on Sepolia, where you deposit into the session's escrow. The ETH is for L1 gas and a small deposit; one request per address per hour.`
+      : `Sends ${amounts} (a test token) on the local L1, where you deposit into the channel. Devnet funds only: not Sepolia ETH, and gone when the devnet restarts.`;
+  });
   const say = (m, ok) => { $("out").textContent = m; $("out").className = "out " + (ok ? "ok" : "bad"); };
   $("addr").value = new URLSearchParams(location.search).get("address") ?? "";
   $("useWallet").onclick = async () => {
@@ -60,7 +71,7 @@
     try {
       const r = await fetch("/api/faucet", { method: "POST", body: JSON.stringify({ address }) });
       const j = await r.json().catch(() => ({}));
-      r.ok ? say(`Sent 5 ETH and 20 000 USD to ${address.slice(0, 6)}…${address.slice(-4)} on the L1 devnet.`, true) : say(j.error ?? "The faucet failed.", false);
+      r.ok ? say(`Sent ${amounts} to ${address.slice(0, 6)}…${address.slice(-4)}.`, true) : say(j.error ?? "The faucet failed.", false);
     } finally { $("go").disabled = false; }
   };
 </script>

@@ -11,7 +11,7 @@ import { createServer } from "node:http";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pad, parseEther, toHex, type Address, type Hex } from "viem";
+import { keccak256, pad, parseEther, toHex, type Address, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { Chain, type C } from "./runtime/executor.ts";
 import { L1ReadView } from "./runtime/l1view.ts";
@@ -33,7 +33,6 @@ const KEYS = [
 const [op, alice, bob, carol, watcher, dave] = KEYS.map((k) => privateKeyToAccount(k));
 const ETH = 0, USD = 1;
 const usd = (x: number) => BigInt(Math.round(x * 1e6));
-const SLOT0: Hex = `0x${"0".repeat(64)}`;
 const FAR = 10n ** 9n;
 const DAY = 86400, WINDOW = 3600;
 
@@ -114,27 +113,37 @@ async function run(l1: Chain) {
   };
 
   // ---- the app: shared infrastructure and its vault (once, for every session) -------------
-  const oracle = await l1.deploy(ROOT, op, "AllocationFixture.sol", "AllocationFixture", [usd(2000)], "app: price fixture");
+  // The price feed: Chainlink's layout (an aggregator behind a proxy) on this local L1.
+  const answer = (x: number) => BigInt(Math.round(x * 1e8));
+  const agg = await l1.deploy(ROOT, op, "ChainlinkMocks.sol", "MockOffchainAggregator", [answer(2000)]);
+  const proxy = await l1.deploy(ROOT, op, "ChainlinkMocks.sol", "MockFeedProxy", [agg.address]);
+  const feed = { proxy: proxy.address, aggregator: agg.address };
+  const MAX_STALE = BigInt(40 * DAY); // the test idles a month between sessions
+  const codeHash = async (a: Address) => keccak256((await l1.pub.getCode({ address: a }))!);
+  const adapter = await l1.deploy(ROOT, op, "ChainlinkAdapter.sol", "ChainlinkAdapter",
+    [proxy.address, await codeHash(proxy.address), agg.address, await codeHash(agg.address), 8, MAX_STALE], "app: ChainlinkAdapter");
   const anchors = await l1.deploy(ROOT, op, "AnchorRegistry.sol", "AnchorRegistry", [], "app: AnchorRegistry");
-  const wv = await l1.deploy(ROOT, op, "WitnessVerifier.sol", "WitnessVerifier", [], "app: WitnessVerifier");
   const codec = await l1.deploy(ROOT, op, "ClearingCodec.sol", "ClearingCodec", [], "app: ClearingCodec");
   const token = await l1.deploy(ROOT, op, "Clearing.t.sol", "TestUSD");
   const vault = await l1.deploy(ROOT, op, "ClearingVault.sol", "ClearingVault", [op.address, token.address], "app: ClearingVault");
-  const appSetup = ["app: AnchorRegistry", "app: WitnessVerifier", "app: ClearingCodec", "app: ClearingVault"].reduce((a, k) => a + (l1.gas[k] ?? 0), 0);
+  const appSetup = ["app: AnchorRegistry", "app: ChainlinkAdapter", "app: ClearingCodec", "app: ClearingVault"].reduce((a, k) => a + (l1.gas[k] ?? 0), 0);
 
   /** A session: its own L1 contracts (config + collateral), registered in the vault. */
   async function openSession(id: bigint) {
     const tag = `session ${id}`;
     const disputes = await l1.deploy(ROOT, op, "ClearingDisputes.sol", "ClearingDisputes", [{
-      operator: op.address, usd: token.address, anchors: anchors.address, witnessVerifier: wv.address, codec: codec.address,
-      priceFeed: oracle.address, priceSlot: SLOT0, bandBps: 100n, challengeWindow: BigInt(WINDOW), forceDelay: BigInt(DAY),
+      operator: op.address, usd: token.address, anchors: anchors.address, codec: codec.address,
+      priceAdapter: adapter.address, bandBps: 100n, challengeWindow: BigInt(WINDOW), forceDelay: BigInt(DAY),
       maxAnchorAge: 256n, minBond: parseEther("1"), takeoverDelay: BigInt(2 * DAY), appChainId: 7001n, vault: vault.address, sessionId: id,
     }], `${tag}: deploy`);
     const core = await l1.deploy(ROOT, op, "ClearingChannel.sol", "ClearingChannel", [disputes.address], `${tag}: deploy`);
     await send(vault, "register", [core.address], op, `${tag}: register`);
     l1Txs[`${tag}: deploy`] = 2;
-    return mergeAbi(core, disputes);
+    const ch = mergeAbi(core, disputes);
+    imports.set(ch.address, [ch.address, disputes.address, proxy.address, agg.address]);
+    return ch;
   }
+  const imports = new Map<Address, Address[]>(); // per session: what its executor imports (read-only)
   const domainOf = (ch: C, id: bigint) => ({ name: "SkimClearing", version: "0", chainId: 7001, verifyingContract: ch.address, salt: pad(toHex(id), { size: 32 }) });
   async function sign(who: typeof alice, domain: ReturnType<typeof domainOf>, sellToken: number, sellAmount: bigint, buyAmount: bigint, nonce: bigint) {
     const o: Order = { trader: who.address, sellToken, sellAmount, buyAmount, nonce, expiry: FAR };
@@ -148,17 +157,16 @@ async function run(l1: Chain) {
       await send(ch, "deposit", [USD, dollars], who, label);
     }
   }
-  /** The operator's own machine: an executor (anvil, fees 0), a journal, an evidence store. */
+  /** The operator's own machine: an app executor (fees 0), a journal, an evidence store. */
   async function startOperator(ch: C, id: bigint, port: number) {
     const t0 = Date.now();
     const dir = mkdtempSync(join(tmpdir(), `skim-session-${id}-`));
-    const ex = await Chain.anvil(port, 7001, ["--base-fee", "0", "--gas-limit", "10000000000"]);
+    const ex = await Chain.appExecutor(ROOT, port, 7001, l1.url, { readonly: imports.get(ch.address)! });
     chains.push(ex);
-    const view = await ex.deploy(ROOT, op, "L1View.sol", "L1View", [900n]);
-    const book = await ex.deploy(ROOT, op, "ClearingBook.sol", "ClearingBook", [view.address, ch.address, oracle.address, SLOT0, 100n, op.address, id]);
+    const book = await ClearingOperator.deployBook(ex, l1, op, ch, feed, MAX_STALE);
     const A = new ClearingOperator({
-      view: new L1ReadView({ url: l1.url, chainId: 900, cli: CLI }), exec: ex, book, l1view: view, op, l1, channel: ch, anchors,
-      priceFeed: oracle.address, priceSlot: SLOT0, evidence: new EvidenceStore(join(dir, "evidence")), policy: { kind: "confirmations", n: 1 },
+      view: new L1ReadView({ url: l1.url, chainId: 900, cli: CLI }), exec: ex, book, op, l1, channel: ch, anchors,
+      feed, maxStaleness: MAX_STALE, evidence: new EvidenceStore(join(dir, "evidence")), policy: { kind: "confirmations", n: 1 },
       bond: parseEther("1"), journal: join(dir, "journal.json"), maxAnchorAge: 256n, ageMargin: 16n,
     });
     return { A, ex, dir, startMs: Date.now() - t0 };
@@ -198,7 +206,7 @@ async function run(l1: Chain) {
     await A.apply({ kind: "order", order: k1.o, sig: k1.sig });
     check((await A.apply({ kind: "fill", a: a1.h, b: k1.h })).ok, "session 1: alice sells 0.5 ETH to bob at 2000");
   }));
-  await l1.send(oracle, "setShareBps", [usd(2100)], op);
+  await l1.send(agg, "transmit", [answer(2100)], op);
   await send(s1, "requestWithdraw", [ETH, parseEther("0.5")], alice, "user: requestWithdraw");
   const c1 = await sign(carol, d1, ETH, parseEther("0.2"), usd(420), 1n);
   const k2 = await sign(bob, d1, USD, usd(420), parseEther("0.2"), 2n);
@@ -329,7 +337,7 @@ async function run(l1: Chain) {
   Object.assign(metrics, {
     note: "anvil L1 (chain 900) and anvil executors (chain 7001). Gas = L1 receipt gasUsed, summed per label; txs = count per label.",
     users: pkg.users.length,
-    appSetup: { gas: appSetup, txs: 4, what: "AnchorRegistry, WitnessVerifier, ClearingCodec, ClearingVault: once per app" },
+    appSetup: { gas: appSetup, txs: 4, what: "AnchorRegistry, ChainlinkAdapter, ClearingCodec, ClearingVault: once per app" },
     sessionSetup: { gas: l1.gas["session 1: deploy"] + l1.gas["session 1: register"], txs: 3, what: "ClearingDisputes + ClearingChannel + vault.register, per session" },
     perBatch: { proposeGas: Math.round(l1.gas["operator: propose"] / l1Txs["operator: propose"]), finalizeGas: Math.round(l1.gas["operator: finalize"] / l1Txs["operator: finalize"]) },
     idle: "no L1 transactions while idle (no batch, no proposal). An Active session must still be watched: after takeoverDelay anyone may propose",

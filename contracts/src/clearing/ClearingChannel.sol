@@ -131,7 +131,8 @@ contract ClearingChannel is ClearingStorage {
 
     // ---- batches ----------------------------------------------------------------------------
 
-    /// @param witness the L1 price at a recorded anchor ≤ maxAnchorAge old
+    /// @param witness the price witness at the batch's anchor (recorded, ≤ maxAnchorAge old), as
+    ///        the session's price adapter reads it
     /// @param fills packed fills (ClearingLedger.FILL_BYTES each), in execution order
     /// @param updates changed accounts (ClearingLedger.UPDATE_BYTES each), indices ascending
     /// @param proof multiproof of unchanged subtrees (SparseTree16.transition)
@@ -162,8 +163,7 @@ contract ClearingChannel is ClearingStorage {
         if (forcedCursor < f0 || forcedCursor > _forced.length || forcedStatus.length != 2 * (forcedCursor - f0)) {
             revert BadBatch("forcedCursor");
         }
-        (uint256 price, uint64 anchorBlock) =
-            codec.price(witness, anchors, witnessVerifier, priceFeed, priceSlot, maxAnchorAge);
+        (uint256 price, uint64 anchorBlock) = priceAdapter.price(witness, anchors, maxAnchorAge);
         for (uint256 j = f0; j < forcedCursor; ++j) {
             uint16 s = uint16(bytes2(forcedStatus[2 * (j - f0):2 * (j - f0) + 2]));
             if (s == 0) {

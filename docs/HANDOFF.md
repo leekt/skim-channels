@@ -40,8 +40,9 @@ governance, forced inclusion). Read first: [PROJECT](../PROJECT.md) (spec v0.1),
 - **Built:**
   - `contracts/src/clearing`;
   - `ts/runtime/{l1view,executor,batches,clearing,evidence,tree}.ts`;
-  - `ts/e2e-clearing.ts` (deterministic, in CI);
-  - `ts/live-skim-clearing.ts` (`SKIM_RPC`, not in CI).
+  - `crates/app-executor` (the app network's EVM over imported L1 accounts);
+  - `ts/e2e-clearing.ts`, `ts/e2e-sessions.ts`, `ts/e2e-executor.ts` (deterministic, in CI);
+  - `ts/live-executor.ts` (`SKIM_RPC`, not in CI).
 - **Runtime recovery** (review of 5db7064):
   - a journal on disk with batch states;
   - recovery from the earliest affected batch, with proofs fetched before rollback;

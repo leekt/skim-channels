@@ -32,7 +32,7 @@ The clearing app ([stateful runtime](stateful-runtime.md)) also uses:
 | Which watched contracts changed, block by block, and rewinds after reorgs | `skim_streamNext` with `bal: {addresses}` (state changes from block access lists); `rewind` events |
 | A batch's single snapshot | `eth_getBlockByNumber("safe")` (or `finalized`, or N confirmations): one block, then every read names its hash |
 | Previews (state-ready) | `eth_getStorageAt` at `{blockHash}`; on skim a tracked key is kept current from BALs. Never an execution input |
-| Execution inputs (proof-ready) | `eth_getProof` at `{blockHash}`, verified again by `L1View` on the executor |
+| Execution inputs (proof-ready) | `eth_getProof` at `{blockHash}`, verified again by the app executor (`crates/app-executor`), and by L1's price adapter for the batch price |
 
 Measured live on Sepolia: [clearing runtime](../experiments/clearing.md#verification).
 

@@ -29,13 +29,13 @@ The question: what does it cost to **open, operate, close, and later start again
 
 | Phase | L1 transactions | Gas | Notes |
 |---|---|---|---|
-| App setup (once) | 4 | 4.77M | AnchorRegistry, WitnessVerifier, ClearingCodec, ClearingVault |
-| Open a session | 3 | 2.39M | ClearingDisputes + ClearingChannel deploy, `vault.register` |
-| Operate: per batch | 2 | 704k propose + 86k finalize | 1 fill per batch here; see [clearing costs](clearing.md) for density |
+| App setup (once) | 4 | 5.04M | AnchorRegistry, ChainlinkAdapter, ClearingCodec, ClearingVault |
+| Open a session | 3 | 2.38M | ClearingDisputes + ClearingChannel deploy, `vault.register` |
+| Operate: per batch | 2 | 1.24M propose + 86k finalize | 1 fill per batch; the price check is most of it (local feed here; Sepolia's witness costs ~2.18M, see [Chainlink rounds](chainlink-rounds.md)) |
 | Operate: idle | 0 | 0 | But an Active session must still be watched: after `takeoverDelay` anyone may propose |
 | Close | 2 | 50k + 34k | `beginClose`, `close` |
 | Monitoring after the last proposal | | | 1 challenge window here (3,600 s). Bounded in general by `takeoverDelay` + one window after Closing begins. After Closed is final on L1: nothing |
-| Start the next session | 3 | 2.39M | About 1.8 s to a ready empty executor. No replay of the previous session |
+| Start the next session | 3 | 2.38M | About 0.3 s to a ready empty app executor. No replay of the previous session |
 | User: redeem to wallet / to vault / `vault.fund` | 1 each | 126k / 161k / 128k | `claim` while active: 89k |
 
 **Recovery data by session size** (`ClearingSession.t.sol`, `test_publishFinalCost`). This is optional on-chain publication of every final leaf in aligned chunks:
@@ -61,7 +61,5 @@ The question: what does it cost to **open, operate, close, and later start again
 - **Not shown here:**
   - **L1 finality of the close transaction:** anvil has none. On a real chain, stop watching once `close` is in a finalized block.
   - **History retention:** publishing calldata isn't a promise that nodes keep serving it. The passive files are the recovery material; publication is a checked extra.
-- **Not changed in this milestone:**
-  - **Pricing:** it stays pinned-proof validation (the price at the batch's anchor, checked at proposal and kept for disputes).
-  - **A Chainlink `getRoundData(roundId)` adapter** is a separate evaluation. It needs explicit round-selection and freshness rules, because it doesn't by itself prove the round was the latest at the pin.
-  - **The revm executor** with imported L1 accounts isn't wired into clearing yet.
+- **Pricing:** pinned-proof validation (the price at the batch's anchor, checked at proposal and kept for disputes). A `getRoundData(roundId)` check is [evaluated separately](chainlink-rounds.md); it needs explicit round-selection and freshness rules.
+- **Stack:** clearing runs on the app executor (imported channel and feed, read-only) and L1 checks the price with `ChainlinkAdapter`; `e2e-sessions` passes on that stack.

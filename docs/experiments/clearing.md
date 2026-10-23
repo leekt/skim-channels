@@ -3,7 +3,8 @@
 **Date:** 2026-10-23. **Model:** [stateful runtime](../guide/stateful-runtime.md). **Code:**
 - L1: `contracts/src/clearing/`: `ClearingChannel` + `ClearingDisputes` + `ClearingCodec` over `ClearingStorage`.
 - Shared: `ClearingLedger`, `ClearingRules`.
-- Executor: `ClearingBook`, `L1View`.
+- Executor: `ClearingBook` on the app executor (`crates/app-executor`), which imports the channel and the Chainlink feed read-only.
+- Price on L1: `ChainlinkAdapter` (proofs at the batch's anchor).
 - Cost controls: `ClearingDirectBatch` + `ClearingChecker`, `ClearingL1`.
 - Runtime: `ts/runtime/` (`l1view`, `executor`, `batches`, `clearing`, `evidence`, `tree`).
 
@@ -12,7 +13,7 @@
 | | |
 |---|---|
 | What a batch publishes | Packed fills (236 B each: both orders and signatures), changed account leaves (220 B each) with a multiproof, a price-only L1 witness, queue cursors, forced-order statuses, and a bond |
-| What L1 checks at proposal | The price at a recorded, recent anchor; that the old leaves are in the finalized root (L1 computes the new root itself); queue cursors; forced-order statuses. **Nothing per fill** |
+| What L1 checks at proposal | The price at a recorded, recent anchor (`ChainlinkAdapter`: the pinned proxy and aggregator, the latest round there, fresh at that block); that the old leaves are in the finalized root (L1 computes the new root itself); queue cursors; forced-order statuses. **Nothing per fill** |
 | What a watcher can prove (one transaction each) | `challengeFill`: a bad signature, band, limit, expiry, same side, or unknown trader. `challengeAccount`: L1 replays one account (deposits → requests → fills) with `ClearingLedger` and compares it to the published leaf. This catches a wrong balance, a stale nonce, an uncovered sale, an omitted trader, or a request skipped, applied early, or consumed without its deposits |
 | Who proposes | The operator. After `takeoverDelay` without a proposal, anyone with a bond |
 | Exits | Withdrawal requests are served at the start of a batch and claimed from finalized leaves. A request or forced order unserved past `forceDelay` lets anyone freeze, which closes the session; everyone redeems from the final leaf ([sessions](sessions.md)) |
@@ -24,7 +25,7 @@
 
 - **forge** (`contracts/test/clearing`):
   - 28 channel tests: honest batches survive every challenge; a forged signature, an out-of-band fill, an overpaid account, an omitted trader, nonce reuse across batches, collateral used twice, the request rules, a partial replay, false evidence, an unknown trader index, forced orders (resting, filled, ignored then freeze), takeover, the policy floors and bounds.
-  - 3 `L1View` tests: mixed roots, wrong values, presence lies, and unwitnessed reads all refused.
+  - 6 `ChainlinkAdapter` tests on a recorded Sepolia witness: the price `latestRoundData()` returns at the anchor; an aggregator the proxy doesn't point at, unpinned proxy or aggregator code, a stale answer (judged at the anchor's time), an unrecorded or old anchor, and tampered proofs are all refused.
   - 4 cost runs.
 - **Mutation:** 40 mutants of the clearing contracts, all caught except one equivalent: `finalize`'s frozen check, already unreachable because a freeze clears the pending batch.
 - **Deterministic e2e** (`npm run e2e-clearing`: anvil L1 with only its last 512 states kept, so old proofs really are refused, and blocks advance with time; operators A and B on local executors):
@@ -34,7 +35,8 @@
 | State across snapshots | Batch 1 at price 2000, batch 2 at 2100. Alice's withdrawal request is served at batch 2's start and claimed on L1 while trading goes on. Bob's unfilled order rests across batches. After every batch, a watcher simulates a challenge on every account and fill: nothing to challenge, and L1's account root equals the operator's |
 | Replay | The journal's first two batches replayed on a fresh executor from the pinned proofs give the same `stateDigest` |
 | Standard wallet flow | Through the gateway's JSON-RPC: `eth_chainId` equals the orders' EIP-712 chain; `eth_getBalance` shows ETH in the channel; fees are 0; alice and bob sign orders as typed data and place them with ordinary transactions (viem, as a wallet does: nonce `pending`, fee estimation, `eth_sendRawTransaction`, receipts). Refused with standard errors, consuming no nonce: a plain transfer, a deployment, `fill` (operator-only), a stale-nonce order, someone else's order, `anvil_setBalance`, `eth_sendTransaction`. The users' raw transactions are replayed byte for byte in the journal replay |
-| Fail-closed | A tampered witness, a header that isn't the anchor, and an unproven slot are refused by `L1View` |
+| Fail-closed | Pinning the executor to a block L1 doesn't have is refused; the channel is read-only on the app network; no overlay is ever written into an imported account |
+| Feed upgrade | The feed's proxy switches aggregators: L1's adapter refuses a price from the new one, and the executor can't price a batch from it (not imported) |
 | A wrong proposal | Bob's leaf is off by 1. The watcher finds it and wins the bond with `challengeAccount`; then the honest batch finalizes |
 | Forced order | Taken in from L1 (hash checked), filled, and its status checked on L1 |
 | R1: dependent batches, reorg | Speculative batch S1: alice sells 0.1 ETH to dave. S2: dave sells it on to bob. `anvil_reorg` replaces both anchor blocks with a chain where alice reserved her ETH. `tick()` recovers from **S1** (the earliest) and replays both: S1 fails (`Insufficient`), then S2 has nothing to sell. Dave ends with no ETH |
@@ -45,18 +47,12 @@
 | Handover | A goes silent for 2 days. Operator B rebuilds every account from L1 calldata alone; `adopt` accepts them (their root equals L1's) and B continues |
 | Freeze | A forced order nobody serves. Freeze is refused before its deadline and works after it, closing the session. Every user redeems; after bond withdrawals the channel ends with 0 ETH and 0 USD |
 
-- **Live** (`SKIM_RPC=… npm run live-skim`, a skim node following Sepolia; read path only, nothing settled):
-  - `skim_streamNext` reports WETH state changes from block access lists.
-  - Proofs at a `safe` block (~13 KB, 0.3–0.6 s) verify on the executor and match skim's state-ready value.
-  - `ClearingBook` carries AppState from snapshot A to snapshot B.
-  - An order from someone with no escrow in the channel is refused, and an unproven slot can't be read.
-  - The runtime's rewind signal (`skimRewound`) works on skim.
-  - Skim served proofs 64 blocks back, and returned no block by number from 256 back.
+- **Live** (`SKIM_RPC=… npm run live-executor`, a skim node following Sepolia; read path only, nothing settled):
+  - An app contract calls Chainlink's ETH/USD proxy at its Sepolia address on the app executor. It gets what Sepolia returns at the pin (proxy and aggregator code and 5 slots verified, 46 KB of evidence).
+  - The slots `ChainlinkAdapter` verifies at that block decode to the same answer and time (a 15 KB price witness).
+  - App state carries across pin moves. With only the proxy imported, the read reverts.
 
-- **Devnet with Sepolia's price** (`npm run devnet`, see [the guide](../guide/stateful-runtime.md#try-it-in-a-browser-the-devnet-tsdevnetts)):
-  - The relay proved Chainlink ETH/USD from skim's `safe` block (Sepolia 11 973 489, round 37 003, $2392.59) into `FeedMirror`: 10.6 KB of proofs, fetched in ~1.1 s, verified on-chain for ~920k–994k gas.
-  - Batches pinned it (2.5 KB price proof per batch), and the smoke test's fill went through at 0.00% from it, then a withdrawal was claimed on L1.
-  - `FeedMirror` forge tests (7) run on a recorded witness (`fixtures/witnesses/sepolia-eth-usd.json`): wrong relayer, wrong source chain, a header that isn't the anchor, another contract's slots, replayed or older blocks, and tampered proofs are all refused.
+- **Devnet** (`npm run devnet`, [guide](../guide/stateful-runtime.md#try-it-in-a-browser-the-devnet-tsdevnetts)): locally (anvil and a Chainlink-layout feed), the smoke test takes a fresh wallet through faucet, deposit, a fill, a withdrawal and a claim. On Sepolia it needs a funded operator key (`SEPOLIA_OPERATOR_KEY`).
 
 ## Cost (L1 gas, measured)
 
@@ -72,7 +68,7 @@
 |---|---|---|---|
 | Entry | first deposit ETH / USD | ~92k / ~111k | anvil receipts ([`data/clearing-e2e.json`](data/clearing-e2e.json)) |
 | Exit | `requestWithdraw`; `claim`; `exit` after a freeze | ~121k; ~92k; ~90k per user | anvil |
-| Batch, fixed | price witness + anchor record | ~330k (anvil trie) to ~700k (6.2 KB fixture witness), + ~100k record | forge, anvil |
+| Batch, fixed | price witness + anchor record | Chainlink adapter: ~2.18M execution + 15.2 KB witness (Sepolia, `ChainlinkAdapter.t.sol`); + ~100k record. A `getRoundData` check would be tens of thousands ([evaluation](chainlink-rounds.md)) | forge |
 | DA | fills 236 B each; changed accounts 220 B each plus multiproof nodes | 34 KB for 128 fills / 16 users | forge |
 | Dispute | `challengeAccount` (an account in 16 of 256 fills) / `challengeFill` (last of 256) | 2.71M / 2.49M, mostly resubmitting the batch's calldata | forge |
 
