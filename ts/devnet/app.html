@@ -1,99 +1,315 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-density="demo">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Skim Clearing — devnet test app</title>
+<title>Skim Clearing · devnet</title>
+<link rel="icon" href="/schematic/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/schematic/styles.css">
 <style>
-  :root { --bg: #0b0d12; --card: #141821; --line: #232a37; --text: #e6e9ef; --muted: #8b93a7; --accent: #7c5cff; --ok: #2ee6c5; --warn: #ffb547; --bad: #ff5c7a; }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; }
-  main { max-width: 1100px; margin: 0 auto; padding: 16px; }
-  h1 { font-size: 20px; margin: 4px 0 2px; } h2 { font-size: 15px; margin: 0 0 10px; color: var(--accent); }
-  .sub { color: var(--muted); margin-bottom: 14px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
-  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 6px 0; }
-  label { color: var(--muted); font-size: 12px; }
-  input, select { background: #0e1118; color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; min-width: 0; flex: 1 1 90px; font: inherit; }
-  button { background: var(--accent); color: white; border: 0; border-radius: 8px; padding: 8px 12px; font: inherit; cursor: pointer; }
-  button.ghost { background: transparent; border: 1px solid var(--line); color: var(--text); }
-  button:disabled { opacity: .5; cursor: default; }
-  .kv { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; }
-  .kv div:nth-child(odd) { color: var(--muted); }
-  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-all; }
-  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; border: 1px solid var(--line); }
-  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
-  table { width: 100%; border-collapse: collapse; font-size: 12px; }
-  td, th { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); }
-  #log, #events { max-height: 220px; overflow: auto; background: #0e1118; border-radius: 8px; padding: 8px; }
-  .note { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  /* Product layout only; every color, type and control comes from Schematic. */
+  .ds-shell { width: min(100%, 1180px); }
+  .num, .mono { font-family: var(--font-mono); font-stretch: var(--mono-wdth-dense); font-size: 12px; }
+  .muted { color: var(--muted); }
+  .small { font-size: var(--fs-small); line-height: 1.5; }
+  .grid { display: grid; grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); gap: var(--space-6); align-items: start; }
+  .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-6); align-items: start; }
+  @media (max-width: 1000px) { .grid, .grid-2 { grid-template-columns: minmax(0, 1fr); } }
+  .stack > * + * { margin-top: var(--space-6); }
+  .stack.tight > * + * { margin-top: var(--space-4); }
+  h2.section { margin: var(--space-8) 0 var(--space-4); font: 700 var(--fs-heading)/1.2 var(--font-display); letter-spacing: var(--tracking-title); color: var(--ink); }
+  .label { font: 500 11px/1.4 var(--font-mono); letter-spacing: var(--tracking-label); text-transform: uppercase; color: var(--muted); }
+
+  /* the Sepolia notice */
+  .source { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: var(--space-5); align-items: center;
+    margin-top: var(--space-6); padding: var(--space-5) var(--panel-gutter); background: var(--panel);
+    border: var(--frame-w) solid var(--ink); border-radius: var(--r-panel); }
+  .source .mark { display: grid; place-items: center; width: 44px; height: 44px; border: var(--frame-w) solid var(--ink);
+    border-radius: var(--r-control); font: 700 12px/1 var(--font-mono); color: var(--ink); }
+  .source h3 { margin: 0 0 var(--space-1); font: 600 15px/1.4 var(--font-ui); color: var(--ink); }
+  .source p { margin: 0; color: var(--ink-3); font-size: 13px; }
+  .figure { text-align: right; }
+  .figure .big { font: 700 28px/1.1 var(--font-display); letter-spacing: var(--tracking-display); color: var(--ink); }
+  @media (max-width: 760px) { .source { grid-template-columns: minmax(0, 1fr); } .figure { text-align: left; } }
+  .ds-page-header > div { min-width: 0; }
+  dl.kv dd { min-width: 0; }
+
+  /* status chips (Schematic StatusChip, native): glyph + label, one meaning per color */
+  .chip { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px; border-radius: var(--r-pill);
+    white-space: nowrap; font: 600 11.5px/1 var(--font-ui); background: var(--idle); color: var(--ink-3); }
+  .chip::before { content: "○"; font-size: .9em; }
+  .chip.ok { background: var(--ok-soft); color: var(--ok); } .chip.ok::before { content: "●"; }
+  .chip.done { background: var(--ok-soft); color: var(--ok); } .chip.done::before { content: "✓"; }
+  .chip.wait { background: var(--wait-soft); color: var(--wait-text); } .chip.wait::before { content: "◐"; }
+  .chip.fail { background: var(--fail-soft); color: var(--fail); } .chip.fail::before { content: "✕"; }
+  .chip.unknown { background: var(--unknown-hatch); color: var(--unknown-ink); box-shadow: inset 0 0 0 1px var(--unknown-line); } .chip.unknown::before { content: "?"; }
+  /* ChainMark: framed square monogram, no per-chain colors */
+  .chain { display: inline-flex; align-items: center; gap: 6px; font: 500 12px/1 var(--font-ui); color: var(--ink-2); }
+  .chain b { display: inline-grid; place-items: center; min-width: 22px; height: 18px; padding: 0 3px; border: 1px solid var(--ink); border-radius: var(--r-control); font: 700 9px/1 var(--font-mono); color: var(--ink); }
+
+  .wallet { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+  .addr { display: inline-flex; align-items: center; height: 36px; padding: 0 12px; border: 1px solid var(--rule-strong);
+    border-radius: var(--r-control); background: var(--panel); font: 500 12px/1 var(--font-mono); color: var(--ink); }
+
+  dl.kv { display: grid; grid-template-columns: auto minmax(0, 1fr); margin: 0; }
+  dl.kv dt, dl.kv dd { padding: 9px 0; border-bottom: var(--hair-w) solid var(--rule); }
+  dl.kv dt { color: var(--muted); font-size: 13px; padding-right: var(--space-4); }
+  dl.kv dd { text-align: right; font-family: var(--font-mono); font-stretch: var(--mono-wdth-dense); font-size: 12px; color: var(--ink); overflow-wrap: anywhere; }
+  dl.kv > :nth-last-child(-n+2) { border-bottom: 0; }
+
+  .balances { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-bottom: var(--hair-w) solid var(--rule); }
+  .balances > div { padding: var(--space-4) var(--panel-gutter); }
+  .balances > div + div { border-left: var(--hair-w) solid var(--rule); }
+  .balances .big { font: 700 24px/1.15 var(--font-display); letter-spacing: var(--tracking-title); color: var(--ink); overflow-wrap: anywhere; }
+
+  .seg { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--ink); border-radius: var(--r-control); overflow: hidden; }
+  .seg button { min-height: var(--control-h); border: 0; background: var(--panel); color: var(--ink); font: 600 13px/1 var(--font-ui); cursor: pointer; }
+  .seg button + button { border-left: 1px solid var(--ink); }
+  .seg button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+  .ticket { display: grid; gap: var(--space-4); }
+  .fields { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); }
+  @media (max-width: 520px) { .fields { grid-template-columns: minmax(0, 1fr); } }
+  .summary { background: var(--sunken); border-radius: var(--r-control); padding: var(--space-1) var(--space-4); }
+  .band-ok { color: var(--ok); } .band-bad { color: var(--fail); }
+  .inline { min-height: 0; padding: 0 2px; vertical-align: baseline; font-size: inherit; text-decoration: underline; text-underline-offset: 0.2em; }
+
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; padding: 10px var(--panel-gutter); font: 500 11px/1.4 var(--font-mono); letter-spacing: var(--tracking-label); text-transform: uppercase; color: var(--muted); border-bottom: var(--hair-w) solid var(--rule); white-space: nowrap; }
+  td { padding: 10px var(--panel-gutter); border-bottom: var(--hair-w) solid var(--rule); vertical-align: top; color: var(--ink-2); }
+  tbody tr:last-child td { border-bottom: 0; }
+  td.n { font-family: var(--font-mono); font-stretch: var(--mono-wdth-dense); font-size: 12px; white-space: nowrap; }
+  tr.fills td { background: var(--sunken); padding-top: 6px; padding-bottom: 10px; }
+  .empty { padding: var(--space-5) var(--panel-gutter); color: var(--muted); font-size: 13px; }
+
+  .custody { list-style: none; margin: 0; padding: 0; }
+  .custody li { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: var(--space-3); padding: var(--space-4) var(--panel-gutter); border-bottom: var(--hair-w) solid var(--rule); }
+  .custody li:last-child { border-bottom: 0; }
+  .custody .no { display: grid; place-items: center; width: 24px; height: 24px; border: 1px solid var(--ink); border-radius: var(--r-pill); font: 600 11px/1 var(--font-mono); color: var(--ink); }
+  .custody strong { display: block; font: 600 13px/1.4 var(--font-ui); color: var(--ink); }
+  .custody .what { margin: 2px 0 6px; color: var(--ink-3); font-size: 13px; }
+  .custody .vals { display: flex; flex-wrap: wrap; gap: 4px 16px; font: 400 12px/1.6 var(--font-mono); font-stretch: var(--mono-wdth-dense); color: var(--ink-2); }
+  .custody .vals span { white-space: nowrap; } .custody .vals i { font-style: normal; color: var(--muted); }
+  .trust { margin-top: 8px; padding: 6px 10px; background: var(--wait-wash); border-left: 2px solid var(--wait); font-size: 12px; color: var(--ink-2); }
+
+  .log { max-height: 280px; overflow: auto; padding: var(--space-2) var(--panel-gutter); font: 400 11.5px/1.7 var(--font-mono); font-stretch: var(--mono-wdth-dense); color: var(--ink-2); }
+  .log div { border-bottom: 1px dotted var(--rule); padding: 2px 0; overflow-wrap: anywhere; }
+  .log .ok { color: var(--ok); } .log .bad { color: var(--fail); }
+  .tabs { display: flex; gap: var(--space-5); border-bottom: var(--hair-w) solid var(--rule); padding: 0 var(--panel-gutter); }
+  .tabs button { min-height: 44px; padding: 0; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--muted); font: 600 13px/1 var(--font-ui); cursor: pointer; }
+  .tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--ink); }
+  .row { display: flex; gap: var(--space-2); align-items: end; flex-wrap: wrap; }
+  .row > .ds-field { flex: 1 1 140px; }
+  a.ext { text-decoration: none; } a.ext::after { content: " ↗"; color: var(--muted); }
+  p.note { margin: 0; font-size: var(--fs-small); color: var(--muted); line-height: 1.6; }
 </style>
 </head>
 <body>
-<main>
-  <h1>Skim Clearing — devnet</h1>
-  <div class="sub">Trade on the app network with a normal wallet; funds live in an L1 escrow. <b>Devnet only:</b> chains reset when the server restarts. · <a href="/faucet" style="color:var(--accent)">Faucet</a></div>
+<div class="ds-shell">
+  <header class="ds-header">
+    <a class="ds-wordmark" href="/">skim clearing <span class="ds-wordmark-sub">devnet</span></a>
+    <nav>
+      <a href="#trade">Trade</a><a href="#price">Price source</a><a href="#batches">Batches</a><a href="/faucet" id="faucetNav">Faucet</a>
+    </nav>
+    <div class="wallet">
+      <span id="netChip" class="chip">Not connected</span>
+      <span id="who" class="addr" hidden></span>
+      <button class="ds-button ds-button--dark" id="connect">Connect wallet</button>
+    </div>
+  </header>
 
+  <div class="source" role="note" aria-label="Price source">
+    <div class="mark" aria-hidden="true">SEP</div>
+    <div>
+      <h3>Prices come from Sepolia's live state</h3>
+      <p>Every trade is checked against Chainlink's ETH/USD feed <b>on Sepolia</b>, read through a skim light-client node and proven slot by slot. Your funds, deposits and trades live on a <b>local devnet</b>. Nothing here touches your Sepolia balance.</p>
+    </div>
+    <div class="figure">
+      <div class="label">ETH/USD · Sepolia, proven</div>
+      <div class="big" id="bannerPrice">—</div>
+      <div class="small muted" id="bannerMeta">Waiting for the first proof</div>
+    </div>
+  </div>
+
+  <div class="ds-page-header">
+    <div>
+      <p class="ds-eyebrow">App network · chain <span id="appId"></span> · fees 0</p>
+      <h1>Trade ETH against Sepolia's price</h1>
+      <p class="ds-page-description">Use a normal wallet. Deposits and withdrawals happen on the L1 devnet; orders are signed as typed data and sent as ordinary transactions on the app network. Every batch settles on L1 and can be challenged there. Chains reset when the devnet restarts.</p>
+    </div>
+  </div>
+
+  <div class="grid" id="trade">
+    <div class="stack">
+      <div class="ds-panel">
+        <div class="ds-panel-head"><h2>Place an order</h2><span class="ds-meta">Band ±1% of the Sepolia price</span></div>
+        <div class="ds-panel-body ticket">
+          <div class="seg" role="group" aria-label="Side">
+            <button id="sideSell" aria-pressed="true">Sell ETH</button><button id="sideBuy" aria-pressed="false">Buy ETH</button>
+          </div>
+          <div class="fields">
+            <div class="ds-field"><label class="ds-label" for="amt">Amount</label>
+              <div class="ds-input-group"><input class="ds-input" id="amt" inputmode="decimal" value="0.1"><span class="ds-input-affix">ETH</span></div></div>
+            <div class="ds-field"><label class="ds-label" for="limit">Limit price</label>
+              <div class="ds-input-group"><input class="ds-input" id="limit" inputmode="decimal"><span class="ds-input-affix">USD</span></div></div>
+          </div>
+          <div class="summary"><dl class="kv">
+            <dt id="payLabel">You sell</dt><dd id="sumPay">—</dd>
+            <dt id="getLabel">You receive</dt><dd id="sumGet">—</dd>
+            <dt>Distance from Sepolia price <button class="ds-button ds-button--ghost inline" id="useMark">use it</button></dt><dd id="sumBand">—</dd>
+          </dl></div>
+          <button class="ds-button ds-button--primary ds-button--lg ds-button--block" id="place">Sign and place order</button>
+          <p class="note">Your wallet asks for a typed-data signature (the order, which L1 checks in a dispute) and then a transaction on the app network, with no fee. The devnet's market maker answers orders inside the band, and the operator fills them in the next batch. If the operator ignores your order, <button class="ds-button ds-button--ghost inline" id="force">force it on L1 →</button></p>
+        </div>
+      </div>
+
+      <div class="ds-panel">
+        <div class="ds-panel-head"><h2>Your resting orders</h2><span class="ds-meta" id="mineCount"></span></div>
+        <div class="table-wrap"><table><thead><tr><th>Side</th><th>Amount</th><th>Limit</th><th></th></tr></thead><tbody id="mine"></tbody></table></div>
+        <div class="empty" id="mineEmpty">No resting orders.</div>
+      </div>
+    </div>
+
+    <div class="stack">
+      <div class="ds-panel">
+        <div class="ds-panel-head"><h2>Your balance in the channel</h2><span class="chain"><b>APP</b>app network</span></div>
+        <div class="balances">
+          <div><div class="label">ETH</div><div class="big" id="pEth">—</div></div>
+          <div><div class="label">USD</div><div class="big" id="pUsd">—</div></div>
+        </div>
+        <div class="ds-panel-body" style="padding-block: 4px">
+          <dl class="kv">
+            <dt>Final on L1</dt><dd id="fin">—</dd>
+            <dt>Released, claimable</dt><dd id="released">—</dd>
+            <dt>Wallet on L1 devnet</dt><dd id="l1bal">—</dd>
+          </dl>
+        </div>
+      </div>
+
+      <div class="ds-panel">
+        <div class="tabs" role="tablist">
+          <button role="tab" aria-selected="true" data-tab="dep">Deposit</button>
+          <button role="tab" aria-selected="false" data-tab="wd">Withdraw</button>
+          <button role="tab" aria-selected="false" data-tab="net">Networks</button>
+        </div>
+        <div class="ds-panel-body" data-panel="dep">
+          <div class="stack tight">
+            <div class="row">
+              <div class="ds-field"><label class="ds-label" for="depEth">ETH</label><input class="ds-input" id="depEth" value="1" inputmode="decimal"></div>
+              <button class="ds-button" id="depositEth">Deposit ETH</button>
+            </div>
+            <div class="row">
+              <div class="ds-field"><label class="ds-label" for="depUsd">USD (test token)</label><input class="ds-input" id="depUsd" value="5000" inputmode="decimal"></div>
+              <button class="ds-button" id="depositUsd">Approve and deposit</button>
+            </div>
+            <p class="note">Deposits go to the L1 escrow and reach the app at its next batch, usually within 20 seconds. No funds? <button class="ds-button ds-button--ghost inline" id="faucet">Get 5 ETH and 20 000 USD</button> or open the <a href="/faucet" id="faucetLink">faucet page</a>.</p>
+          </div>
+        </div>
+        <div class="ds-panel-body" data-panel="wd" hidden>
+          <div class="stack tight">
+            <div class="row">
+              <div class="ds-field"><label class="ds-label" for="wTok">Token</label><select class="ds-input ds-select" id="wTok"><option value="0">ETH</option><option value="1">USD</option></select></div>
+              <div class="ds-field"><label class="ds-label" for="wAmt">Amount</label><input class="ds-input" id="wAmt" value="0.1" inputmode="decimal"></div>
+              <button class="ds-button" id="request">Request on L1</button>
+            </div>
+            <div class="row"><button class="ds-button" id="claim">Claim released funds</button><button class="ds-button ds-button--destructive" id="exit">Exit after a freeze</button></div>
+            <p class="note">A request is served at the start of the next batch and becomes claimable once that batch is final on L1, after a 1-hour challenge window. On the devnet, skip ahead with “+1 hour” under Batches.</p>
+          </div>
+        </div>
+        <div class="ds-panel-body" data-panel="net" hidden>
+          <div class="stack tight">
+            <dl class="kv">
+              <dt><span class="chain"><b>L1</b>L1 devnet</span></dt><dd>chain <span id="l1Id"></span> · deposits, withdrawals</dd>
+              <dt><span class="chain"><b>APP</b>App network</span></dt><dd>chain <span id="appId2"></span> · trading, no fees</dd>
+              <dt><span class="chain"><b>SEP</b>Sepolia</span></dt><dd>chain 11155111 · price only, read through skim</dd>
+            </dl>
+            <div class="row"><button class="ds-button" id="addL1">Switch to L1 devnet</button><button class="ds-button" id="addApp">Switch to app network</button></div>
+            <p class="note">The app switches networks for you before each action. You never need Sepolia ETH: Sepolia is only read.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <h2 class="section" id="price">Where the price comes from</h2>
   <div class="grid">
-    <section class="card">
-      <h2>1 · Wallet</h2>
-      <div class="row"><button id="connect">Connect wallet</button><span id="who" class="mono"></span></div>
-      <div class="row"><button class="ghost" id="addL1">Add / switch to L1 devnet</button><button class="ghost" id="addApp">Add / switch to app network</button></div>
-      <div class="kv"><div>wallet chain</div><div id="chain">—</div></div>
-      <div class="row"><button id="faucet">Faucet: 5 ETH + 20,000 USD on L1</button><a id="faucetLink" href="/faucet" style="color:var(--accent)">faucet page →</a></div>
-      <div class="note">Two networks: <b>L1 devnet</b> (chain 900: deposits, withdrawals, forced orders) and the <b>app network</b> (chain 7001: trading, fees 0). The app switches for you.</div>
-    </section>
-
-    <section class="card">
-      <h2>2 · L1: escrow</h2>
-      <div class="kv">
-        <div>wallet ETH (L1)</div><div id="l1eth">—</div>
-        <div>wallet USD (L1)</div><div id="l1usd">—</div>
-        <div>channel, finalized</div><div id="fin">—</div>
+    <div class="ds-panel">
+      <div class="ds-panel-head"><h2>From Sepolia to each fill</h2><span class="ds-meta">Latest batch</span></div>
+      <ol class="custody">
+        <li><span class="no">1</span><div>
+          <strong>Sepolia · Chainlink ETH/USD</strong>
+          <div class="what">The feed's aggregator keeps the latest answer in two storage slots: the round id, and that round's answer.</div>
+          <div class="vals" id="c1"></div></div></li>
+        <li><span class="no">2</span><div>
+          <strong>skim node · Sepolia light client</strong>
+          <div class="what">skim follows Sepolia's head and serves storage proofs at the <b>safe</b> block, which the beacon chain has justified.</div>
+          <div class="vals" id="c2"></div></div></li>
+        <li><span class="no">3</span><div>
+          <strong>FeedMirror on the L1 devnet</strong>
+          <div class="what">A contract verifies both proofs against the Sepolia header's state root and stores the price.</div>
+          <div class="vals" id="c3"></div>
+          <div class="trust">Trusted: that this header is on Sepolia's canonical chain. The devnet can't check Sepolia block hashes, so only the relay may submit headers. Every step after this one is verified.</div></div></li>
+        <li><span class="no">4</span><div>
+          <strong>The batch pins an L1 block and proves the price slot</strong>
+          <div class="what">The executor reads FeedMirror only through a storage proof at one L1 block. L1 checks the same proof again when the batch is proposed.</div>
+          <div class="vals" id="c4"></div></div></li>
+        <li><span class="no">5</span><div>
+          <strong>Each fill is checked against that price</strong>
+          <div class="what">The executor refuses a fill more than 1% from the proven price, and anyone can prove such a fill on L1 with <span class="mono">challengeFill</span>.</div>
+          <div class="vals" id="c5"></div></div></li>
+      </ol>
+    </div>
+    <div class="stack">
+      <div class="ds-panel">
+        <div class="ds-panel-head"><h2>Sepolia right now</h2><span class="chip wait">Live, not proven</span></div>
+        <div class="ds-panel-body" style="padding-block: 4px"><dl class="kv">
+          <dt>Head block</dt><dd id="hBlock">—</dd>
+          <dt>Round</dt><dd id="hRound">—</dd>
+          <dt>ETH/USD at head</dt><dd id="hPrice">—</dd>
+        </dl></div>
+        <div class="ds-panel-foot">For comparison only. Trades use the value proven at the safe block.</div>
       </div>
-      <div class="row"><input id="depEth" placeholder="ETH" value="1"><button id="depositEth">Deposit ETH</button></div>
-      <div class="row"><input id="depUsd" placeholder="USD" value="5000"><button id="depositUsd">Deposit USD</button></div>
-      <div class="row"><select id="wTok"><option value="0">ETH</option><option value="1">USD</option></select><input id="wAmt" placeholder="amount" value="0.1"><button id="request">Request withdrawal</button></div>
-      <div class="row"><button class="ghost" id="claim">Claim released withdrawals</button><button class="ghost" id="exit">Exit (after a freeze)</button></div>
-      <div class="note">Deposits reach the app at its next batch (seconds). A withdrawal is served at the start of a batch and becomes claimable once that batch is final on L1 (1-hour window: use “+1 hour” below).</div>
-    </section>
-
-    <section class="card">
-      <h2>3 · App network: trade</h2>
-      <div class="kv">
-        <div>channel ETH (pending)</div><div id="pEth">—</div>
-        <div>channel USD (pending)</div><div id="pUsd">—</div>
-        <div>L1 price</div><div id="price">—</div>
+      <div class="ds-panel">
+        <div class="ds-panel-head"><h2>Proven into L1</h2><span class="ds-meta">Recent relays</span></div>
+        <div class="table-wrap"><table><thead><tr><th>Sepolia block</th><th>Round</th><th>Price</th><th>Proof</th></tr></thead><tbody id="relays"></tbody></table></div>
       </div>
-      <div class="row">
-        <select id="side"><option value="sell">Sell ETH</option><option value="buy">Buy ETH</option></select>
-        <input id="amt" placeholder="ETH" value="0.1"><input id="limit" placeholder="price">
-      </div>
-      <div class="row"><button id="place">Sign & place order</button><button class="ghost" id="force">Place as forced order (L1)</button></div>
-      <div class="note">Placing = an EIP-712 signature (the order) + an ordinary transaction on the app network. The devnet's market maker answers orders within 1% of the L1 price; the operator fills them.</div>
-      <table><thead><tr><th>your resting orders</th><th></th></tr></thead><tbody id="mine"></tbody></table>
-    </section>
-
-    <section class="card">
-      <h2>4 · Channel status</h2>
-      <div class="kv">
-        <div>L1 block / time</div><div id="blk">—</div>
-        <div>finalized batches</div><div id="fb">—</div>
-        <div>pending on L1</div><div id="pend">—</div>
-        <div>frozen</div><div id="frozen">—</div>
-      </div>
-      <table><thead><tr><th>batch</th><th>state</th><th>anchor</th><th>actions</th></tr></thead><tbody id="batches"></tbody></table>
-      <h2 style="margin-top:12px">Devnet controls</h2>
-      <div class="row"><button class="ghost" id="ff">+1 hour (L1 time)</button><input id="newPrice" placeholder="new L1 price" ><button class="ghost" id="setPrice">Set L1 price</button></div>
-    </section>
+    </div>
   </div>
 
-  <div class="grid" style="margin-top:12px">
-    <section class="card"><h2>Operator log</h2><div id="log" class="mono"></div></section>
-    <section class="card"><h2>Your actions</h2><div id="events" class="mono"></div></section>
+  <h2 class="section" id="batches">Batches</h2>
+  <div class="grid">
+    <div class="ds-panel">
+      <div class="ds-panel-head"><h2>Recent batches</h2><span class="ds-meta" id="finCount"></span></div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Batch</th><th>State</th><th>L1 block</th><th>Sepolia block</th><th>Price used</th><th>Fills</th></tr></thead>
+        <tbody id="batchRows"></tbody>
+      </table></div>
+    </div>
+    <div class="ds-panel">
+      <div class="ds-panel-head"><h2>Channel on L1</h2><span id="frozen" class="chip">—</span></div>
+      <div class="ds-panel-body" style="padding-block: 4px"><dl class="kv">
+        <dt>L1 block</dt><dd id="blk">—</dd>
+        <dt>L1 time</dt><dd id="blkTime">—</dd>
+        <dt>Waiting on L1</dt><dd id="pend">—</dd>
+      </dl></div>
+      <div class="ds-panel-foot" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+        <span>Devnet only: move L1 time past the challenge window.</span>
+        <button class="ds-button ds-button--sm" id="ff">+1 hour</button>
+      </div>
+    </div>
   </div>
-</main>
+
+  <h2 class="section">Activity</h2>
+  <div class="grid-2">
+    <div class="ds-panel"><div class="ds-panel-head"><h2>Your actions</h2></div><div class="log" id="events"><div class="muted">Nothing yet.</div></div></div>
+    <div class="ds-panel"><div class="ds-panel-head"><h2>Operator</h2><span class="ds-meta">relay, batches, maker</span></div><div class="log" id="log"></div></div>
+  </div>
+
+  <footer class="ds-footer">
+    <span>Skim Execution Channels · clearing devnet · L1 chain <span id="l1Id2"></span>, app chain <span id="appId3"></span>, price from Sepolia via skim.</span>
+    <a href="/faucet">Faucet</a>
+  </footer>
+</div>
 
 <script type="module">
 import { createPublicClient, createWalletClient, custom, http, parseEther, parseUnits, formatEther, formatUnits, defineChain } from "https://esm.sh/viem@2.30.0";
@@ -108,11 +324,30 @@ const app = createPublicClient({ chain: appChain, transport: http(origin + cfg.a
 const types = { Order: [
   { name: "trader", type: "address" }, { name: "sellToken", type: "uint8" }, { name: "sellAmount", type: "uint128" },
   { name: "buyAmount", type: "uint128" }, { name: "nonce", type: "uint64" }, { name: "expiry", type: "uint64" } ] };
-let account, wallet, lastPrice = 0n;
+const SEPOLIA_SCAN = "https://sepolia.etherscan.io";
+let account, wallet, lastPrice = 0n, side = "sell";
 
-function say(msg, cls = "") { const d = document.createElement("div"); d.className = cls; d.textContent = `${new Date().toLocaleTimeString()} ${msg}`; $("events").prepend(d); }
-const eth = (x) => Number(formatEther(BigInt(x))).toLocaleString(undefined, { maximumFractionDigits: 6 });
-const dollars = (x) => Number(formatUnits(BigInt(x), 6)).toLocaleString(undefined, { maximumFractionDigits: 2 });
+for (const id of ["appId", "appId2", "appId3"]) $(id).textContent = cfg.app.chainId;
+for (const id of ["l1Id", "l1Id2"]) $(id).textContent = cfg.l1.chainId;
+
+// Thin-spaced thousands in machine values; addresses 0x + 4 … 4.
+const thin = (s) => s.replace(/,/g, " ");
+const eth = (x) => thin(Number(formatEther(BigInt(x))).toLocaleString("en-US", { maximumFractionDigits: 6 }));
+const dollars = (x) => thin(Number(formatUnits(BigInt(x), 6)).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+const int = (x) => thin(Number(x).toLocaleString("en-US"));
+const short = (a) => a ? `${a.slice(0, 6)}…${a.slice(-4)}` : "";
+const bytes = (n) => n >= 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`;
+const ago = (sec) => { const d = Math.max(0, Math.round(Date.now() / 1000 - sec)); return d < 90 ? `${d} s ago` : d < 5400 ? `${Math.round(d / 60)} min ago` : `${(d / 3600).toFixed(1)} h ago`; };
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const blockLink = (n) => `<a class="ext" href="${SEPOLIA_SCAN}/block/${n}" target="_blank" rel="noopener">${int(n)}</a>`;
+const addrLink = (a) => `<a class="ext" href="${SEPOLIA_SCAN}/address/${a}" target="_blank" rel="noopener">${short(a)}</a>`;
+const STATE = { open: ["wait", "Open"], sealed: ["wait", "Sealed"], proposed: ["wait", "Challenge window"], finalized: ["done", "Final"], discarded: ["fail", "Discarded"] };
+const chip = (cls, text) => `<span class="chip ${cls}">${esc(text)}</span>`;
+
+function say(msg, cls = "") {
+  if ($("events").firstElementChild?.classList.contains("muted")) $("events").innerHTML = "";
+  const d = document.createElement("div"); d.className = cls; d.textContent = `${new Date().toLocaleTimeString()}  ${msg}`; $("events").prepend(d);
+}
 
 async function ensureChain(c) {
   const hex = "0x" + c.id.toString(16);
@@ -123,13 +358,23 @@ async function ensureChain(c) {
     await window.ethereum.request({ method: "wallet_addEthereumChain", params: [{
       chainId: hex, chainName: c.name, nativeCurrency: c.nativeCurrency, rpcUrls: c.rpcUrls.default.http }] });
   }
-  $("chain").textContent = c.name;
+  showNet(c.id);
+}
+function showNet(id) {
+  const n = Number(id);
+  const known = n === cfg.app.chainId || n === cfg.l1.chainId;
+  $("netChip").className = "chip " + (known ? "ok" : "wait");
+  $("netChip").textContent = n === cfg.app.chainId ? "App network" : n === cfg.l1.chainId ? "L1 devnet" : `Chain ${n}`;
 }
 
-async function act(label, fn) {
-  try { say(label + "…"); const r = await fn(); say(label + ": done", "ok"); return r; }
+async function act(label, fn, btn, needsWallet = true) {
+  if (needsWallet && !account) { say("Connect a wallet first.", "bad"); return; }
+  if (btn) btn.disabled = true;
+  try { say(label + "…"); const r = await fn(); say(label + ": done", "ok"); refresh(); return r; }
   catch (e) { say(`${label}: ${e.shortMessage ?? e.details ?? e.message ?? e}`, "bad"); }
+  finally { if (btn) btn.disabled = false; }
 }
+const on = (id, label, fn) => { $(id).onclick = () => act(label, fn, $(id)); };
 
 async function send(chain, address, abi, functionName, args, value) {
   await ensureChain(chain);
@@ -140,82 +385,161 @@ async function send(chain, address, abi, functionName, args, value) {
   return r;
 }
 
+// ---- order ticket ----
+const limitPrice = () => Number($("limit").value || Number(lastPrice) / 1e6);
 function buildOrder() {
   const ethAmt = parseEther($("amt").value || "0");
-  const px = Number($("limit").value || Number(lastPrice) / 1e6);
-  const usdAmt = parseUnits((Number($("amt").value) * px).toFixed(6), 6);
-  const sell = $("side").value === "sell";
+  const usdAmt = parseUnits((Number($("amt").value) * limitPrice()).toFixed(6), 6);
+  const sell = side === "sell";
   return { trader: account, sellToken: sell ? 0 : 1, sellAmount: sell ? ethAmt : usdAmt, buyAmount: sell ? usdAmt : ethAmt, nonce: BigInt(Date.now()), expiry: 10n ** 12n };
 }
+function ticket() {
+  const a = Number($("amt").value || 0), p = limitPrice();
+  const usdText = `${thin((a * p).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }))} USD`;
+  const sell = side === "sell";
+  $("payLabel").textContent = sell ? "You sell" : "You pay";
+  $("getLabel").textContent = sell ? "You receive" : "You buy";
+  $("sumPay").textContent = sell ? `${a} ETH` : usdText;
+  $("sumGet").textContent = sell ? usdText : `${a} ETH`;
+  if (!lastPrice) return;
+  const m = Number(lastPrice) / 1e6, d = Math.abs(p - m) < 0.005 ? 0 : ((p - m) / m) * 100, inBand = Math.abs(d) <= 1;
+  $("sumBand").innerHTML = `<span class="${inBand ? "band-ok" : "band-bad"}">${d >= 0 ? "+" : ""}${d.toFixed(2)}% · ${inBand ? "inside the band" : "outside the band, will rest"}</span>`;
+}
+function setSide(s) { side = s; $("sideSell").setAttribute("aria-pressed", s === "sell"); $("sideBuy").setAttribute("aria-pressed", s === "buy"); ticket(); }
+$("sideSell").onclick = () => setSide("sell");
+$("sideBuy").onclick = () => setSide("buy");
+$("amt").oninput = ticket; $("limit").oninput = ticket;
+$("useMark").onclick = () => { $("limit").value = (Number(lastPrice) / 1e6).toFixed(2); ticket(); };
 
-$("connect").onclick = () => act("connect", async () => {
-  if (!window.ethereum) throw new Error("no wallet found (install MetaMask or Rabby)");
+document.querySelectorAll("[data-tab]").forEach((t) => t.onclick = () => {
+  document.querySelectorAll("[data-tab]").forEach((x) => x.setAttribute("aria-selected", x === t));
+  document.querySelectorAll("[data-panel]").forEach((p) => p.hidden = p.dataset.panel !== t.dataset.tab);
+});
+
+// ---- actions ----
+$("connect").onclick = () => act("Connect", async () => {
+  if (!window.ethereum) throw new Error("No wallet found. Install MetaMask or Rabby.");
   [account] = await window.ethereum.request({ method: "eth_requestAccounts" });
   wallet = createWalletClient({ account, transport: custom(window.ethereum) });
-  $("who").textContent = account;
-  $("faucetLink").href = `/faucet?address=${account}`;
-  window.ethereum.on?.("accountsChanged", (a) => { account = a[0]; $("who").textContent = account; });
-  refresh();
-});
-$("addL1").onclick = () => act("switch to L1", () => ensureChain(l1Chain));
-$("addApp").onclick = () => act("switch to app network", () => ensureChain(appChain));
-$("faucet").onclick = () => act("faucet", async () => {
+  showAccount();
+  showNet(await window.ethereum.request({ method: "eth_chainId" }));
+  window.ethereum.on?.("accountsChanged", (a) => { account = a[0]; showAccount(); refresh(); });
+  window.ethereum.on?.("chainChanged", showNet);
+}, $("connect"), false);
+function showAccount() {
+  $("who").hidden = !account; $("who").textContent = short(account);
+  $("connect").hidden = !!account;
+  $("faucetLink").href = $("faucetNav").href = `/faucet?address=${account}`;
+}
+on("addL1", "Switch to L1 devnet", () => ensureChain(l1Chain));
+on("addApp", "Switch to app network", () => ensureChain(appChain));
+on("faucet", "Faucet", async () => {
   const r = await fetch("/api/faucet", { method: "POST", body: JSON.stringify({ address: account }) });
   if (!r.ok) throw new Error((await r.json()).error);
 });
-$("depositEth").onclick = () => act("deposit ETH (L1)", () => {
+on("depositEth", "Deposit ETH on L1", () => {
   const v = parseEther($("depEth").value); return send(l1Chain, cfg.l1.channel, cfg.abi.channel, "deposit", [0, v], v);
 });
-$("depositUsd").onclick = () => act("deposit USD (L1)", async () => {
+on("depositUsd", "Deposit USD on L1", async () => {
   const v = parseUnits($("depUsd").value, 6);
   await send(l1Chain, cfg.l1.token, cfg.abi.token, "approve", [cfg.l1.channel, v]);
   return send(l1Chain, cfg.l1.channel, cfg.abi.channel, "deposit", [1, v]);
 });
-$("request").onclick = () => act("request withdrawal (L1)", () => {
+on("request", "Request withdrawal on L1", () => {
   const t = Number($("wTok").value); const v = t === 0 ? parseEther($("wAmt").value) : parseUnits($("wAmt").value, 6);
   return send(l1Chain, cfg.l1.channel, cfg.abi.channel, "requestWithdraw", [t, v]);
 });
 async function leafArgs() {
   const r = await (await fetch(`/api/leaf?address=${account}`)).json();
-  if (!r.registered) throw new Error("no deposits yet");
+  if (!r.registered) throw new Error("No deposits yet.");
   const l = Object.fromEntries(Object.entries(r.leaf).map(([k, v]) => [k, k === "requests" ? Number(v) : BigInt(v)]));
   return [r.idx, l, r.siblings];
 }
-$("claim").onclick = () => act("claim (L1)", async () => send(l1Chain, cfg.l1.channel, cfg.abi.channel, "claim", await leafArgs()));
-$("exit").onclick = () => act("exit (L1)", async () => send(l1Chain, cfg.l1.channel, cfg.abi.channel, "exit", await leafArgs()));
-$("place").onclick = () => act("place order", async () => {
+on("claim", "Claim on L1", async () => send(l1Chain, cfg.l1.channel, cfg.abi.channel, "claim", await leafArgs()));
+on("exit", "Exit on L1", async () => send(l1Chain, cfg.l1.channel, cfg.abi.channel, "exit", await leafArgs()));
+on("place", "Place order", async () => {
   const o = buildOrder();
   await ensureChain(appChain); // wallets sign typed data only for the active chain
   const sig = await wallet.signTypedData({ account, domain: cfg.domain, types, primaryType: "Order", message: o });
   return send(appChain, cfg.app.book, cfg.abi.book, "submitOrder", [o, sig]);
 });
-$("force").onclick = () => act("forced order (L1)", () => send(l1Chain, cfg.l1.channel, cfg.abi.channel, "forceOrder", [buildOrder()]));
-$("ff").onclick = () => act("+1 hour", () => fetch("/api/devnet/advance", { method: "POST", body: JSON.stringify({ seconds: 3600 }) }));
-$("setPrice").onclick = () => act("set L1 price", () => fetch("/api/devnet/price", { method: "POST", body: JSON.stringify({ price: $("newPrice").value }) }));
-window.cancelOrder = (h) => act("cancel", () => send(appChain, cfg.app.book, cfg.abi.book, "cancel", [h]));
+on("force", "Forced order on L1", () => send(l1Chain, cfg.l1.channel, cfg.abi.channel, "forceOrder", [buildOrder()]));
+$("ff").onclick = () => act("+1 hour of L1 time", () => fetch("/api/devnet/advance", { method: "POST", body: JSON.stringify({ seconds: 3600 }) }), $("ff"), false);
+window.cancelOrder = (h) => act("Cancel order", () => send(appChain, cfg.app.book, cfg.abi.book, "cancel", [h]));
+
+// ---- state ----
+function renderSepolia(s) {
+  const m = s.sepolia.mirrored[0];
+  if (m) {
+    $("bannerPrice").textContent = "$" + dollars(m.answer);
+    $("bannerMeta").innerHTML = `Sepolia block ${blockLink(m.sourceBlock)} · round ${int(m.round)} · answered ${ago(Number(m.answeredAt))}`;
+    $("c1").innerHTML = `<span><i>proxy</i> ${addrLink(cfg.sepolia.proxy)}</span><span><i>aggregator</i> ${addrLink(cfg.sepolia.aggregator)}</span>`
+      + `<span><i>round</i> ${int(m.round)}</span><span><i>answer</i> $${dollars(m.answer)}</span><span><i>answered</i> ${ago(Number(m.answeredAt))}</span>`;
+    $("c2").innerHTML = `<span><i>safe block</i> ${blockLink(m.sourceBlock)}</span><span><i>hash</i> ${short(m.sourceBlockHash)}</span>`
+      + `<span><i>proofs</i> ${bytes(m.proofBytes)}</span><span><i>fetched in</i> ${int(m.proveMs)} ms</span>`;
+    $("c3").innerHTML = `<span><i>contract</i> ${short(cfg.l1.oracle)}</span><span><i>verified on-chain for</i> ${int(m.gas)} gas</span><span><i>tx</i> ${short(m.tx)}</span>`;
+  }
+  const latest = [...s.batches].reverse().find((b) => b.custody);
+  if (latest) {
+    const c = latest.custody;
+    $("c4").innerHTML = `<span><i>batch</i> ${latest.no}</span><span><i>L1 block</i> ${int(latest.anchor)} · ${short(latest.anchorHash)}</span>`
+      + `<span><i>FeedMirror price</i> $${dollars(c.price)}</span><span><i>from Sepolia block</i> ${blockLink(c.sepoliaBlock)}</span><span><i>price proof</i> ${bytes(c.priceProofBytes)}</span>`;
+  }
+  const fills = s.batches.flatMap((b) => (b.custody?.fills ?? []).filter((x) => x.price).map((x) => ({ ...x, no: b.no, mark: b.custody.price }))).slice(-3).reverse();
+  $("c5").innerHTML = fills.length
+    ? fills.map((x) => `<span><i>batch ${x.no}</i> ${eth(x.eth)} ETH at $${dollars(x.price)} · ${x.diffPct.toFixed(2)}% from $${dollars(x.mark)} ${x.ok ? "✓" : "✕"}</span>`).join("")
+    : `<span><i>No fills yet. Place an order to see one checked here.</i></span>`;
+  const h = s.sepolia.head;
+  if (h) { $("hBlock").innerHTML = blockLink(h.block); $("hRound").textContent = int(h.round); $("hPrice").textContent = "$" + dollars(h.answer); }
+  $("relays").innerHTML = s.sepolia.mirrored.map((r) => `<tr><td class="n">${blockLink(r.sourceBlock)}</td><td class="n">${int(r.round)}</td><td class="n">$${dollars(r.answer)}</td><td class="n">${bytes(r.proofBytes)}</td></tr>`).join("");
+}
+
+function renderBatches(s) {
+  $("batchRows").innerHTML = s.batches.slice().reverse().map((b) => {
+    const [cls, label] = STATE[b.state] ?? ["unknown", b.state];
+    const c = b.custody;
+    const fills = (c?.fills ?? []).filter((f) => f.price);
+    const row = `<tr><td class="n">${b.no}</td><td>${chip(cls, label)}</td><td class="n">${int(b.anchor)}</td>`
+      + `<td class="n">${c ? blockLink(c.sepoliaBlock) : "—"}</td><td class="n">${c ? "$" + dollars(c.price) : "—"}</td><td class="n">${fills.length}</td></tr>`;
+    const detail = fills.length ? `<tr class="fills"><td></td><td colspan="5">${fills.map((f) =>
+      `<div class="mono">${short(f.seller)} → ${short(f.buyer)} · ${eth(f.eth)} ETH at $${dollars(f.price)} · <span class="${f.diffPct <= 1 ? "band-ok" : "band-bad"}">${f.diffPct.toFixed(2)}% from $${dollars(c.price)}</span></div>`).join("")}</td></tr>` : "";
+    return row + detail;
+  }).join("");
+  $("finCount").textContent = `${s.finalizedBatches} final on L1`;
+  $("blk").textContent = int(s.l1Block);
+  $("blkTime").textContent = new Date(Number(s.l1Time) * 1000).toLocaleString();
+  $("pend").innerHTML = s.pending ? `${chip("wait", "Challenge window")} until ${new Date(Number(s.pending.finalizableAt) * 1000).toLocaleTimeString()}` : "nothing";
+  $("frozen").className = "chip " + (s.frozen ? "fail" : "ok");
+  $("frozen").textContent = s.frozen ? "Frozen: exit on L1" : "Running";
+}
 
 async function refresh() {
   try {
     const s = await (await fetch("/api/state")).json();
     lastPrice = BigInt(s.price);
-    $("price").textContent = "$" + dollars(s.price);
     if (!$("limit").value) $("limit").value = (Number(s.price) / 1e6).toFixed(2);
-    $("blk").textContent = `${s.l1Block} · ${new Date(Number(s.l1Time) * 1000).toLocaleString()}`;
-    $("fb").textContent = s.finalizedBatches;
-    $("pend").innerHTML = s.pending ? `yes · finalizable ${new Date(Number(s.pending.finalizableAt) * 1000).toLocaleTimeString()} (L1 time)` : "none";
-    $("frozen").innerHTML = s.frozen ? '<span class="bad">FROZEN — use Exit</span>' : '<span class="ok">no</span>';
-    $("batches").innerHTML = s.batches.slice().reverse().map((b) => `<tr><td>${b.no}</td><td><span class="pill">${b.state}</span></td><td>${b.anchor}</td><td>${b.actions}</td></tr>`).join("");
-    $("log").innerHTML = s.log.slice().reverse().map((l) => `<div>${l}</div>`).join("");
+    ticket();
+    renderSepolia(s);
+    renderBatches(s);
+    $("log").innerHTML = s.log.slice().reverse().map((l) => `<div>${esc(l)}</div>`).join("");
     if (!account) return;
-    $("mine").innerHTML = s.orders.filter((o) => o.order.trader.toLowerCase() === account.toLowerCase())
-      .map((o) => `<tr><td>${o.order.sellToken === 0 ? "sell" : "buy"} ${eth(o.order.sellToken === 0 ? o.order.sellAmount : o.order.buyAmount)} ETH @ ${(Number(o.order.sellToken === 0 ? o.order.buyAmount : o.order.sellAmount) / 1e6 / Number(formatEther(BigInt(o.order.sellToken === 0 ? o.order.sellAmount : o.order.buyAmount)))).toFixed(2)}</td><td><button class="ghost" onclick="cancelOrder('${o.hash}')">cancel</button></td></tr>`).join("") || '<tr><td class="note">none</td></tr>';
+    const mine = s.orders.filter((o) => o.order.trader.toLowerCase() === account.toLowerCase());
+    $("mine").innerHTML = mine.map((o) => {
+      const sell = o.order.sellToken === 0;
+      const e = sell ? o.order.sellAmount : o.order.buyAmount, u = sell ? o.order.buyAmount : o.order.sellAmount;
+      const px = Number(u) / 1e6 / Number(formatEther(BigInt(e)));
+      return `<tr><td>${sell ? "Sell" : "Buy"}</td><td class="n">${eth(e)} ETH</td><td class="n">$${thin(px.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }))}</td><td style="text-align:right"><button class="ds-button ds-button--sm" onclick="cancelOrder('${o.hash}')">Cancel</button></td></tr>`;
+    }).join("");
+    $("mineEmpty").hidden = mine.length > 0;
+    $("mineCount").textContent = mine.length ? `${mine.length} resting` : "";
     const [b1, b2] = await Promise.all([l1.getBalance({ address: account }), l1.readContract({ address: cfg.l1.token, abi: cfg.abi.token, functionName: "balanceOf", args: [account] })]);
-    $("l1eth").textContent = eth(b1); $("l1usd").textContent = dollars(b2);
+    $("l1bal").textContent = `${eth(b1)} ETH · ${dollars(b2)} USD`;
     const acc = await app.request({ method: "clearing_account", params: [account] });
     if (acc) {
       $("pEth").textContent = eth(acc.pending.eth); $("pUsd").textContent = dollars(acc.pending.usd);
-      $("fin").textContent = acc.finalized ? `${eth(acc.finalized.eth)} ETH · ${dollars(acc.finalized.usd)} USD · released ${eth(acc.finalized.ethOut)} ETH / ${dollars(acc.finalized.usdOut)} USD` : "nothing finalized yet";
-    } else { $("pEth").textContent = $("pUsd").textContent = "deposit first"; $("fin").textContent = "—"; }
+      $("fin").textContent = acc.finalized ? `${eth(acc.finalized.eth)} ETH · ${dollars(acc.finalized.usd)} USD` : "nothing final yet";
+      $("released").textContent = acc.finalized ? `${eth(acc.finalized.ethOut)} ETH · ${dollars(acc.finalized.usdOut)} USD` : "—";
+    } else { $("pEth").textContent = $("pUsd").textContent = "0"; $("fin").textContent = "deposit first"; $("released").textContent = "—"; }
   } catch (e) { console.warn(e); }
 }
 setInterval(refresh, 3000);

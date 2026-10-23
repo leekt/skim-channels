@@ -1,47 +1,67 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-density="demo">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Skim devnet faucet</title>
+<title>Faucet · Skim Clearing devnet</title>
+<link rel="icon" href="/schematic/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/schematic/styles.css">
 <style>
-  body { margin: 0; background: #0b0d12; color: #e6e9ef; font: 14px/1.45 system-ui, -apple-system, sans-serif; }
-  main { max-width: 520px; margin: 0 auto; padding: 24px 16px; }
-  h1 { font-size: 20px; } a { color: #7c5cff; }
-  .card { background: #141821; border: 1px solid #232a37; border-radius: 12px; padding: 16px; }
-  input { width: 100%; box-sizing: border-box; background: #0e1118; color: #e6e9ef; border: 1px solid #232a37; border-radius: 8px; padding: 9px; font: 13px ui-monospace, Menlo, monospace; }
-  button { margin-top: 10px; background: #7c5cff; color: white; border: 0; border-radius: 8px; padding: 9px 14px; font: inherit; cursor: pointer; }
-  .muted { color: #8b93a7; font-size: 12px; } #out { margin-top: 10px; }
+  .ds-shell { width: min(100%, 720px); }
+  .stack > * + * { margin-top: var(--space-4); }
+  .out { min-height: 22px; font-size: 13px; }
+  .out.ok { color: var(--ok); } .out.bad { color: var(--fail); }
+  .note { margin: 0; color: var(--muted); font-size: var(--fs-small); line-height: 1.6; }
 </style>
 </head>
 <body>
-<main>
-  <p><a href="/">← back to the app</a></p>
-  <h1>Skim devnet faucet</h1>
-  <div class="card">
-    <div class="muted">Sends <b>5 ETH</b> and <b>20,000 USD</b> (test token) on the <b>L1 devnet</b> (chain 900). Devnet only.</div>
-    <p><input id="addr" placeholder="0x… your address"></p>
-    <button id="useWallet">Use my wallet's address</button>
-    <button id="go">Send</button>
-    <div id="out"></div>
+<div class="ds-shell">
+  <header class="ds-header">
+    <a class="ds-wordmark" href="/">skim clearing <span class="ds-wordmark-sub">devnet</span></a>
+    <nav><a href="/">← Back to the app</a><a href="/faucet" aria-current="page">Faucet</a></nav>
+  </header>
+  <div class="ds-page-header">
+    <div>
+      <p class="ds-eyebrow">L1 devnet · chain 900</p>
+      <h1>Faucet</h1>
+      <p class="ds-page-description">Sends 5 ETH and 20 000 USD (a test token) on the L1 devnet, where you deposit into the channel. These are devnet funds only: not Sepolia ETH, and gone when the devnet restarts.</p>
+    </div>
   </div>
-</main>
+  <div class="ds-panel">
+    <div class="ds-panel-head"><h2>Send test funds</h2><span class="ds-meta">5 ETH · 20 000 USD</span></div>
+    <div class="ds-panel-body stack">
+      <div class="ds-field">
+        <label class="ds-label" for="addr">Your address</label>
+        <input class="ds-input ds-mono" id="addr" placeholder="0x…" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="ds-actions">
+        <button class="ds-button ds-button--primary" id="go">Send 5 ETH and 20 000 USD</button>
+        <button class="ds-button" id="useWallet">Use my wallet's address</button>
+      </div>
+      <div class="out" id="out" role="status"></div>
+      <p class="note">Then go back to the app and deposit: funds in your wallet are not trading balance until they're in the channel.</p>
+    </div>
+  </div>
+</div>
 <script>
   const $ = (id) => document.getElementById(id);
-  const say = (m, ok) => { $("out").innerHTML = `<span style="color:${ok ? "#2ee6c5" : "#ff5c7a"}">${m}</span>`; };
+  const say = (m, ok) => { $("out").textContent = m; $("out").className = "out " + (ok ? "ok" : "bad"); };
   $("addr").value = new URLSearchParams(location.search).get("address") ?? "";
   $("useWallet").onclick = async () => {
-    if (!window.ethereum) return say("no wallet found", false);
+    if (!window.ethereum) return say("No wallet found. Install MetaMask or Rabby, or paste an address.", false);
     const [a] = await window.ethereum.request({ method: "eth_requestAccounts" });
     $("addr").value = a;
   };
   $("go").onclick = async () => {
     const address = $("addr").value.trim();
-    if (!/^0x[0-9a-fA-F]{40}$/.test(address)) return say("enter a valid address", false);
-    say("sending…", true);
-    const r = await fetch("/api/faucet", { method: "POST", body: JSON.stringify({ address }) });
-    const j = await r.json().catch(() => ({}));
-    r.ok ? say(`sent 5 ETH + 20,000 USD to ${address}`, true) : say(j.error ?? "failed", false);
+    if (!/^0x[0-9a-fA-F]{40}$/.test(address)) return say("Enter a 0x address of 40 hex characters.", false);
+    $("go").disabled = true;
+    say("Sending…", true);
+    try {
+      const r = await fetch("/api/faucet", { method: "POST", body: JSON.stringify({ address }) });
+      const j = await r.json().catch(() => ({}));
+      r.ok ? say(`Sent 5 ETH and 20 000 USD to ${address.slice(0, 6)}…${address.slice(-4)} on the L1 devnet.`, true) : say(j.error ?? "The faucet failed.", false);
+    } finally { $("go").disabled = false; }
   };
 </script>
 </body>
