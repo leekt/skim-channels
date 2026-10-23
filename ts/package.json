@@ -9,7 +9,9 @@
     "e2e-app": "node --experimental-strip-types e2e-app.ts",
     "e2e-predict": "node --experimental-strip-types e2e-predict.ts",
     "e2e-clearing": "node --experimental-strip-types e2e-clearing.ts",
-    "live-skim": "node --experimental-strip-types live-skim-clearing.ts"
+    "live-skim": "node --experimental-strip-types live-skim-clearing.ts",
+    "devnet": "node --experimental-strip-types devnet.ts",
+    "devnet-smoke": "node --experimental-strip-types devnet-smoke.ts"
   },
   "dependencies": {
     "viem": "2.30.0"
