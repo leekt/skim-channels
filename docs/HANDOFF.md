@@ -35,7 +35,7 @@ governance, forced inclusion). Read first: [PROJECT](../PROJECT.md) (spec v0.1),
 ## Stateful clearing (2026-10-23)
 - **Model:** [stateful runtime](guide/stateful-runtime.md).
   - **L1 reads:** the app executor follows L1's head through `skim_streamNext` (durable cursor), proves its working set at each head, and runs every execution against one head; app state and overlays carry across heads ([subscription](experiments/subscription.md)).
-  - **AppState:** `ClearingBook`, Solidity on the app executor that L1 doesn't trust. Its price is kept in oracle segments, one per feed round seen during a batch.
+  - **AppState:** `ClearingBook`, Solidity on the app executor that L1 doesn't trust. Each fill runs in an execution segment: the L1 head it ran at (expiry and freshness judged there) and the price, re-read when the feed's round changes.
   - **Sessions:** a `ClearingVault` per app opens disposable sessions as minimal proxies (~0.5M gas); Active → Closing → Closed, then users redeem or roll over alone ([sessions](experiments/sessions.md)).
   - **L1 settlement:** `ClearingChannel`. Optimistic, with the account root on L1 and one-transaction challenges per fill or account that replay the shared `ClearingLedger`.
 - **Built:**
@@ -52,7 +52,7 @@ governance, forced inclusion). Read first: [PROJECT](../PROJECT.md) (spec v0.1),
   - canonical / orphaned / unknown, with skim rewinds consumed by `tick()`;
   - aged batches reopened at a recent head;
   - a lost executor rebuilt from L1 plus the journal.
-- **Verified:** 61 clearing forge tests (40 mutants caught before sessions and segments, one equivalent); e2e runs covering reorg, recovery, handover, freeze, sessions and following; live reads and following through skim on Sepolia; the Sepolia devnet proposes batches through skim. Results and costs: [clearing](experiments/clearing.md).
+- **Verified:** 63 clearing forge tests, runtime control-flow tests (`test-runtime`) (40 mutants caught before sessions and segments, one equivalent); e2e runs covering reorg, recovery, handover, freeze, sessions and following; live reads and following through skim on Sepolia; the Sepolia devnet proposes batches through skim. Results and costs: [clearing](experiments/clearing.md).
 - **Cost:** 14.6k gas per fill dense vs 45.5k for the same batch fully verified at once vs 67.4k as one L1 transaction per fill. When every account trades once per batch, about break-even with per-transaction L1.
 - **Open:**
   - matching isn't forced;

@@ -37,6 +37,12 @@ The book holds two segments: 2000 at block 20 and 2100 at block 21, from fill 1.
 - a challenger can't substitute prices (the commitment is checked);
 - the segment shape is checked: starts at fill 0, strictly increasing, below the fill count, one start per witness.
 
+**Regressions from the review of 174ecfc** (`e2e-subscription`, `ClearingSegments.t.sol`, `test-runtime`):
+1. **The feed moves after a batch opens, before its first fill.** Before, the batch held an empty segment from opening, and the first fill added a second one at fill 0. L1 then refused the proposal (`[0, 0]`). Now segments start at fills: one segment, at the new price.
+2. **The head moves and the round doesn't.** Before, the fill reused the old segment and its block, so expiry and freshness were judged in the past. Now the fill starts a segment at its own head, and an order that expired by then is refused. L1 accepts the reused price (one witness for two heads), checks freshness at the later head, and disputes judge expiry there.
+3. **A later segment's block is reorged out.** Before, `tick()` checked only the opening block. Now it checks every segment head, and recovers from that batch.
+4. **A crash mid-recovery.** Before, the originals were replaced by the partial replay, so a restart lost the actions not yet replayed. Now the originals stay until the replay is complete.
+
 ## What it shows, and what it doesn't
 
 - **Shown:**

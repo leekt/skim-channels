@@ -97,23 +97,37 @@ Tests:
 - `SKIM_RPC=… npm run live-executor`: an app contract reads Chainlink's ETH/USD through its Sepolia proxy, with the proxy and its aggregator imported. It matches Sepolia at the executor's head, and so do the slots the L1 adapter verifies at that block. With only the proxy imported, the read reverts.
 - `npm run e2e-subscription` and `SKIM_RPC=… SEPOLIA_OPERATOR_KEY=… npm run live-subscription`: act at H, change the L1 dependency, act again. The executor is at the new block by itself, with no pin, sync or restart. The second action sees the new value, app state is kept, and in clearing, the batch gains a second oracle segment that L1 verifies. Results: [subscription](../experiments/subscription.md).
 
-## Oracle segments: the batch price follows the head too
+## Execution segments: each fill is judged at the head it ran
 
-A batch doesn't hold one price. `ClearingBook` keeps **segments**, each recording:
-- the L1 head the feed was read at, and its time;
-- the feed's round and price there;
-- the first fill priced with it.
+A batch doesn't hold one L1 block or one price. `ClearingBook` keeps **segments**, one per L1 head fills ran at, each recording:
+- the head: number, hash and header time;
+- the first fill that ran there;
+- the price used: the feed's round, and the block it was first read at (`priceBlock`) with its answer time.
 
-The batch opens with segment 0. When a fill executes at a newer head and the feed's round has changed, a new segment starts at that head (`SegmentStarted`). If the round is the same, the price is the same, so the segment and its anchor stay.
+**Rules:**
+- Segments start at fills, not at `openBatch`. Opening reads no price, so a stale feed never blocks deposits or withdrawals, and no segment is ever empty.
+- A fill at a new head starts a segment there (`SegmentStarted`).
+  - If the feed's round changed, the price is read at that head (`priceBlock` = head).
+  - If not, the earlier read and its witness are reused. The clock isn't: expiry is judged against the new head, and the price must still be fresh at the new head's time.
+- If the executor's head is a different block at or below the last segment's head, L1 reorganized under the batch. The fill refuses (`L1Rewound`), and the runtime recovers the batch.
 
-- **Operator:** fetches each segment's price witness at its block right away, while the block is recent.
-- **L1 at proposal:** verifies every segment's price at its own anchor and commits to the list (`firstFills, prices, anchorBlocks`).
-- **Disputes:** `challengeFill` judges each fill against its own segment.
-- **Cost of a new oracle context:** nothing beyond one more witness in the next proposal. No new session, re-pin or L1 keep-alive.
+**On L1 and in disputes:**
+- **Operator:** fetches the price witness at each new `priceBlock` right away, while it's recent, and keeps every head's raw header.
+- **L1 at proposal:**
+  - each segment's head must be recorded in `AnchorRegistry` (canonical) and at most `maxAnchorAge` old;
+  - heads and first fills strictly increase;
+  - each price was read at or before its head, and is fresh at the head's time.
+  
+  L1 commits to `(firstFills, prices, heads)`.
+- **Disputes:** `challengeFill` judges each fill's band, limits and **expiry at its own head**.
+- **Cost of a new head:** one header record (~100k gas). A new price adds one witness.
+
+**The limit of what L1 can check.** The operator names each fill's head. L1 confirms the head is a real, recent block, and that the price was read at or before it and is fresh there. A dishonest operator could still claim an earlier recorded head, down to the head its price was read at, to pass an expiry. It could also price a fill with a round the feed had replaced by its real head, within `maxStaleness`. The honest executor does neither.
+
 
 ## The price on L1: `ChainlinkAdapter`
 
-The executor's `latestRoundData()` call runs Chainlink's code at a head; L1 can't re-run that as of a past block. So each session's price is checked on L1 by an **app-specific adapter**, scoped to the feed it was configured for (`contracts/src/clearing/ChainlinkAdapter.sol`). At proposal it verifies, for each segment, from proofs at the segment's anchor (the head the book read the feed at):
+The executor's `latestRoundData()` call runs Chainlink's code at a head; L1 can't re-run that as of a past block. So each session's price is checked on L1 by an **app-specific adapter**, scoped to the feed it was configured for (`contracts/src/clearing/ChainlinkAdapter.sol`). At proposal it verifies each price witness from proofs at its block (the head the book read the feed at). It returns the answer time, so the channel can check freshness again at every segment head that reuses it:
 
 | Check | Rule |
 |---|---|
@@ -130,7 +144,7 @@ The verified prices are committed with the pending batch, and `challengeFill` ju
 
 ## Snapshots, readiness, reorgs and recovery
 
-- **The executor follows L1; the runtime watches.** A batch opens at the head the executor has applied. Its anchor and segments are what the book recorded, and the receipts say which head each transaction ran against.
+- **The executor follows L1; the runtime watches.** A batch opens at the head the executor has applied. Its segments are what the book recorded, and the receipts say which head each transaction ran against. The runtime watches **every** block a batch executed against: its opening head and each segment's head.
   - `snapshot(policy)` still picks the block the operator scans events up to, and the policy used for aging and canonical checks.
   - L1 records an anchor only once a later block exists, so `propose` waits for the next L1 block.
 - **stateReady vs proofReady.**
@@ -141,15 +155,16 @@ The verified prices are committed with the pending batch, and `challengeFill` ju
   - Each batch records the L1 proposal tx and block, its opening state, its prepared proofs, and every action with its outcome.
   - All of it lives in a journal written atomically to disk.
 - **`tick()`** checks every unproposed batch, as an operator loop would:
-  - **Orphaned anchor:** skim's `skim_streamNext` reports a rewind, or the node has another block at that height. → recover.
-  - **Aged anchor:** the anchor would be too old to propose (`maxAnchorAge` is in blocks). → recover.
-  - **Unknown:** the node has no block at that height. This is *not* treated as a reorg; proposing pauses.
+  - **Orphaned:** any of those blocks left the chain (skim's `skim_streamNext` reports a rewind, or the node has another block at that height). → recover from that batch: it and every later batch are replayed at a new head, so nothing that ran against the orphaned block survives. An ordinary head advance is not a change.
+  - **Aged:** the oldest of them would be too old to propose (`maxAnchorAge` is in blocks). → recover.
+  - **Unknown:** the node has no block at one of those heights. This is *not* treated as a reorg; proposing pauses.
+  - `propose` makes the same check over every segment head first.
 - **`recover(from)`:**
   1. Start at the **earliest** affected batch, so later batches that spent its results are included.
   2. Take a new snapshot and **fetch its proofs first**. If that fails (`proof-unavailable`), nothing changes.
-  3. Record the intent in the journal.
+  3. Record the intent in the journal. The affected batches stay in the journal **unchanged** until the recovery completes.
   4. Roll the executor back to the batch's checkpoint (`evm_revert`), or rebuild a lost executor. A rebuild never re-executes at an old block: it adopts L1's finalized leaves, plus the pending proposal's leaves (from the journal, or from its calldata on L1), checked against L1's pending root.
-  5. Replay **only accepted actions** into one batch on the new snapshot.
+  5. Replay **only accepted actions** into one batch on the new snapshot. The replay is built apart (`recovering.merged`) and swapped for the originals in one save. If the process stops mid-replay, the restart discards the partial replay and redoes it from the full original log.
   - Actions that no longer hold are reported as `dropped`.
   - Actions rejected before are reported as `notRetried` and never retried. Re-matching resting orders is a separate, explicit step.
 - **Determinism:** the journal replayed on a fresh executor with the same proofs gives the same `stateDigest`.

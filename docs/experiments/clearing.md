@@ -4,7 +4,7 @@
 - L1: `contracts/src/clearing/`: `ClearingVault` (the app's identity), which opens sessions as EIP-1167 proxies (`Clone1167`) of `ClearingChannel` + `ClearingDisputes` over `ClearingStorage`, with `ClearingCodec`.
 - Shared: `ClearingLedger`, `ClearingRules`.
 - Executor: `ClearingBook` on the app executor (`crates/app-executor`), which follows L1's head and imports the channel and the Chainlink feed read-only.
-- Price on L1: `ChainlinkAdapter` (proofs at each oracle segment's anchor).
+- Price on L1: `ChainlinkAdapter` (proofs at the block each price was read; freshness re-checked at each fill's head).
 - Cost controls: `ClearingDirectBatch` + `ClearingChecker`, `ClearingL1`.
 - Runtime: `ts/runtime/`: `clearing` (the operator), `batches` (journal, recovery), `executor` (starts the app executor), `gateway` (wallet JSON-RPC), `l1view` (snapshots, price witnesses, canonical checks), `evidence`, `recovery` (session packages), `tree`.
 
@@ -12,9 +12,9 @@
 
 | | |
 |---|---|
-| What a batch publishes | Packed fills (236 B each: both orders and signatures), changed account leaves (220 B each) with a multiproof, one price witness per oracle segment, queue cursors, forced-order statuses, and a bond |
-| What L1 checks at proposal | Each segment's price at its recorded, recent anchor (`ChainlinkAdapter`: the pinned proxy and aggregator code, the latest round there, fresh at that block), committed with the batch; that the old leaves are in the finalized root (L1 computes the new root itself); queue cursors; forced-order statuses. **Nothing per fill** |
-| What a watcher can prove (one transaction each) | `challengeFill`: a bad signature, band (against the fill's own segment), limit, expiry, same side, or unknown trader. `challengeAccount`: L1 replays one account (deposits → requests → fills) with `ClearingLedger` and compares it to the published leaf. This catches a wrong balance, a stale nonce, an uncovered sale, an omitted trader, or a request skipped, applied early, or consumed without its deposits |
+| What a batch publishes | Packed fills (236 B each: both orders and signatures), changed account leaves (220 B each) with a multiproof, its execution segments (each fill's L1 head, recorded on L1) with one price witness per new price, queue cursors, forced-order statuses, and a bond |
+| What L1 checks at proposal | Each price at the recorded, recent block it was read (`ChainlinkAdapter`: the pinned proxy and aggregator code, the latest round there); each segment head recorded and recent, read no earlier than its price, the price fresh at the head's time; all committed with the batch; that the old leaves are in the finalized root (L1 computes the new root itself); queue cursors; forced-order statuses. **Nothing per fill** |
+| What a watcher can prove (one transaction each) | `challengeFill`: a bad signature, band (against the fill's own segment), limit, expiry (at the fill's own head), same side, or unknown trader. `challengeAccount`: L1 replays one account (deposits → requests → fills) with `ClearingLedger` and compares it to the published leaf. This catches a wrong balance, a stale nonce, an uncovered sale, an omitted trader, or a request skipped, applied early, or consumed without its deposits |
 | Who proposes | The operator. After `takeoverDelay` without a proposal, anyone with a bond |
 | Exits | Withdrawal requests are served at the start of a batch and claimed from finalized leaves. A request or forced order unserved past `forceDelay` lets anyone freeze, which closes the session; everyone redeems from the final leaf ([sessions](sessions.md)) |
 | Policy bounds | `challengeWindow` from 1 h to 30 d, with 2 × window ≤ `forceDelay`; `forceDelay` from 1 d to 60 d; `takeoverDelay` ≤ 60 d; `maxAnchorAge` ≤ 8191 blocks |
@@ -26,7 +26,13 @@
 - **forge** (`contracts/test/clearing`):
   - 33 channel tests: honest batches survive every challenge; a forged signature, an out-of-band fill, an overpaid account, an omitted trader, nonce reuse across batches, collateral used twice, the request rules, a partial replay, false evidence, an unknown trader index, forced orders (resting, filled, ignored then freeze), takeover, the policy floors and bounds.
   - 6 `ChainlinkAdapter` tests on a recorded Sepolia witness: the price `latestRoundData()` returns at the anchor; an aggregator the proxy doesn't point at, unpinned proxy or aggregator code, a stale answer (judged at the anchor's time), an unrecorded or old anchor, and tampered proofs are all refused.
-  - 4 oracle-segment tests (`ClearingSegments.t.sol`): each fill against its own segment; a fill provable against a wrong single price; the commitment can't be substituted; the segment shape is checked.
+  - 6 segment tests (`ClearingSegments.t.sol`):
+    - each fill against its own segment;
+    - a fill provable against a wrong single price;
+    - neither prices nor heads can be substituted;
+    - a reused price doesn't stop the clock: expiry is judged at the later head;
+    - a reused price must be fresh at the later head;
+    - the shape is checked: no empty `[0, 0]` segment, heads increasing and recorded, every witness used, each price read no later than its head, none without fills.
   - 12 session tests (`ClearingSession.t.sol`): the vault opens proxy sessions, Active → Closing → Closed, redeem and rollover with one payout record, pull bonds, chunked `publishFinal`.
   - 6 cost runs (including opening a session: ~0.5M gas, and publication).
 - **Mutation:** 40 mutants of the clearing contracts before sessions and segments, all caught except one equivalent: `finalize`'s frozen check, already unreachable because a freeze clears the pending batch. Not re-run since.
@@ -71,14 +77,14 @@
 |---|---|---|---|
 | Entry | first deposit ETH / USD | ~92k / ~111k | anvil receipts ([`data/clearing-e2e.json`](data/clearing-e2e.json)) |
 | Exit | `requestWithdraw`; `claim`; `exit` after a freeze | ~121k; ~92k; ~90k per user | anvil |
-| Batch, fixed | price witness + anchor record, per oracle segment | Chainlink adapter: ~2.18M execution + 15.2 KB witness (Sepolia, `ChainlinkAdapter.t.sol`); + ~100k record. A `getRoundData` check would be tens of thousands ([evaluation](chainlink-rounds.md)) | forge |
+| Batch, fixed | price witness + record, per new price; header record per further fill head | Chainlink adapter: ~2.18M execution + 15.2 KB witness (Sepolia, `ChainlinkAdapter.t.sol`); + ~100k record. A `getRoundData` check would be tens of thousands ([evaluation](chainlink-rounds.md)) | forge |
 | DA | fills 236 B each; changed accounts 220 B each plus multiproof nodes | 34 KB for 128 fills / 16 users | forge |
 | Dispute | `challengeAccount` (an account in 16 of 256 fills) / `challengeFill` (last of 256) | 2.71M / 2.49M, mostly resubmitting the batch's calldata | forge |
 
 **What this says:**
 - **The channel is 3–5× cheaper than verifying the same batch at once, and 4.6–5.8× cheaper than per-transaction L1, when accounts trade several times per batch.** Its cost is per changed account (a leaf plus multiproof hashing), not per fill.
 - **When every account trades once per batch,** it's close to break-even with per-transaction L1 (60k vs 67k).
-- **Every design pays the price witness and the anchor once per oracle segment** (one per batch unless the feed's round changes mid-batch).
+- **Every design pays a price witness and its anchor once per price used** (one per batch unless the feed's round changes mid-batch), plus a header record (~100k) per further L1 head fills ran at.
 
 ## Open
 
