@@ -302,8 +302,12 @@ contract ClearingSessionTest is ClearingChannelBase {
         n[0] = L.Account(0, 7000, 1 ether, 0, 0, 0, 1, 0);
         n[1] = L.Account(2 ether, 0, 1 ether, 0, 0, 0, 1, 0);
         bytes memory u = bytes.concat(
-            abi.encodePacked(uint32(0)), L.encodeLeaf(empty[0]), L.encodeLeaf(n[0]),
-            abi.encodePacked(uint32(1)), L.encodeLeaf(empty[1]), L.encodeLeaf(n[1])
+            abi.encodePacked(uint32(0)),
+            L.encodeLeaf(empty[0]),
+            L.encodeLeaf(n[0]),
+            abi.encodePacked(uint32(1)),
+            L.encodeLeaf(empty[1]),
+            L.encodeLeaf(n[1])
         );
         uint256[] memory idx = new uint256[](2);
         idx[1] = 1;
@@ -316,7 +320,8 @@ contract ClearingSessionTest is ClearingChannelBase {
         assertEq(d2.pending().at, 0, "discarded");
         assertEq(d2.bondCredit(watcher), 1 ether);
         // The same orders signed for session 2 are fine there.
-        bytes memory again = _fill(_signedIn(s2, 0, R.ETH, uint128(ETH1), 6990, 1), _signedIn(s2, 1, R.USD, 7000, uint128(ETH1), 1));
+        bytes memory again =
+            _fill(_signedIn(s2, 0, R.ETH, uint128(ETH1), 6990, 1), _signedIn(s2, 1, R.USD, 7000, uint128(ETH1), 1));
         vm.prank(op);
         s2.propose{value: 1 ether}(pkg1, again, u, proof, 0, 0, "");
         vm.prank(watcher);
@@ -416,7 +421,9 @@ contract ClearingPublishCost is ClearingChannelBase {
             g -= gasleft();
             emit log_named_uint(string.concat("users ", vm.toString(sizes[k]), ": execution gas"), g);
             emit log_named_uint(string.concat("users ", vm.toString(sizes[k]), ": calldata bytes"), leaves.length);
-            emit log_named_uint(string.concat("users ", vm.toString(sizes[k]), ": calldata gas, all non-zero"), leaves.length * 16);
+            emit log_named_uint(
+                string.concat("users ", vm.toString(sizes[k]), ": calldata gas, all non-zero"), leaves.length * 16
+            );
         }
     }
 }

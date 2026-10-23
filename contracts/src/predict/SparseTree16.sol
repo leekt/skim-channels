@@ -60,9 +60,7 @@ library SparseTree16 {
         if (index >= 1 << DEPTH) revert BadProof();
         h = leaf;
         for (uint256 i; i < DEPTH; ++i) {
-            h = (index >> i) & 1 == 0
-                ? hashPair(h, siblings[i])
-                : hashPair(siblings[i], h);
+            h = (index >> i) & 1 == 0 ? hashPair(h, siblings[i]) : hashPair(siblings[i], h);
         }
     }
 
@@ -134,14 +132,8 @@ library SparseTree16 {
                 } else {
                     bytes32 sib = proof[p++];
                     (oldLeaves[m], newLeaves[m]) = idx & 1 == 0
-                        ? (
-                            hashPair(oldLeaves[i], sib),
-                            hashPair(newLeaves[i], sib)
-                        )
-                        : (
-                            hashPair(sib, oldLeaves[i]),
-                            hashPair(sib, newLeaves[i])
-                        );
+                        ? (hashPair(oldLeaves[i], sib), hashPair(newLeaves[i], sib))
+                        : (hashPair(sib, oldLeaves[i]), hashPair(sib, newLeaves[i]));
                     i += 1;
                 }
                 m++;

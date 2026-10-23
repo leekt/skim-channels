@@ -190,10 +190,7 @@ contract ClearingDisputes is ClearingStorage {
     ///         Paid to the user's wallet (anyone may trigger it), or, by the user alone, into
     ///         the app's vault as free balance for another session. Both record the same
     ///         payout, so nothing can be redeemed twice either way.
-    function redeem(uint32 idx, L.Account calldata leaf, bytes32[16] calldata sib, bool toVault)
-        external
-        viaChannel
-    {
+    function redeem(uint32 idx, L.Account calldata leaf, bytes32[16] calldata sib, bool toVault) external viaChannel {
         if (_phase != Phase.Closed || idx >= _users.length) revert WrongState();
         if (toVault && (vault == address(0) || msg.sender != _users[idx])) revert WrongState();
         _prove(leaf, idx, sib, _finalizedRoot);
