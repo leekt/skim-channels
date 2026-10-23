@@ -94,8 +94,13 @@ try {
   await tx("record", [feed.address]);
   check((await call("count")) === 1n && (await call("lastSeen")) === 42n, "app state: count = 1, lastSeen = 42");
   await l1.send(feed, "set", [43n], owner);
-  const moved = await app.rpc("executor_pin", ["latest"]);
-  check(moved.number > pin0.pin.number && moved.overlayKept === 1, `the pin moves to L1 block ${moved.number}; the overlay slot is kept (still zero on L1)`);
+  // The executor follows L1's head by itself: no call moves it.
+  let moved: any;
+  for (let i = 0; i < 40 && !(moved && moved.number > pin0.pin.number); i++) {
+    await new Promise((r) => setTimeout(r, 100));
+    moved = (await app.rpc("executor_status")).pin;
+  }
+  check(moved.number > pin0.pin.number && moved.overlayKept === 1, `the executor followed L1 to block ${moved.number} by itself; the overlay slot is kept (still zero on L1)`);
   check((await call("read", [feed.address])) === 43n, "the app now reads L1's new value (43)");
   check((await call("count")) === 1n && (await call("noteOf", [proxy.address, 5n])) === 100n, "app state and the overlay carried over: count = 1, notes[5] = 100");
 
@@ -110,10 +115,11 @@ try {
 
   // ---- conflict: L1 writes the slot the app wrote ----
   await l1.send(proxy, "note", [5n, 1n], owner);
-  const conflict = await rejects(app.rpc("executor_pin", ["latest"]));
+  const conflict = await rejects(app.rpc("executor_sync"));
   const after = await app.rpc("executor_status");
-  check(conflict?.code === -32010 || String(conflict?.message).includes("pin refused"), "L1 now holds a value at the overlay slot: the pin move is refused");
-  check(after.pin.number === moved.number, "the previous pin is kept");
+  check(conflict?.code === -32010 || String(conflict?.message).includes("pin refused"), "L1 now holds a value at the overlay slot: the executor won't move onto it");
+  check(!after.following && after.conflict?.length === 1, "following stops and the conflict is reported");
+  check(after.pin.number === moved.number, "the previous head is kept");
   check((await call("noteOf", [proxy.address, 5n])) === 100n && (await call("count")) === 1n, "and nothing was dropped: notes[5] = 100, count = 1");
 
   // ---- snapshots ----

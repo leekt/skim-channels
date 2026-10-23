@@ -47,13 +47,67 @@ pub enum DbError {
 
 impl DBErrorMarker for DbError {}
 
-/// Verified L1 state at one pin: what has been fetched so far.
+/// Verified L1 state at the current head: the working set (every account and slot the app has
+/// touched), proven against that head's state root. The follower re-proves it at each new head
+/// in the background, so it stays warm.
 #[derive(Clone, Default)]
 pub struct Base {
     accounts: BTreeMap<Address, AccountWitness>,
-    with_code: BTreeSet<Address>,
     slots: BTreeMap<(Address, B256), StorageWitness>,
 }
+
+impl Base {
+    /// The working set: each account, with the slots read or written under it.
+    pub fn keys(&self) -> BTreeMap<Address, Vec<B256>> {
+        let mut k: BTreeMap<Address, Vec<B256>> =
+            self.accounts.keys().map(|a| (*a, vec![])).collect();
+        for (a, s) in self.slots.keys() {
+            k.entry(*a).or_default().push(*s);
+        }
+        k
+    }
+
+    /// Takes in a verified package (accounts without their code: code is content-addressed).
+    pub fn insert(&mut self, pkg: WitnessPackage) {
+        for a in pkg.accounts {
+            self.accounts.insert(
+                a.account,
+                AccountWitness {
+                    code: Bytes::new(),
+                    ..a
+                },
+            );
+        }
+        for s in pkg.slots {
+            self.slots.insert((s.account, s.slot), s);
+        }
+    }
+
+    pub fn merge(&mut self, other: Base) {
+        self.accounts.extend(other.accounts);
+        self.slots.extend(other.slots);
+    }
+
+    pub fn account(&self, a: &Address) -> Option<&AccountWitness> {
+        self.accounts.get(a)
+    }
+
+    pub fn slot(&self, a: Address, s: B256) -> Option<U256> {
+        self.slots.get(&(a, s)).map(|w| w.value)
+    }
+}
+
+/// Where contracts read which L1 block their imported reads reflect: any call to this
+/// app-local account returns `(uint256 number, bytes32 hash, uint256 timestamp)` of the head
+/// the executor has applied. Only the executor writes its storage, as the head moves.
+pub const L1_HEAD: Address = Address::new([
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x4c, 0x31,
+]);
+/// SLOAD 0,1,2 into memory 0x00,0x20,0x40 and return 96 bytes, whatever the calldata.
+const L1_HEAD_CODE: [u8; 23] = [
+    0x60, 0x00, 0x54, 0x60, 0x00, 0x52, 0x60, 0x01, 0x54, 0x60, 0x20, 0x52, 0x60, 0x02, 0x54, 0x60,
+    0x40, 0x52, 0x60, 0x60, 0x60, 0x00, 0xf3,
+];
 
 #[derive(Clone, Default, Debug)]
 pub struct LocalAccount {
@@ -73,19 +127,35 @@ pub struct AppDb {
     pub base: Base,
     pub code: HashMap<B256, Bytecode>,
     pub block_hashes: BTreeMap<u64, B256>,
-    src: Arc<SkimRpc>,
+    pub(crate) src: Arc<SkimRpc>,
 }
 
 impl AppDb {
     pub fn new(src: Arc<SkimRpc>, anchor: L1Anchor, imported: BTreeSet<Address>) -> Self {
+        let code = Bytecode::new_raw(Bytes::from_static(&L1_HEAD_CODE));
+        let code_hash = code.hash_slow();
+        let mut local = HashMap::new();
+        local.insert(
+            L1_HEAD,
+            LocalAccount {
+                // `AccountInfo::default()` carries empty code: set the real code, not just its hash.
+                info: AccountInfo {
+                    code_hash,
+                    code: Some(code.clone()),
+                    nonce: 1,
+                    ..Default::default()
+                },
+                storage: HashMap::new(),
+            },
+        );
         Self {
             anchor,
             imported,
             readonly: BTreeSet::new(),
-            local: HashMap::new(),
+            local,
             overlay: BTreeMap::new(),
             base: Base::default(),
-            code: HashMap::new(),
+            code: HashMap::from([(code_hash, code)]),
             block_hashes: BTreeMap::new(),
             src,
         }
@@ -99,22 +169,38 @@ impl AppDb {
         self.readonly.contains(a)
     }
 
+    /// Records the head the executor has applied in the L1 head account.
+    pub fn set_head(&mut self, timestamp: u64) {
+        let a = self.local.get_mut(&L1_HEAD).expect("L1 head account");
+        a.storage
+            .insert(U256::ZERO, U256::from(self.anchor.blockNumber));
+        a.storage
+            .insert(U256::from(1), U256::from_be_bytes(self.anchor.blockHash.0));
+        a.storage.insert(U256::from(2), U256::from(timestamp));
+    }
+
+    /// A dependency the working set didn't have yet, proven at the current head on the spot
+    /// (it joins the working set, so the follower keeps it warm from now on).
     fn fetch(&mut self, addr: Address, slots: &[B256], code: bool) -> Result<(), DbError> {
+        crate::metrics::COLD_FETCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::metrics::PROOF_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let reads = BTreeMap::from([(addr, (slots.to_vec(), code))]);
         let pkg = collect_witness(&*self.src, &self.anchor, &reads)
             .map_err(|e| DbError::Unavailable(addr, e.to_string()))?;
         for a in pkg.accounts {
-            let keep_code = self
-                .base
-                .accounts
-                .get(&a.account)
-                .is_some_and(|old| !old.code.is_empty());
-            if !keep_code {
-                self.base.accounts.insert(a.account, a);
+            if !a.code.is_empty() {
+                // Verified against the proven code hash; code is content-addressed, so it's
+                // fetched once and reused at every later head.
+                self.code
+                    .insert(a.codeHash, Bytecode::new_raw(Bytes::from(a.code.to_vec())));
             }
-        }
-        if code {
-            self.base.with_code.insert(addr);
+            self.base.accounts.insert(
+                a.account,
+                AccountWitness {
+                    code: Bytes::new(),
+                    ..a
+                },
+            );
         }
         for s in pkg.slots {
             self.base.slots.insert((s.account, s.slot), s);
@@ -124,26 +210,34 @@ impl AppDb {
 
     /// The imported account at the pin, with its code. `None`: proven absent.
     pub fn base_account(&mut self, addr: Address) -> Result<Option<AccountInfo>, DbError> {
-        if !self.base.with_code.contains(&addr) {
-            self.fetch(addr, &[], true)?;
+        if self.base.accounts.contains_key(&addr) {
+            crate::metrics::WARM_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            self.fetch(addr, &[], false)?;
         }
         let w = &self.base.accounts[&addr];
         if !w.exists {
             return Ok(None);
         }
-        let code = if w.codeHash == KECCAK_EMPTY {
+        let hash = w.codeHash;
+        if hash != KECCAK_EMPTY && !self.code.contains_key(&hash) {
+            self.fetch(addr, &[], true)?;
+        }
+        let w = &self.base.accounts[&addr];
+        let code = if hash == KECCAK_EMPTY {
             Bytecode::default()
         } else {
-            Bytecode::new_raw(Bytes::from(w.code.to_vec()))
+            self.code[&hash].clone()
         };
-        self.code.insert(w.codeHash, code.clone());
-        Ok(Some(AccountInfo::new(w.balance, w.nonce, w.codeHash, code)))
+        Ok(Some(AccountInfo::new(w.balance, w.nonce, hash, code)))
     }
 
     /// The imported slot's L1 value at the pin (proven; zero only if proven zero).
     pub fn base_slot(&mut self, addr: Address, slot: U256) -> Result<U256, DbError> {
         let key = B256::from(slot);
-        if !self.base.slots.contains_key(&(addr, key)) {
+        if self.base.slots.contains_key(&(addr, key)) {
+            crate::metrics::WARM_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        } else {
             self.fetch(addr, &[key], false)?;
         }
         Ok(self.base.slots[&(addr, key)].value)
@@ -153,20 +247,23 @@ impl AppDb {
     pub fn evidence(&self) -> Result<WitnessPackage, String> {
         let pkg = WitnessPackage {
             anchor: self.anchor.clone(),
-            accounts: self.base.accounts.values().cloned().collect(),
+            // Code included for every account whose code is known (it ran, or was read).
+            accounts: self
+                .base
+                .accounts
+                .values()
+                .map(|a| match self.code.get(&a.codeHash) {
+                    Some(c) if a.exists && a.codeHash != KECCAK_EMPTY => AccountWitness {
+                        code: c.original_bytes().to_vec().into(),
+                        ..a.clone()
+                    },
+                    _ => a.clone(),
+                })
+                .collect(),
             slots: self.base.slots.values().cloned().collect(),
         };
         verify(&pkg, &self.anchor).map_err(|e| e.to_string())?;
         Ok(pkg)
-    }
-
-    /// The same app state over a new pin with nothing fetched yet.
-    pub fn repinned(&self, anchor: L1Anchor) -> Self {
-        Self {
-            anchor,
-            base: Base::default(),
-            ..self.clone()
-        }
     }
 
     /// A state change revm wants to commit that would touch an imported account's balance,

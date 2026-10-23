@@ -5,11 +5,19 @@
 //! pin, but `block.*`, `msg.sender` and anything in the overlay are the app's. A call into an
 //! imported contract returns what L1 would only for equivalent inputs and context.
 //!
-//! Moving the pin keeps all app state. An overlay slot whose L1 value is still zero at the new
-//! pin stays; one that became non-zero on L1 is a conflict, and the move is refused with the
-//! previous pin and state kept. No state is dropped implicitly.
+//! The executor **follows L1's head** (`--follow`, default `latest`): its imported state is a
+//! subscription, current at every new block, never held at an old one. Each transaction
+//! records the head it ran against, and contracts can read that head from the L1 head account
+//! (`db::L1_HEAD`). Moving to a new head keeps all app state. An overlay slot whose L1 value is
+//! still zero there stays; one that became non-zero on L1 is a conflict: following stops,
+//! the previous head and all state are kept, and the conflict is reported. No state is
+//! dropped implicitly. (`executor_pin` moves to a given block explicitly: replay tooling, with
+//! following off.)
 
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashSet},
+    sync::Arc,
+};
 
 use alloy_consensus::{Transaction, TxEnvelope, transaction::SignerRecoverable};
 use alloy_eips::{Decodable2718, Typed2718};
@@ -19,6 +27,7 @@ use channel_types::L1Anchor;
 use channel_witness::source::SkimRpc;
 use revm::{
     Context, InspectEvm, MainBuilder, MainContext,
+    bytecode::Bytecode,
     context::{
         BlockEnv, CfgEnv, TxEnv,
         result::{EVMError, ExecutionResult},
@@ -30,7 +39,7 @@ use revm::{
 use serde_json::{Value, json};
 
 use crate::{
-    db::{AppDb, Db},
+    db::{AppDb, Base, Db},
     guard::Guard,
 };
 
@@ -96,6 +105,11 @@ pub struct Executor {
     l1: Rpc,
     state: State,
     snapshots: Vec<State>,
+    /// The L1 tag the executor follows (`latest`, `safe`, …), or none.
+    follow: Option<String>,
+    /// Set when an overlay conflict stopped following.
+    conflict: Option<Vec<Value>>,
+    last_error: Option<String>,
 }
 
 pub struct Call {
@@ -129,6 +143,7 @@ impl Executor {
         let imported = imported.union(&readonly).copied().collect();
         let mut db = AppDb::new(Arc::new(SkimRpc::new(l1_url)), anchor, imported);
         db.readonly = readonly;
+        db.set_head(h.header.timestamp);
         let genesis = Block {
             number: 0,
             hash: keccak256(b"app-executor genesis"),
@@ -148,6 +163,9 @@ impl Executor {
                 txs: vec![],
             },
             snapshots: vec![],
+            follow: None,
+            conflict: None,
+            last_error: None,
         })
     }
 
@@ -346,21 +364,71 @@ impl Executor {
         Ok(hash)
     }
 
-    /// Move the pin to an L1 block (a tag, number or hash). App state is kept; a conflict at an
-    /// overlay slot refuses the move and leaves everything as it was.
-    pub fn pin(&mut self, id: &str) -> Result<Value, ExecError> {
-        let h = fetch_header(&self.l1, id).map_err(|e| ExecError::Unavailable(e.to_string()))?;
-        let anchor = anchor_of(self.l1_chain_id, &h);
+    pub fn db_ref(&self) -> &AppDb {
+        &self.state.db
+    }
+
+    pub fn following(&self) -> bool {
+        self.follow.is_some() && self.conflict.is_none()
+    }
+
+    pub fn note_error(&mut self, e: String) {
+        self.last_error = Some(e);
+    }
+
+    /// The current head, the working set to prove at the next one (every account and slot
+    /// touched, overlay slots included), and the code hashes already held.
+    pub fn working_set(&self) -> (L1Anchor, BTreeMap<Address, Vec<B256>>, HashSet<B256>) {
+        let db = &self.state.db;
+        let mut keys = db.base.keys();
+        for (a, s) in db.overlay.keys() {
+            let v = keys.entry(*a).or_default();
+            let s = B256::from(*s);
+            if !v.contains(&s) {
+                v.push(s);
+            }
+        }
+        (db.anchor.clone(), keys, db.code.keys().copied().collect())
+    }
+
+    /// Adopt a new head whose working set was proven at it (by the follower, off this lock).
+    /// App state is kept. An overlay slot whose L1 value became non-zero is a conflict: nothing
+    /// changes, following stops, and the conflict is reported.
+    pub fn adopt(
+        &mut self,
+        anchor: L1Anchor,
+        timestamp: u64,
+        base: Base,
+        codes: Vec<(B256, Bytecode)>,
+    ) -> Result<Value, ExecError> {
         if anchor == self.state.db.anchor {
             return Ok(self.pin_json(0));
         }
-        let mut next = self.state.db.repinned(anchor);
+        // Every overlay slot must be proven at the new head (one written since the follower took
+        // its working set is proven here): an unproven slot is never taken as zero.
+        let mut base = base;
+        let missing: BTreeMap<Address, Vec<B256>> = self
+            .state
+            .db
+            .overlay
+            .keys()
+            .filter(|(a, s)| base.slot(*a, B256::from(*s)).is_none())
+            .fold(BTreeMap::new(), |mut m, (a, s)| {
+                m.entry(*a).or_insert_with(Vec::new).push(B256::from(*s));
+                m
+            });
+        if !missing.is_empty() {
+            let known = self.state.db.code.keys().copied().collect();
+            let (extra, _) =
+                crate::follow::prove_set(&self.state.db.src, &anchor, &missing, &known)
+                    .map_err(ExecError::Unavailable)?;
+            base.merge(extra);
+        }
         let mut conflicts = vec![];
-        let overlay: Vec<_> = next.overlay.iter().map(|(k, v)| (*k, *v)).collect();
-        for ((account, slot), local) in &overlay {
-            let l1 = next
-                .base_slot(*account, *slot)
-                .map_err(|e| ExecError::Unavailable(e.to_string()))?;
+        for ((account, slot), local) in &self.state.db.overlay {
+            let l1 = base
+                .slot(*account, B256::from(*slot))
+                .expect("proven above");
             if !l1.is_zero() {
                 conflicts.push(
                     json!({"account": account, "slot": B256::from(*slot), "l1": l1, "app": local}),
@@ -368,11 +436,61 @@ impl Executor {
             }
         }
         if !conflicts.is_empty() {
+            self.conflict = Some(conflicts.clone());
             return Err(ExecError::Conflict(conflicts));
         }
-        let kept = overlay.len();
-        self.state.db = next;
-        Ok(self.pin_json(kept))
+        let db = &mut self.state.db;
+        for (h, c) in codes {
+            db.code.insert(h, c);
+        }
+        db.anchor = anchor;
+        db.base = base;
+        db.set_head(timestamp);
+        crate::metrics::HEADS_ADOPTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.last_error = None;
+        Ok(self.pin_json(self.state.db.overlay.len()))
+    }
+
+    /// Move to a given L1 block (a tag, number or hash) now, proving the working set there:
+    /// replay tooling, debugging and evidence. The app's normal freshness is the follower.
+    pub fn pin(&mut self, id: &str) -> Result<Value, ExecError> {
+        let h = fetch_header(&self.l1, id).map_err(|e| ExecError::Unavailable(e.to_string()))?;
+        let anchor = anchor_of(self.l1_chain_id, &h);
+        if anchor == self.state.db.anchor {
+            return Ok(self.pin_json(0));
+        }
+        let (_, keys, known) = self.working_set();
+        let (base, codes) = crate::follow::prove_set(&self.state.db.src, &anchor, &keys, &known)
+            .map_err(ExecError::Unavailable)?;
+        let r = self.adopt(anchor, h.header.timestamp, base, codes);
+        if r.is_err() && self.follow.is_none() {
+            self.conflict = None; // an explicit move is refused; it doesn't stop anything
+        }
+        r
+    }
+
+    pub fn set_follow(&mut self, tag: Option<String>) {
+        self.follow = tag;
+    }
+
+    /// Catch up with the followed tag now (`executor_sync`): what the follower does at its next
+    /// block, done immediately.
+    pub fn follow_now(&mut self) -> Result<Value, ExecError> {
+        let Some(tag) = self.follow.clone() else {
+            return Ok(self.pin_json(self.state.db.overlay.len()));
+        };
+        if let Some(c) = &self.conflict {
+            return Err(ExecError::Conflict(c.clone()));
+        }
+        let h = fetch_header(&self.l1, &tag).map_err(|e| ExecError::Unavailable(e.to_string()))?;
+        let anchor = anchor_of(self.l1_chain_id, &h);
+        if anchor == self.state.db.anchor {
+            return Ok(self.pin_json(self.state.db.overlay.len()));
+        }
+        let (_, keys, known) = self.working_set();
+        let (base, codes) = crate::follow::prove_set(&self.state.db.src, &anchor, &keys, &known)
+            .map_err(ExecError::Unavailable)?;
+        self.adopt(anchor, h.header.timestamp, base, codes)
     }
 
     fn pin_json(&self, overlay_kept: usize) -> Value {
@@ -384,6 +502,11 @@ impl Executor {
         let db = &self.state.db;
         json!({
             "pin": self.pin_json(db.overlay.len()),
+            "following": self.follow.is_some() && self.conflict.is_none(),
+            "follow": self.follow,
+            "conflict": self.conflict,
+            "lastError": self.last_error,
+            "workingSet": self.state.db.base.keys().iter().map(|(a, s)| json!({"account": a, "slots": s.len()})).collect::<Vec<_>>(),
             "imported": db.imported,
             "readonly": db.readonly,
             "overlay": db.overlay.iter().map(|((a, s), v)| json!({"account": a, "slot": B256::from(*s), "value": v})).collect::<Vec<_>>(),

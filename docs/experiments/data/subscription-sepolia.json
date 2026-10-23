@@ -1,0 +1,22 @@
+{
+  "note": "Sepolia through skim (skim_streamNext); app executor crates/app-executor; one read-only imported contract",
+  "coldReadMs": 753,
+  "warmReadMs": 0.87,
+  "followMsAfterReceipt": 2,
+  "acrossTheUpdate": {
+    "code_requests": 0,
+    "cold_fetches": 0,
+    "header_requests": 6,
+    "heads_adopted": 1,
+    "last_refresh_ms": 948,
+    "proof_requests": 1,
+    "proof_slots": 1,
+    "refresh_ms": 948,
+    "state_ready_changes": 1,
+    "state_ready_mismatches": 0,
+    "stream_apply": 1,
+    "stream_gap": 0,
+    "stream_rewind": 0,
+    "warm_reads": 3
+  }
+}

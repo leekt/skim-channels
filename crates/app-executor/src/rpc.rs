@@ -1,5 +1,6 @@
 //! Standard Ethereum JSON-RPC over the executor (what wallets, viem and the gateway use), plus
-//! `executor_pin`, `executor_status`, `executor_evidence` and anvil-style `evm_snapshot` /
+//! `executor_sync` (catch up with the followed head now), `executor_pin` (move to a given block;
+//! replay tooling), `executor_status`, `executor_evidence` and anvil-style `evm_snapshot` /
 //! `evm_revert` for the operator's runtime. Never expose this directly to users: the gateway
 //! filters it.
 
@@ -295,6 +296,8 @@ pub fn dispatch(ex: &mut Executor, method: &str, p: &Value) -> Result<Value, Rpc
             ex.pin(&id)?
         }
         "executor_status" => ex.status(),
+        "executor_sync" => ex.follow_now()?,
+        "executor_metrics" => crate::metrics::snapshot(),
         "executor_evidence" => {
             let pkg = ex.db().evidence().map_err(|e| RpcError {
                 code: -32000,

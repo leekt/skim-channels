@@ -21,7 +21,8 @@ let failures = 0;
 function check(c: unknown, m: string) { console.log(`${c ? "ok  " : "FAIL"} ${m}`); if (!c) failures++; }
 
 async function run(imports: Address[], port: number) {
-  const app = await Chain.appExecutor(ROOT, port, 7001, SKIM, { readonly: imports });
+  // Held still for the comparison with Sepolia at one block (moved explicitly below).
+  const app = await Chain.appExecutor(ROOT, port, 7001, SKIM, { readonly: imports, follow: "none" });
   const reader = await app.deploy(ROOT, user, "Probes.sol", "FeedReader");
   return { app, reader };
 }
@@ -65,6 +66,16 @@ try {
   check(e !== undefined, "with only the proxy imported, the read reverts: the aggregator it calls isn't part of the app's L1 surface");
 } finally {
   narrow.app.stop();
+}
+// Following: an executor left to itself stays on Sepolia's head (a subscription, not a held block).
+const follower = await Chain.appExecutor(ROOT, 18963, 7001, SKIM, { readonly: [PROXY, AGGREGATOR] });
+try {
+  const p0 = (await follower.rpc("executor_status")).pin.number;
+  await new Promise((r) => setTimeout(r, 30_000));
+  const p1 = (await follower.rpc("executor_status")).pin.number;
+  check(p1 > p0, `a following executor moved with Sepolia by itself: ${p0} → ${p1} in 30 s`);
+} finally {
+  follower.stop();
 }
 if (failures) { console.log(`${failures} FAILED`); process.exit(1); }
 console.log("LIVE EXECUTOR PASSED");

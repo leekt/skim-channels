@@ -29,6 +29,15 @@ struct Args {
     pin: String,
     #[arg(long, default_value_t = 18902)]
     port: u16,
+    /// The L1 tag to follow (`latest`, `safe`, `finalized`), or `none` to stay where pinned.
+    #[arg(long, default_value = "latest")]
+    follow: String,
+    /// How often to check the followed tag, in milliseconds.
+    #[arg(long, default_value_t = 1000)]
+    follow_ms: u64,
+    /// Where the follower keeps its stream cursor across restarts.
+    #[arg(long)]
+    state_dir: Option<std::path::PathBuf>,
     /// Genesis ETH for an app-local account: ADDRESS=WEI (repeatable). Imported accounts
     /// can't be funded: their balances are L1's.
     #[arg(long = "alloc")]
@@ -66,9 +75,19 @@ fn main() {
         eprintln!("app-executor: port {}: {e}", a.port);
         std::process::exit(1)
     });
+    if a.follow != "none" {
+        ex.set_follow(Some(a.follow.clone()));
+    }
+    let ex = Arc::new(Mutex::new(ex));
+    if a.follow != "none" {
+        let (ex, l1, tag) = (ex.clone(), a.l1.clone(), a.follow.clone());
+        let every = std::time::Duration::from_millis(a.follow_ms);
+        let dir = a.state_dir.clone();
+        std::thread::spawn(move || app_executor::follow::run(ex, l1, tag, every, dir));
+    }
     println!(
         "app-executor: chain {} on 127.0.0.1:{}, L1 chain {} pinned at {} {}",
         a.chain_id, a.port, pin.chainId, pin.blockNumber, pin.blockHash
     );
-    serve(listener, Arc::new(Mutex::new(ex)));
+    serve(listener, ex);
 }

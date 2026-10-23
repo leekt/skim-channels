@@ -5,6 +5,8 @@
 
 pub mod db;
 pub mod exec;
+pub mod follow;
 pub mod guard;
 pub mod http;
+pub mod metrics;
 pub mod rpc;
