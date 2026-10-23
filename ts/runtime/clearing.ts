@@ -71,6 +71,7 @@ const norm = (a: any): Account => ({
 });
 
 const word = (x: bigint): Hex => toHex(x, { size: 32 });
+const LOG_RANGE = 1000n;
 /** Chainlink storage the adapter verifies: proxy phase (slot 2); aggregator round (0x2b) and answer. */
 export const PROXY_PHASE_SLOT = word(2n);
 export const AGG_HOT_SLOT = word(0x2bn);
@@ -106,18 +107,20 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
   readonly evidence: EvidenceStore; readonly bond: bigint;
   fin = new Map<number, Account>(); // finalized leaves (L1's committed state, as this operator knows it)
   pendingNext?: { no: bigint; next: Map<number, Account> };
+  readonly startBlock: bigint; // the channel's deployment block: no event of it is older
   scannedTo = 0n; // last L1 block scanned for deposits
   forcedScanFrom = 0n; // where unserved forced orders' events start
 
   constructor(o: {
     view: L1ReadView; exec: Chain; book: C; op: PrivateKeyAccount; l1: Chain; channel: C; anchors: C;
     feed: Feed; maxStaleness: bigint; evidence: EvidenceStore; policy: Policy; bond: bigint;
-    journal: string; maxAnchorAge: bigint; ageMargin: bigint;
+    journal: string; maxAnchorAge: bigint; ageMargin: bigint; startBlock?: bigint;
   }) {
     super(o.view, o.exec, o.journal, o.policy, o.maxAnchorAge, o.ageMargin);
     this.book = o.book; this.op = o.op; this.l1 = o.l1;
     this.channel = o.channel; this.anchors = o.anchors; this.feed = o.feed; this.maxStaleness = o.maxStaleness;
     this.evidence = o.evidence; this.bond = o.bond;
+    this.startBlock = o.startBlock ?? 0n;
     this.watched = [o.channel.address, o.feed.proxy, o.feed.aggregator];
   }
 
@@ -138,8 +141,13 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
     return exec.deploy(ROOT_OF(exec), deployer, "ClearingBook.sol", "ClearingBook", [channel.address, feed.proxy, maxStaleness, bandBps, op.address, sessionId]);
   }
 
+  /** The channel's events, from no earlier than its deployment, in bounded ranges (nodes cap log queries). */
   private async events(name: string, fromBlock: bigint, toBlock: bigint) {
-    const logs = await this.l1.pub.getLogs({ address: this.channel.address, fromBlock, toBlock });
+    const logs = [];
+    for (let f = fromBlock < this.startBlock ? this.startBlock : fromBlock; f <= toBlock; f += LOG_RANGE) {
+      const t = f + LOG_RANGE - 1n < toBlock ? f + LOG_RANGE - 1n : toBlock;
+      logs.push(...(await this.l1.pub.getLogs({ address: this.channel.address, fromBlock: f, toBlock: t })));
+    }
     const out: any[] = [];
     for (const log of logs) {
       try {
@@ -241,7 +249,8 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
    */
   protected async rebuild() {
     this.book = await ClearingOperator.deployBook(this.exec, this.l1, this.op, this.channel, this.feed, this.maxStaleness);
-    const fin = await ClearingOperator.recover(this.l1, this.channel);
+    // The finalized leaves this operator kept (adopt checks them against L1's root), else L1's history.
+    const fin = this.fin.size ? new Map(this.fin) : await ClearingOperator.recover(this.l1, this.channel, this.startBlock);
     await this.adopt(fin);
     for (const b of this.batches) {
       if (b.state !== "proposed") continue;
@@ -249,10 +258,24 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
       for (const l of b.log) if (l.ok) await this.run(l.action);
       await this.sealOne();
       // the fresh book numbers batches from 1 again
-      if (this.pendingNext?.no === BigInt(b.no)) this.pendingNext.no = no;
       b.no = `${no}`;
       b.checkpoint = undefined;
+      // its proposed leaves, for when L1 finalizes it (lost with the old process, if any)
+      this.pendingNext = { no, next: (await this.proposal(no)).next };
     }
+  }
+
+  /**
+   * Continue after the executor (or the whole process) was restarted: rebuild AppState on the
+   * fresh executor from L1's finalized state plus the journal, then carry on from the first
+   * batch not yet proposed.
+   */
+  async restart() {
+    if (!this.batches.length) return;
+    const b = this.batches.find((x) => x.state === "open" || x.state === "sealed");
+    if (b) return this.recover(b.no, "restarted");
+    await this.rebuild();
+    this.save();
   }
 
   // ---- proposals -----------------------------------------------------------------------------
@@ -310,8 +333,12 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
   }
 
   /** Finalized accounts from L1 alone: every finalized proposal's published leaves, in order. */
-  static async recover(l1: Chain, channel: C): Promise<Map<number, Account>> {
-    const logs = await l1.pub.getLogs({ address: channel.address, fromBlock: 0n });
+  static async recover(l1: Chain, channel: C, fromBlock = 0n): Promise<Map<number, Account>> {
+    const head = await l1.height();
+    const logs = [];
+    for (let f = fromBlock; f <= head; f += LOG_RANGE) {
+      logs.push(...(await l1.pub.getLogs({ address: channel.address, fromBlock: f, toBlock: f + LOG_RANGE - 1n < head ? f + LOG_RANGE - 1n : head })));
+    }
     const proposed = new Map<bigint, Hex>(); // batch → tx
     const finalizedBatches: bigint[] = [];
     for (const log of logs) {

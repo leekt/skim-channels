@@ -5,6 +5,10 @@ import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 
 const BASE = process.argv[2] ?? "http://127.0.0.1:8787";
 const cfg = await (await fetch(`${BASE}/api/config`)).json();
+// Amounts that fit the faucet: a local devnet hands out 5 ETH, Sepolia 0.01.
+const SEP = cfg.network === "sepolia";
+const DEP = SEP ? parseEther("0.004") : parseEther("1"), SELL = DEP / 10n, OUT = DEP / 2n;
+const USD_IN = parseUnits("4000", 6);
 const l1Chain = defineChain({ id: cfg.l1.chainId, name: "l1", nativeCurrency: { name: "E", symbol: "E", decimals: 18 }, rpcUrls: { default: { http: [BASE + cfg.l1.rpc] } } });
 const appChain = defineChain({ id: cfg.app.chainId, name: "app", nativeCurrency: { name: "E", symbol: "E", decimals: 18 }, rpcUrls: { default: { http: [BASE + cfg.app.rpc] } } });
 const l1 = createPublicClient({ chain: l1Chain, transport: http(), pollingInterval: 200 });
@@ -31,36 +35,38 @@ async function tx(w: any, pub: any, address: Hex, abi: any, functionName: string
 const account = async () => app.request({ method: "clearing_account" as any, params: [me.address] as any }) as Promise<any>;
 
 check((await post("/api/faucet", { address: me.address })).ok, "faucet funded a fresh wallet on L1");
-await tx(wl1, l1, cfg.l1.channel, cfg.abi.channel, "deposit", [0, parseEther("1")], parseEther("1"));
-await tx(wl1, l1, cfg.l1.token, cfg.abi.token, "approve", [cfg.l1.channel, parseUnits("4000", 6)]);
-await tx(wl1, l1, cfg.l1.channel, cfg.abi.channel, "deposit", [1, parseUnits("4000", 6)]);
-check(true, "deposited 1 ETH and 4,000 USD on L1 (through /rpc/l1)");
-await until("deposits on the app network", async () => (await account())?.pending?.eth && BigInt((await account()).pending.eth) === parseEther("1"));
+await until("faucet funds", async () => (await l1.getBalance({ address: me.address })) > DEP, SEP ? 300_000 : 30_000);
+await tx(wl1, l1, cfg.l1.channel, cfg.abi.channel, "deposit", [0, DEP], DEP);
+await tx(wl1, l1, cfg.l1.token, cfg.abi.token, "approve", [cfg.l1.channel, USD_IN]);
+await tx(wl1, l1, cfg.l1.channel, cfg.abi.channel, "deposit", [1, USD_IN]);
+check(true, `deposited ${Number(DEP) / 1e18} ETH and 4,000 USD on ${cfg.l1.name} (through /rpc/l1)`);
+await until("deposits on the app network", async () => (await account())?.pending?.eth && BigInt((await account()).pending.eth) === DEP, SEP ? 1_200_000 : 90_000);
 check(true, "the next batch applied them: eth_getBalance on the app network = " + (await app.getBalance({ address: me.address })) + " wei");
 
 const price = BigInt((await (await fetch(BASE + "/api/state")).json()).price);
-const o = { trader: me.address, sellToken: 0, sellAmount: parseEther("0.1"), buyAmount: price / 10n, nonce: BigInt(Date.now()), expiry: 10n ** 12n };
+const o = { trader: me.address, sellToken: 0, sellAmount: SELL, buyAmount: (price * SELL) / 10n ** 18n, nonce: BigInt(Date.now()), expiry: 10n ** 12n };
 const sig = await me.signTypedData({ domain: cfg.domain, types, primaryType: "Order", message: o as any });
 await tx(wapp, app, cfg.app.book, cfg.abi.book, "submitOrder", [o, sig]);
-check(true, `placed "sell 0.1 ETH @ ${Number(price) / 1e6}" with a typed signature + an ordinary app-network transaction`);
-await until("the maker's answer and the fill", async () => BigInt((await account()).pending.eth) === parseEther("0.9"));
+check(true, `placed "sell ${Number(SELL) / 1e18} ETH @ ${Number(price) / 1e6}" with a typed signature + an ordinary app-network transaction`);
+await until("the maker's answer and the fill", async () => BigInt((await account()).pending.eth) === DEP - SELL, SEP ? 300_000 : 90_000);
 const acc = await account();
-check(BigInt(acc.pending.usd) === parseUnits("4000", 6) + price / 10n, `filled: pending 0.9 ETH, ${Number(BigInt(acc.pending.usd)) / 1e6} USD`);
+check(BigInt(acc.pending.usd) === USD_IN + o.buyAmount, `filled: pending ${Number(DEP - SELL) / 1e18} ETH, ${Number(BigInt(acc.pending.usd)) / 1e6} USD`);
 
-await tx(wl1, l1, cfg.l1.channel, cfg.abi.channel, "requestWithdraw", [0, parseEther("0.5")]);
-check(true, "requested 0.5 ETH on L1");
-await until("the request served in a batch", async () => BigInt((await account()).pending.ethOut) === parseEther("0.5"));
-// Fast-forward L1 past challenge windows until the batch with the request is final.
+await tx(wl1, l1, cfg.l1.channel, cfg.abi.channel, "requestWithdraw", [0, OUT]);
+check(true, `requested ${Number(OUT) / 1e18} ETH on L1`);
+await until("the request served in a batch", async () => BigInt((await account()).pending.ethOut) === OUT, SEP ? 1_200_000 : 90_000);
+// Past the challenge windows until the batch with the request is final: fast-forwarded on a
+// local devnet, real time on Sepolia (each window is an hour).
 await until("finalization of the withdrawal", async () => {
-  await post("/api/devnet/advance", { seconds: 3700 });
-  await sleep(3000);
+  if (!SEP) await post("/api/devnet/advance", { seconds: 3700 });
+  await sleep(SEP ? 30_000 : 3000);
   const a = await account();
-  return a?.finalized && BigInt(a.finalized.ethOut) === parseEther("0.5");
-}, 240_000);
+  return a?.finalized && BigInt(a.finalized.ethOut) === OUT;
+}, SEP ? 4 * 3600_000 : 240_000);
 const leaf = await (await fetch(`${BASE}/api/leaf?address=${me.address}`)).json();
 const l = Object.fromEntries(Object.entries(leaf.leaf).map(([k, v]) => [k, k === "requests" ? Number(v) : BigInt(v as string)]));
 const before = await l1.getBalance({ address: me.address });
 await tx(wl1, l1, cfg.l1.channel, cfg.abi.channel, "claim", [leaf.idx, l, leaf.siblings]);
 const got = (await l1.getBalance({ address: me.address })) - before;
-check(got > parseEther("0.49") && got <= parseEther("0.5"), `claimed ${Number(got) / 1e18} ETH on L1 (0.5 minus L1 gas)`);
+check(got > OUT - parseEther("0.0005") && got <= OUT, `claimed ${Number(got) / 1e18} ETH on L1 (${Number(OUT) / 1e18} minus L1 gas)`);
 console.log("DEVNET SMOKE PASSED");

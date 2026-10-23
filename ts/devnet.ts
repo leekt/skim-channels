@@ -15,8 +15,10 @@
 //             ChainlinkAdapter checks), finalize, re-pin when idle (no L1 transaction)
 //   maker     a bot that answers any user order inside the band, so one person can trade
 //   sessions  on Sepolia, the app's vault and infrastructure are deployed once
-//             (~/.skim-devnet/sepolia.json); each start opens a new session and closes the
-//             previous one, whose users then redeem or roll over (docs/guide/stateful-runtime.md)
+//             (~/.skim-devnet/sepolia.json). A restart resumes the active session from its
+//             journal (on disk) on a fresh executor. NEW_SESSION=1 opens a new session and closes
+//             the previous one, whose users then redeem or roll over (docs/guide/stateful-runtime.md).
+//             Under Amsterdam's code pricing a session costs ~36M gas to deploy, so rotate on purpose.
 //
 // One HTTP server (default :8787) serves the test app, /rpc/l1 (filtered), /rpc/app (the
 // gateway) and /api/*. Expose it with `tailscale serve --bg 8787`.
@@ -37,7 +39,7 @@ import { L1ReadView } from "./runtime/l1view.ts";
 import { EvidenceStore } from "./runtime/evidence.ts";
 import { Gateway } from "./runtime/gateway.ts";
 import { levels, siblings } from "./runtime/tree.ts";
-import { ClearingOperator, EMPTY, eip712Order, leafHash, mergeAbi, orderHash, type Feed, type Order } from "./runtime/clearing.ts";
+import { ClearingOperator, EMPTY, eip712Order, leafHash, mergeAbi, orderHash, type Account, type Feed, type Order } from "./runtime/clearing.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const CLI = `${ROOT}target/debug/skim-channels`;
@@ -58,7 +60,7 @@ const maker = privateKeyToAccount(OPERATOR_KEY ? keccak256(concat([OPERATOR_KEY,
 // What each network can afford: the maker's float, the faucet, and how stale a price may be.
 const P = NET === "local"
   ? { makerEth: parseEther("50"), makerUsd: usd(500_000), faucetEth: parseEther("5"), faucetUsd: usd(20_000), bond: parseEther("1"), maxStale: BigInt(DAY), policy: { kind: "confirmations", n: 2 } as const }
-  : { makerEth: parseEther("0.05"), makerUsd: usd(50_000), faucetEth: parseEther("0.01"), faucetUsd: usd(20_000), bond: parseEther("0.01"), maxStale: BigInt(6 * 3600), policy: { kind: "safe" } as const };
+  : { makerEth: parseEther("0.02"), makerUsd: usd(50_000), faucetEth: parseEther("0.005"), faucetUsd: usd(20_000), bond: parseEther("0.01"), maxStale: BigInt(6 * 3600), policy: { kind: "safe" } as const };
 
 type Known = { hash: Hex; order: Order; from: Address; maker: boolean; answered?: boolean; at: number };
 const log: string[] = [];
@@ -83,12 +85,20 @@ async function main() {
     if (id !== SEPOLIA) throw new Error(`${SKIM_RPC} follows chain ${id}, not Sepolia`);
     const bal = await l1.pub.getBalance({ address: op.address });
     note(`Sepolia operator ${op.address}: ${Number(bal) / 1e18} ETH`);
-    if (bal < parseEther("0.2")) throw new Error(`fund ${op.address} with Sepolia ETH (≥ 0.2; deployments and proposals cost gas)`);
+    if (bal < parseEther("0.03")) throw new Error(`fund ${op.address} with Sepolia ETH (≥ 0.03; deployments and proposals cost gas)`);
   }
   const codeHash = async (a: Address) => (await l1.rpc<any>("eth_getProof", [a, [], "latest"])).codeHash as Hex;
 
   // ---- the app: feed, adapter, infrastructure and vault (once per app) ----
-  type App = { token: Address; anchors: Address; codec: Address; adapter: Address; vault: Address; feed: Feed; sessions: { id: string; channel: Address; disputes: Address }[] };
+  type App = { token: Address; anchors: Address; codec: Address; adapter: Address; vault: Address; feed: Feed; sessions: { id: string; channel: Address; disputes: Address; startBlock?: string; makerRedeemed?: boolean }[] };
+  // Each session's finalized leaves, kept on disk so a closed session can be redeemed after a restart.
+  const finFile = (sid: string) => join(homedir(), ".skim-devnet", `session-${sid}-fin.json`);
+  const loadFin = (sid: string): Map<number, Account> => {
+    if (NET !== "sepolia" || !existsSync(finFile(sid))) return new Map();
+    return new Map(Object.entries(JSON.parse(readFileSync(finFile(sid), "utf8"))).map(([k, v]: [string, any]) => [Number(k), {
+      eth: BigInt(v.eth), usd: BigInt(v.usd), ethIn: BigInt(v.ethIn), usdIn: BigInt(v.usdIn), ethOut: BigInt(v.ethOut), usdOut: BigInt(v.usdOut), nonce: BigInt(v.nonce), requests: Number(v.requests),
+    }]));
+  };
   let app: App;
   const saved: App | undefined = NET === "sepolia" && existsSync(STATE_FILE) ? JSON.parse(readFileSync(STATE_FILE, "utf8")) : undefined;
   if (saved) {
@@ -126,25 +136,62 @@ async function main() {
   const chAbi = mergeAbi(abiOf("ClearingChannel.sol", "ClearingChannel"), abiOf("ClearingDisputes.sol", "ClearingDisputes")).abi;
   const sessionC = (a: Address): C => ({ address: a, abi: chAbi });
 
-  // ---- a new session; the previous one starts closing ----
-  const id = BigInt(Number(await l1.read(vault, "sessionCount")) + 1);
-  const disputes = await l1.deploy(ROOT, op, "ClearingDisputes.sol", "ClearingDisputes", [{
-    operator: op.address, usd: app.token, anchors: app.anchors, codec: app.codec, priceAdapter: app.adapter, bandBps: 100n,
-    challengeWindow: BigInt(WINDOW), forceDelay: BigInt(DAY), maxAnchorAge: 256n, minBond: P.bond, takeoverDelay: BigInt(2 * DAY),
-    appChainId: BigInt(APP_ID), vault: app.vault, sessionId: id,
-  }]);
-  const core = await l1.deploy(ROOT, op, "ClearingChannel.sol", "ClearingChannel", [disputes.address]);
-  await l1.send(vault, "register", [core.address], op);
-  const ch = sessionC(core.address);
-  app.sessions.push({ id: id.toString(), channel: core.address, disputes: disputes.address });
-  save();
-  for (const s of app.sessions.slice(0, -1)) {
-    const st = await l1.read<any[]>(sessionC(s.channel), "state");
-    if (Number(st[5]) === 0) {
-      await l1.send(sessionC(s.channel), "beginClose", [], op);
+  // ---- the session: resume the active one, or open a new one (the previous one starts closing) ----
+  const last = app.sessions.at(-1);
+  const resume = NET === "sepolia" && !process.env.NEW_SESSION && !!last
+    && Number((await l1.read<any[]>(sessionC(last.channel), "state"))[5]) === 0;
+  if (!resume) {
+    const sid = BigInt(Number(await l1.read(vault, "sessionCount")) + 1);
+    const d = await l1.deploy(ROOT, op, "ClearingDisputes.sol", "ClearingDisputes", [{
+      operator: op.address, usd: app.token, anchors: app.anchors, codec: app.codec, priceAdapter: app.adapter, bandBps: 100n,
+      challengeWindow: BigInt(WINDOW), forceDelay: BigInt(DAY), maxAnchorAge: 256n, minBond: P.bond, takeoverDelay: BigInt(2 * DAY),
+      appChainId: BigInt(APP_ID), vault: app.vault, sessionId: sid,
+    }]);
+    const c = await l1.deploy(ROOT, op, "ClearingChannel.sol", "ClearingChannel", [d.address]);
+    const startBlock = await l1.height();
+    await l1.send(vault, "register", [c.address], op);
+    app.sessions.push({ id: sid.toString(), channel: c.address, disputes: d.address, startBlock: startBlock.toString() });
+    save();
+  }
+  const cur = app.sessions.at(-1)!;
+  const id = BigInt(cur.id);
+  const core = { address: cur.channel };
+  const disputes = { address: cur.disputes };
+  const startBlock = BigInt(cur.startBlock ?? 0);
+  const ch = sessionC(cur.channel);
+  if (resume) note(`resuming session ${id} (${ch.address}) from its journal`);
+  /** An earlier session: start closing it, close it when nothing is pending, then take the maker's float back. */
+  async function closeOld(s: App["sessions"][number]) {
+    const c = sessionC(s.channel);
+    let ph = Number((await l1.read<any[]>(c, "state"))[5]);
+    if (ph === 0) {
+      await l1.send(c, "beginClose", [], op);
       note(`session ${s.id}: closing (it closes once nothing is pending; its users then redeem or roll over)`);
+      ph = 1;
+    }
+    if (ph === 1) {
+      const pend = await l1.read<any>(c, "pending");
+      const now = (await l1.pub.getBlock()).timestamp;
+      if (pend.at !== 0n && now >= pend.at + BigInt(WINDOW)) await l1.send(c, "finalize", [], op);
+      if ((await l1.read<any>(c, "pending")).at !== 0n) return;
+      await l1.send(c, "close", [], op);
+      note(`session ${s.id}: closed. Its users redeem to their wallet or roll over into the vault`);
+      ph = 2;
+    }
+    if (ph === 2 && !s.makerRedeemed) {
+      const ip = Number(await l1.read(c, "indexPlusOne", [maker.address]));
+      if (ip) {
+        const fin = loadFin(s.id);
+        const n = Number(await l1.read(c, "userCount"));
+        const dense = Array.from({ length: n }, (_, i) => leafHash(fin.get(i) ?? EMPTY));
+        await l1.send(c, "redeem", [ip - 1, fin.get(ip - 1) ?? EMPTY, siblings(levels(dense), ip - 1), false], maker);
+        note(`session ${s.id}: the maker redeemed its float`);
+      }
+      s.makerRedeemed = true;
+      save();
     }
   }
+  for (const s of app.sessions.slice(0, -1)) await closeOld(s);
 
   // ---- the app network: the executor imports the channel and the feed read-only ----
   const ex = await Chain.appExecutor(ROOT, 18902, APP_ID, l1.url, { readonly: [core.address, disputes.address, app.feed.proxy, app.feed.aggregator] });
@@ -153,20 +200,31 @@ async function main() {
   const reader = new L1ReadView({ url: l1.url, chainId: l1.chainId, cli: CLI });
   const A = new ClearingOperator({
     view: reader, exec: ex, book, op, l1, channel: ch, anchors, feed: app.feed, maxStaleness: P.maxStale,
-    evidence: new EvidenceStore(join(tmpdir(), `skim-devnet-evidence-${process.pid}`)), policy: P.policy,
-    bond: P.bond, journal: join(tmpdir(), `skim-devnet-journal-${process.pid}.json`), maxAnchorAge: 256n, ageMargin: 32n,
+    evidence: new EvidenceStore(NET === "sepolia" ? join(homedir(), ".skim-devnet", `session-${id}-evidence`) : join(tmpdir(), `skim-devnet-evidence-${process.pid}`)),
+    policy: P.policy, bond: P.bond, maxAnchorAge: 256n, ageMargin: 32n, startBlock,
+    journal: NET === "sepolia" ? join(homedir(), ".skim-devnet", `session-${id}-journal.json`) : join(tmpdir(), `skim-devnet-journal-${process.pid}.json`),
   });
+  if (resume) {
+    A.fin = loadFin(id.toString());
+    await A.restart();
+    note(`session ${id}: AppState rebuilt on a fresh executor (${A.batches.length} journaled batch(es))`);
+  }
   const gw = new Gateway(A, 18903);
   await gw.start();
 
-  // ---- the market maker: funded on L1 like any user ----
-  if (NET === "sepolia" && (await l1.pub.getBalance({ address: maker.address })) < P.makerEth + parseEther("0.02")) {
-    await l1.wallet(op).sendTransaction({ to: maker.address, value: P.makerEth + parseEther("0.02") }).then((h) => l1.pub.waitForTransactionReceipt({ hash: h }));
+  // ---- the market maker: funded on L1 like any user (once per session) ----
+  const makerIn = Number(await l1.read(ch, "indexPlusOne", [maker.address])) > 0;
+  const makerNeeds = P.makerEth + parseEther("0.005"); // its deposit, plus gas
+  const makerHas = NET === "sepolia" ? await l1.pub.getBalance({ address: maker.address }) : makerNeeds;
+  if (!makerIn && makerHas < makerNeeds) {
+    await l1.wallet(op).sendTransaction({ to: maker.address, value: makerNeeds - makerHas }).then((h) => l1.pub.waitForTransactionReceipt({ hash: h }));
   }
-  await l1.send(ch, "deposit", [0, P.makerEth], maker, undefined, P.makerEth);
-  await l1.send(token, "mint", [maker.address, P.makerUsd], maker);
-  await l1.send(token, "approve", [ch.address, P.makerUsd], maker);
-  await l1.send(ch, "deposit", [1, P.makerUsd], maker);
+  if (!makerIn) {
+    await l1.send(ch, "deposit", [0, P.makerEth], maker, undefined, P.makerEth);
+    await l1.send(token, "mint", [maker.address, P.makerUsd], maker);
+    await l1.send(token, "approve", [ch.address, P.makerUsd], maker);
+    await l1.send(ch, "deposit", [1, P.makerUsd], maker);
+  }
   const appChain = defineChain({ id: APP_ID, name: "skim clearing (devnet)", nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 }, rpcUrls: { default: { http: [gw.url] } } });
   const makerWallet = createWalletClient({ account: maker, chain: appChain, transport: http(gw.url), pollingInterval: 50 });
   const domain = { name: "SkimClearing", version: "0", chainId: APP_ID, verifyingContract: ch.address, salt: pad(toHex(id), { size: 32 }) };
@@ -261,20 +319,9 @@ async function main() {
     }
   }
 
-  /** Earlier sessions: finalize what's pending, then close them (nothing else to do there). */
+  /** Earlier sessions still closing: finish them (see closeOld). */
   async function settleOld() {
-    for (const s of app.sessions.slice(0, -1)) {
-      const c = sessionC(s.channel);
-      const st = await l1.read<any[]>(c, "state");
-      if (Number(st[5]) !== 1) continue;
-      const pend = await l1.read<any>(c, "pending");
-      const now = (await l1.pub.getBlock()).timestamp;
-      if (pend.at !== 0n && now >= pend.at + BigInt(WINDOW)) await l1.send(c, "finalize", [], op);
-      else if (pend.at === 0n) {
-        await l1.send(c, "close", [], op);
-        note(`session ${s.id}: closed. Its users redeem to their wallet or roll over into the vault`);
-      }
-    }
+    for (const s of app.sessions.slice(0, -1)) if (!s.makerRedeemed) await closeOld(s);
   }
 
   /** Local only: Chainlink feeds update on a heartbeat; the local one re-transmits hourly (L1 time). */
@@ -337,6 +384,8 @@ async function main() {
         if (now >= pend.at + BigInt(WINDOW)) {
           at_("finalize"); await l1.send(ch, "finalize", [], op);
           await A.finalized();
+          if ((await l1.read<bigint>(ch, "bondCredit", [op.address])) > 0n) await l1.send(ch, "withdrawBond", [], op);
+          if (NET === "sepolia") writeFileSync(finFile(id.toString()), JSON.stringify(Object.fromEntries(A.fin), (_k, v) => (typeof v === "bigint" ? v.toString() : v)));
           note(`finalized on L1 (batches: ${(await l1.read<any[]>(ch, "state"))[3]})`);
         }
       }
@@ -419,7 +468,7 @@ async function main() {
         const last = lastFaucet.get(address.toLowerCase()) ?? 0;
         if (NET === "sepolia" && Date.now() - last < 3600_000) return json(res, { error: "one faucet request per address per hour on Sepolia" }, 429);
         lastFaucet.set(address.toLowerCase(), Date.now());
-        if (P.faucetEth > 0n && (await l1.pub.getBalance({ address: op.address })) > P.faucetEth + parseEther("0.2")) {
+        if (P.faucetEth > 0n && (await l1.pub.getBalance({ address: op.address })) > P.faucetEth + parseEther("0.05")) {
           await l1.wallet(op).sendTransaction({ to: address, value: P.faucetEth }).then((h) => l1.pub.waitForTransactionReceipt({ hash: h }));
         }
         await l1.send(token, "mint", [address, P.faucetUsd], op);
