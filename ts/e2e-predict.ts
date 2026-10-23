@@ -31,8 +31,8 @@ const KEYS = [
 const [op, watcher, ...users] = KEYS.map((k) => privateKeyToAccount(k));
 
 const chain = defineChain({ id: CHAIN_ID, name: "l1", nativeCurrency: { name: "E", symbol: "E", decimals: 18 }, rpcUrls: { default: { http: [URL_] } } });
-const pub = createPublicClient({ chain, transport: http() });
-const wallet = (a = op) => createWalletClient({ account: a, chain, transport: http() });
+const pub = createPublicClient({ chain, transport: http(), pollingInterval: 50 });
+const wallet = (a = op) => createWalletClient({ account: a, chain, transport: http(), pollingInterval: 50 });
 
 function artifact(file: string, name: string): { abi: Abi; bytecode: Hex } {
   const j = JSON.parse(readFileSync(`${ROOT}contracts/out/${file}/${name}.json`, "utf8"));

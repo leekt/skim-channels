@@ -73,7 +73,8 @@ abstract contract ClearingChannelBase is Test {
             forceDelay: 1 days,
             maxAnchorAge: 256,
             minBond: 1 ether,
-            takeoverDelay: 2 days
+            takeoverDelay: 2 days,
+            appChainId: 7001
         });
     }
 
@@ -488,7 +489,8 @@ contract ClearingChannelTest is ClearingChannelBase {
 
     function test_forcedOrderPublishedAsResting() public {
         O memory c = _order(2, R.ETH, uint128(ETH1), 6990, 1);
-        ch.forceOrder(c.o, c.sig);
+        vm.prank(who[2]);
+        ch.forceOrder(c.o);
         (bytes memory fills, L.Account[] memory n) = _batch1();
         vm.expectEmit(true, false, false, false, address(ch));
         emit ClearingStorage.ForcedRested(0);
@@ -501,7 +503,8 @@ contract ClearingChannelTest is ClearingChannelBase {
 
     function test_forcedOrderFilledStatusChecked() public {
         O memory a = _order(0, R.ETH, uint128(ETH1), 6990, 1);
-        ch.forceOrder(a.o, a.sig);
+        vm.prank(who[0]);
+        ch.forceOrder(a.o);
         (bytes memory fills, L.Account[] memory n) = _batch1();
         vm.expectRevert(abi.encodeWithSelector(ClearingStorage.BadBatch.selector, "forcedStatus"));
         _propose(fills, n, 0, 1, abi.encodePacked(uint16(2))); // fill 0, side b: that's bob's
@@ -514,7 +517,7 @@ contract ClearingChannelTest is ClearingChannelBase {
         _finalize(n);
         O memory c = _order(2, R.ETH, uint128(ETH1), 6990, 1);
         vm.prank(who[2]);
-        ch.forceOrder(c.o, c.sig);
+        ch.forceOrder(c.o);
         // The operator keeps proposing without serving it.
         L.Account[] memory m = _copyFin();
         m[0] = L.Account(1 ether, 14_000, 3 ether, 0, 0, 0, 2, 0);
@@ -541,11 +544,46 @@ contract ClearingChannelTest is ClearingChannelBase {
         assertEq(usd.balanceOf(address(ch)), 0);
     }
 
-    function test_forceOrderNeedsTheTradersSignature() public {
+    /// The trader's own L1 transaction authorizes a forced order: nobody else can post one.
+    function test_forceOrderOnlyFromTheTrader() public {
         O memory c = _order(2, R.ETH, uint128(ETH1), 6990, 1);
-        c.sig = _order(1, R.ETH, uint128(ETH1), 6990, 1).sig;
-        vm.expectRevert(ClearingStorage.BadProof.selector);
-        ch.forceOrder(c.o, c.sig);
+        vm.prank(who[1]);
+        vm.expectRevert(ClearingStorage.WrongState.selector);
+        ch.forceOrder(c.o);
+    }
+
+    /// A forced order needs no typed signature in a fill (its trader authorized it on L1); any
+    /// other order with an empty signature is a fault.
+    function test_forcedOrderNeedsNoTypedSignature() public {
+        O memory a = _order(0, R.ETH, uint128(ETH1), 6990, 1);
+        vm.prank(who[0]);
+        ch.forceOrder(a.o);
+        O memory b = _order(1, R.USD, 7000, uint128(ETH1), 1);
+        a.sig = new bytes(65);
+        bytes memory fills = _fill(a, b);
+        (, L.Account[] memory n) = _batch1();
+        _propose(fills, n, 0, 1, abi.encodePacked(uint16(1)));
+        vm.prank(watcher);
+        vm.expectRevert(ClearingStorage.NotWrong.selector);
+        D.challengeFill(fills, 0);
+        vm.warp(block.timestamp + 1 hours);
+        ch.finalize();
+    }
+
+    function test_unsignedNonForcedOrderIsAFault() public {
+        O memory a = _order(0, R.ETH, uint128(ETH1), 6990, 1);
+        O memory b = _order(1, R.USD, 7000, uint128(ETH1), 1);
+        b.sig = new bytes(65);
+        bytes memory fills = _fill(a, b);
+        (, L.Account[] memory n) = _batch1();
+        _propose(fills, n, 0, 0, "");
+        vm.prank(watcher);
+        D.challengeFill(fills, 0);
+    }
+
+    /// Orders are signed in the app network's domain (what a wallet connected to it can sign).
+    function test_domainIsTheAppChain() public view {
+        assertEq(ch.domain(), R.domainSeparator(7001, address(ch)));
     }
 
     // ---- handover -----------------------------------------------------------------------------

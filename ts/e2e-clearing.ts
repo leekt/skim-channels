@@ -8,13 +8,14 @@
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { encodeAbiParameters, encodeFunctionData, parseEther, toHex, zeroHash, type Address, type Hex } from "viem";
+import { createPublicClient, createWalletClient, defineChain, encodeAbiParameters, encodeFunctionData, http, parseEther, toHex, zeroHash, type Address, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { Chain, type C } from "./runtime/executor.ts";
 import { L1ReadView } from "./runtime/l1view.ts";
 import { EvidenceStore } from "./runtime/evidence.ts";
 import { levels, rootOf, siblings } from "./runtime/tree.ts";
 import { ClearingOperator, EMPTY, eip712Order, leafHash, mergeAbi, orderHash, type Account, type Order } from "./runtime/clearing.ts";
+import { Gateway } from "./runtime/gateway.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const CLI = `${ROOT}target/debug/skim-channels`;
@@ -50,15 +51,18 @@ const accountT = {
 void accountT;
 void encodeAbiParameters;
 
+const extraChains: Chain[] = []; // started during the run (e.g. a restarted executor)
+
 async function main() {
   // L1 keeps the last 512 states (like a non-archive node): older proofs are refused.
   const l1 = await Chain.anvil(18690, 900, ["--prune-history", "512"]);
-  const exA = await Chain.anvil(18691, 7001);
-  const exB = await Chain.anvil(18692, 7001);
+  // The app network: fees are 0 (gas there settles nowhere).
+  const exA = await Chain.anvil(18691, 7001, ["--base-fee", "0", "--gas-limit", "10000000000"]);
+  const exB = await Chain.anvil(18692, 7001, ["--base-fee", "0", "--gas-limit", "10000000000"]);
   try {
     await run(l1, exA, exB);
   } finally {
-    [l1, exA, exB].forEach((c) => c.stop());
+    [l1, exA, exB, ...extraChains].forEach((c) => c.stop());
   }
 }
 
@@ -72,12 +76,20 @@ async function run(l1: Chain, exA: Chain, exB: Chain) {
   const disputes = await l1.deploy(ROOT, opA, "ClearingDisputes.sol", "ClearingDisputes", [{
     operator: opA.address, usd: token.address, anchors: anchors.address, witnessVerifier: wv.address, codec: codec.address,
     priceFeed: oracle.address, priceSlot: SLOT0, bandBps: 100n, challengeWindow: BigInt(WINDOW), forceDelay: BigInt(DAY),
-    maxAnchorAge: 256n, minBond: parseEther("1"), takeoverDelay: BigInt(2 * DAY),
+    maxAnchorAge: 256n, minBond: parseEther("1"), takeoverDelay: BigInt(2 * DAY), appChainId: 7001n,
   }], "deploy ClearingDisputes");
   const core = await l1.deploy(ROOT, opA, "ClearingChannel.sol", "ClearingChannel", [disputes.address], "deploy ClearingChannel");
   const ch = mergeAbi(core, disputes);
   // Time passes with blocks (12 s each), as on a real chain: anchors age by block number.
-  const time = async (s: number) => { await l1.rpc("anvil_mine", [toHex(Math.ceil(s / 12)), toHex(12)]); };
+  // Up to 2 hours (challenge windows): every 12 s block is mined. Longer waits (days) mine
+  // 600 such blocks — more than any anchor's age limit — then jump the rest of the time.
+  const time = async (s: number) => {
+    const blocks = Math.ceil(s / 12);
+    if (blocks <= 600) return l1.rpc("anvil_mine", [toHex(blocks), toHex(12)]);
+    await l1.rpc("anvil_mine", [toHex(600), toHex(12)]);
+    await l1.rpc("evm_increaseTime", [s - 600 * 12]);
+    await l1.rpc("anvil_mine", [toHex(1)]);
+  };
   async function fund(who: typeof alice, eth: bigint, dollars: bigint) {
     if (eth) await l1.send(ch, "deposit", [ETH, eth], who, "deposit ETH", eth);
     if (dollars) {
@@ -95,7 +107,7 @@ async function run(l1: Chain, exA: Chain, exB: Chain) {
   // ---- operator A's executor ----
   async function deployBook(ex: Chain, operator: typeof opA) {
     const view = await ex.deploy(ROOT, operator, "L1View.sol", "L1View", [900n]);
-    const book = await ex.deploy(ROOT, operator, "ClearingBook.sol", "ClearingBook", [view.address, ch.address, 900n, oracle.address, SLOT0, 100n, operator.address]);
+    const book = await ex.deploy(ROOT, operator, "ClearingBook.sol", "ClearingBook", [view.address, ch.address, oracle.address, SLOT0, 100n, operator.address]);
     return { view, book };
   }
   const reader = new L1ReadView({ url: l1.url, chainId: 900, cli: CLI });
@@ -110,7 +122,8 @@ async function run(l1: Chain, exA: Chain, exB: Chain) {
     });
   };
   const A = await mkOp(exA, opA);
-  const domain = { name: "SkimClearing", version: "0", chainId: 900, verifyingContract: ch.address };
+  // Orders are signed on the app network (chain 7001), as a wallet connected to it would.
+  const domain = { name: "SkimClearing", version: "0", chainId: 7001, verifyingContract: ch.address };
   async function order(who: typeof alice, sellToken: number, sellAmount: bigint, buyAmount: bigint, nonce: bigint, signer = who) {
     const o: Order = { trader: who.address, sellToken, sellAmount, buyAmount, nonce, expiry: FAR };
     const sig = await signer.signTypedData({ domain, types: eip712Order, primaryType: "Order", message: o as any });
@@ -188,26 +201,62 @@ async function run(l1: Chain, exA: Chain, exB: Chain) {
   const accA = await exA.read<any>(A.book, "account", [ia]);
   check(BigInt(accA.ethOut) === parseEther("0.2"), "batch 2 opened by serving alice's request first (0.2 ETH released)");
   check(await exA.read(A.book, "resting", [k3.h]), "bob's unfilled order from batch 1 is still in the book (AppState carried over)");
-  const a2 = await order(alice, ETH, parseEther("0.5"), usd(1040), 2n);
-  const k4 = await order(bob, USD, usd(1050), parseEther("0.5"), 4n);
-  await place(A, a2); await place(A, k4);
-  check((await fill(A, a2, k4)).ok, "alice sells 0.5 ETH at 2100, the new snapshot's price");
+  // ---- users trade from ordinary wallets through the app network's standard RPC ----
+  const gw = new Gateway(A, 18695);
+  await gw.start();
+  const appChain = defineChain({ id: 7001, name: "skim-clearing", nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 }, rpcUrls: { default: { http: [gw.url] } } });
+  const gpub = createPublicClient({ chain: appChain, transport: http(gw.url), cacheTime: 0, pollingInterval: 50 });
+  const walletOf = (a: typeof alice) => createWalletClient({ account: a, chain: appChain, transport: http(gw.url) });
+  check((await gpub.getChainId()) === domain.chainId, "the RPC's eth_chainId equals the orders' EIP-712 chainId (MetaMask/Rabby require this to sign)");
+  check((await gpub.getBalance({ address: alice.address })) === BigInt((await A.exec.read<any>(A.book, "account", [ia])).eth), "eth_getBalance shows alice's ETH in the channel");
+  const fees = await gpub.estimateFeesPerGas();
+  const base = (await gpub.getBlock()).baseFeePerGas;
+  check(fees.maxFeePerGas === 0n, `fees on the app network are 0 (wallets send fee-0 transactions): maxFee ${fees.maxFeePerGas}, base ${base}`);
+  /** Sign the order (eth_signTypedData_v4) and send it as a normal transaction, as a wallet does. */
+  async function walletOrder(who: typeof alice, sellToken: number, sellAmount: bigint, buyAmount: bigint, nonce: bigint) {
+    const x = await order(who, sellToken, sellAmount, buyAmount, nonce);
+    const hash = await walletOf(who).writeContract({ address: A.book.address, abi: A.book.abi, functionName: "submitOrder", args: [x.o, x.sig] });
+    const r = await gpub.waitForTransactionReceipt({ hash });
+    check(r.status === "success", `${who === alice ? "alice" : who === bob ? "bob" : "a user"}'s wallet tx ${hash.slice(0, 10)}… placed an order (receipt from the RPC)`);
+    return x;
+  }
+  const a2 = await walletOrder(alice, ETH, parseEther("0.5"), usd(1040), 2n);
+  const k4 = await walletOrder(bob, USD, usd(1050), parseEther("0.5"), 4n);
+  const refused = async (what: string, fn: () => Promise<unknown>) => {
+    try { await fn(); } catch (e: any) { check(true, `refused: ${what} (${String(e?.details ?? e?.shortMessage ?? e?.message).split("\n")[0].slice(0, 80)})`); return; }
+    throw new Error(`FAILED: ${what} was accepted`);
+  };
+  const nonceBefore = await gpub.getTransactionCount({ address: alice.address });
+  await refused("a plain ETH transfer", () => walletOf(alice).sendTransaction({ to: bob.address, value: 1n }));
+  await refused("a contract deployment", () => walletOf(alice).sendTransaction({ data: "0x6080" }));
+  await refused("calling fill (operator-only)", () => walletOf(alice).writeContract({ address: A.book.address, abi: A.book.abi, functionName: "fill", args: [a2.h, k4.h] }));
+  const stale = await order(alice, ETH, parseEther("0.1"), usd(200), 1n); // nonce 1 already used
+  await refused("an order that would revert (stale nonce)", () => walletOf(alice).writeContract({ address: A.book.address, abi: A.book.abi, functionName: "submitOrder", args: [stale.o, stale.sig] }));
+  // With gas set, the wallet skips estimation: the RPC's own policy and simulation decide.
+  await refused("calling fill with gas set (the RPC's function policy)", () => walletOf(alice).writeContract({ address: A.book.address, abi: A.book.abi, functionName: "fill", args: [a2.h, k4.h], gas: 300_000n }));
+  await refused("a stale-nonce order with gas set (simulated, refused before inclusion)", () => walletOf(alice).writeContract({ address: A.book.address, abi: A.book.abi, functionName: "submitOrder", args: [stale.o, stale.sig], gas: 300_000n }));
+  await refused("bob submitting alice's order", () => walletOf(bob).writeContract({ address: A.book.address, abi: A.book.abi, functionName: "submitOrder", args: [stale.o, stale.sig], gas: 300_000n }));
+  check((await gpub.getTransactionCount({ address: alice.address })) === nonceBefore, "refused transactions consumed no nonce");
+  await refused("anvil_setBalance (executor cheat method)", () => gpub.request({ method: "anvil_setBalance" as any, params: [alice.address, "0x1"] as any }));
+  await refused("eth_sendTransaction (the node holds no keys)", () => gpub.request({ method: "eth_sendTransaction" as any, params: [{ from: alice.address, to: bob.address }] as any }));
+  check((await fill(A, a2, k4)).ok, "the operator fills the two wallet orders: alice sells 0.5 ETH at 2100");
   await A.seal();
   const digestAfter2 = await A.exec.read<Hex>(A.book, "stateDigest");
 
   // ---- the same journal replayed on a fresh executor gives the same AppState ----
-  const exC = await Chain.anvil(18693, 7001);
+  const exC = await Chain.anvil(18693, 7001, ["--base-fee", "0", "--gas-limit", "10000000000"]);
   try {
     const fresh = await deployBook(exC, opA);
     for (const b of A.batches.slice(0, 2)) {
       const pr = b.prepared as any;
       await exC.send(fresh.view, "pin", [pr.witness.rawHeader, pr.witness.package], opA);
-      await exC.send(fresh.book, "openBatch", [pr.witness.anchorId, pr.depositUsers, pr.forced.orders, pr.forced.sigs], opA);
+      await exC.send(fresh.book, "openBatch", [pr.witness.anchorId, pr.depositUsers, pr.forced.orders], opA);
       for (const l of b.log) {
         if (!l.ok) continue;
         const a = l.action as any;
         if (a.kind === "order") await exC.send(fresh.book, "submitOrder", [a.order, a.sig], opA);
-        else await exC.send(fresh.book, "fill", [a.a, a.b], opA);
+        else if (a.kind === "fill") await exC.send(fresh.book, "fill", [a.a, a.b], opA);
+        else await exC.pub.waitForTransactionReceipt({ hash: await exC.rpc<Hex>("eth_sendRawTransaction", [a.tx]) }); // users' own txs, byte for byte
       }
       await exC.send(fresh.book, "seal", [], opA);
     }
@@ -251,7 +300,7 @@ async function run(l1: Chain, exA: Chain, exB: Chain) {
 
   // ==== a forced order: posted on L1, taken in, filled ========================================
   const cf = await order(carol, USD, usd(210), parseEther("0.1"), 4n); // carol sold her ETH in batch 1
-  await l1.send(ch, "forceOrder", [cf.o, cf.sig], carol, "forceOrder");
+  await l1.send(ch, "forceOrder", [cf.o], carol, "forceOrder"); // an ordinary L1 tx from carol
   await l1.rpc("anvil_mine", [toHex(1)]);
   await A.open();
   check(await exA.read(A.book, "resting", [cf.h]), "batch 4 took carol's forced order in from L1 (hash checked against L1)");
@@ -369,7 +418,9 @@ async function run(l1: Chain, exA: Chain, exB: Chain) {
   await place(A, k12);
   await A.seal();
   A.exec.stop();
-  const exA2 = await Chain.anvil(18691, 7001);
+  await new Promise((r) => setTimeout(r, 500));
+  const exA2 = await Chain.anvil(18691, 7001, ["--base-fee", "0", "--gas-limit", "10000000000"]);
+  extraChains.push(exA2);
   A.exec = exA2;
   const r5 = await A.recover(A.current.no, "executor restarted");
   check(r5.status === "recovered", "the runtime rebuilt a fresh executor (adopt from L1 + the pending batch from the journal) and replayed the unproposed one");
@@ -401,7 +452,7 @@ async function run(l1: Chain, exA: Chain, exB: Chain) {
 
   // ==== a forced order nobody serves: freeze, everyone exits ================================
   const cg = await order(carol, USD, usd(100), parseEther("0.04"), 5n);
-  await l1.send(ch, "forceOrder", [cg.o, cg.sig], carol);
+  await l1.send(ch, "forceOrder", [cg.o], carol);
   await l1.rpc("anvil_mine", [toHex(1)]);
   let early = false;
   try { await l1.pub.simulateContract({ account: watcher, address: ch.address, abi: ch.abi, functionName: "freeze", args: [] }); early = true; } catch { /* NotOverdue */ }
@@ -420,6 +471,7 @@ async function run(l1: Chain, exA: Chain, exB: Chain) {
   void ae; void au;
   check(totalEth > 0n && totalUsd > 0n, "every deposit came back out through claims and exits (conservation checked above)");
 
+  gw.stop();
   mkdirSync(`${ROOT}docs/experiments/data`, { recursive: true });
   writeFileSync(`${ROOT}docs/experiments/data/clearing-e2e.json`, JSON.stringify({
     note: "anvil prague L1 (chain 900) + two local executors (operators A and B). Gas = L1 receipt gasUsed; sums for repeated labels.",

@@ -26,10 +26,10 @@ const [ops, aliceAcct, bobAcct, carol] = KEYS.map((k) => privateKeyToAccount(k))
 
 const l1 = defineChain({ id: L1_ID, name: "l1", nativeCurrency: { name: "E", symbol: "E", decimals: 18 }, rpcUrls: { default: { http: [L1_URL] } } });
 const l2 = defineChain({ id: L2_ID, name: "l2", nativeCurrency: { name: "E", symbol: "E", decimals: 18 }, rpcUrls: { default: { http: [L2_URL] } } });
-const pub1 = createPublicClient({ chain: l1, transport: http() });
-const pub2 = createPublicClient({ chain: l2, transport: http() });
-const w1 = (a = ops) => createWalletClient({ account: a, chain: l1, transport: http() });
-const w2 = (a = ops) => createWalletClient({ account: a, chain: l2, transport: http() });
+const pub1 = createPublicClient({ chain: l1, transport: http(), pollingInterval: 50 });
+const pub2 = createPublicClient({ chain: l2, transport: http(), pollingInterval: 50 });
+const w1 = (a = ops) => createWalletClient({ account: a, chain: l1, transport: http(), pollingInterval: 50 });
+const w2 = (a = ops) => createWalletClient({ account: a, chain: l2, transport: http(), pollingInterval: 50 });
 
 function artifact(file: string, name: string): { abi: Abi; bytecode: Hex } {
   const j = JSON.parse(readFileSync(`${ROOT}contracts/out/${file}/${name}.json`, "utf8"));

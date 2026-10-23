@@ -33,6 +33,7 @@
 |---|---|
 | State across snapshots | Batch 1 at price 2000, batch 2 at 2100. Alice's withdrawal request is served at batch 2's start and claimed on L1 while trading goes on. Bob's unfilled order rests across batches. After every batch, a watcher simulates a challenge on every account and fill: nothing to challenge, and L1's account root equals the operator's |
 | Replay | The journal's first two batches replayed on a fresh executor from the pinned proofs give the same `stateDigest` |
+| Standard wallet flow | Through the gateway's JSON-RPC: `eth_chainId` equals the orders' EIP-712 chain; `eth_getBalance` shows ETH in the channel; fees are 0; alice and bob sign orders as typed data and place them with ordinary transactions (viem, as a wallet does: nonce `pending`, fee estimation, `eth_sendRawTransaction`, receipts). Refused with standard errors, consuming no nonce: a plain transfer, a deployment, `fill` (operator-only), a stale-nonce order, someone else's order, `anvil_setBalance`, `eth_sendTransaction`. The users' raw transactions are replayed byte for byte in the journal replay |
 | Fail-closed | A tampered witness, a header that isn't the anchor, and an unproven slot are refused by `L1View` |
 | A wrong proposal | Bob's leaf is off by 1. The watcher finds it and wins the bond with `challengeAccount`; then the honest batch finalizes |
 | Forced order | Taken in from L1 (hash checked), filled, and its status checked on L1 |
@@ -76,6 +77,8 @@
 - **Every design pays the price witness and the anchor once per batch.**
 
 ## Open
+
+- **Real wallet extensions:** MetaMask and Rabby weren't driven here. The e2e uses the same RPC calls a wallet makes (via viem), and the typed-data chain-id rule they enforce is checked.
 
 - **Matching isn't forced:** a forced order must be published, not matched.
 - **Unpublished resting orders** don't survive a handover.

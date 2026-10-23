@@ -28,11 +28,16 @@ export class Chain {
     this.url = url;
     this.chainId = chainId;
     this.chain = defineChain({ id: chainId, name: `chain-${chainId}`, nativeCurrency: { name: "E", symbol: "E", decimals: 18 }, rpcUrls: { default: { http: [url] } } });
-    this.pub = createPublicClient({ chain: this.chain, transport: http(), cacheTime: 0 });
+    // Local nodes mine instantly: poll receipts every 50 ms, not viem's default 4 s.
+    this.pub = createPublicClient({ chain: this.chain, transport: http(), cacheTime: 0, pollingInterval: 50 });
   }
 
   static async anvil(port: number, chainId: number, extra: string[] = []): Promise<Chain> {
     const c = new Chain(`http://127.0.0.1:${port}`, chainId);
+    // Never talk to a stale node left on the port by an earlier run.
+    const busy = await fetch(c.url, { method: "POST", headers: { "content-type": "application/json" }, body: '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' })
+      .then(() => true, () => false);
+    if (busy) throw new Error(`port ${port} is already serving JSON-RPC: stop that node first`);
     c.proc = spawn("anvil", ["--port", `${port}`, "--chain-id", `${chainId}`, "--hardfork", "prague", "--silent", ...extra], { stdio: "ignore" });
     await new Promise((r) => setTimeout(r, 1500));
     return c;
@@ -43,7 +48,7 @@ export class Chain {
   }
 
   wallet(a: PrivateKeyAccount) {
-    return createWalletClient({ account: a, chain: this.chain, transport: http() });
+    return createWalletClient({ account: a, chain: this.chain, transport: http(), pollingInterval: 50 });
   }
 
   rpc<T = any>(method: string, params: unknown[] = []): Promise<T> {

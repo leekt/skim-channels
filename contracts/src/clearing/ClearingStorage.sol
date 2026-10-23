@@ -40,6 +40,7 @@ abstract contract ClearingStorage {
         uint256 maxAnchorAge; // blocks
         uint256 minBond; // per proposal
         uint256 takeoverDelay; // after this long without a proposal, anyone may propose
+        uint256 appChainId; // the app network's chain id: the EIP-712 domain orders are signed in
     }
 
     struct Totals {
@@ -89,6 +90,8 @@ abstract contract ClearingStorage {
     uint256 internal _lastProposalAt;
     Pending internal _pending;
     bool internal _frozen;
+    /// Forced orders were authorized by their trader's own L1 transaction (no typed signature).
+    mapping(bytes32 => bool) internal _forcedAuth;
 
     address internal immutable operator;
     IERC20Lite internal immutable usd;
@@ -103,10 +106,11 @@ abstract contract ClearingStorage {
     uint256 internal immutable maxAnchorAge;
     uint256 internal immutable minBond;
     uint256 internal immutable takeoverDelay;
+    uint256 internal immutable appChainId;
 
     event Deposited(uint32 indexed idx, address user, uint8 token, uint256 amount);
     event WithdrawRequested(uint256 indexed pos, uint32 indexed idx, uint8 token, uint256 amount);
-    event ForcedOrder(uint256 indexed pos, uint32 indexed idx, bytes order, bytes sig);
+    event ForcedOrder(uint256 indexed pos, uint32 indexed idx, bytes order);
     event Proposed(
         uint256 indexed batch,
         bytes32 root,
@@ -154,6 +158,7 @@ abstract contract ClearingStorage {
         maxAnchorAge = c.maxAnchorAge;
         minBond = c.minBond;
         takeoverDelay = c.takeoverDelay;
+        appChainId = c.appChainId;
     }
 
     /// The oldest unserved request or forced order is past its deadline (fixed when made).

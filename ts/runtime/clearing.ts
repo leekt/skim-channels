@@ -12,6 +12,7 @@
 // finalized), so another operator can `adopt` them and continue after the takeover delay.
 import {
   encodeAbiParameters, encodePacked, keccak256, toHex, zeroHash, decodeEventLog, decodeFunctionData, concat,
+  parseTransaction, recoverTransactionAddress,
   type Abi, type Address, type Hex,
 } from "viem";
 import type { PrivateKeyAccount } from "viem/accounts";
@@ -70,11 +71,18 @@ const word = (x: bigint): Hex => toHex(x, { size: 32 });
 const arraySlot = (slot: bigint, i: bigint, width: bigint) => BigInt(keccak256(word(slot))) + i * width;
 const cumInSlot = (idx: number) => keccak256(encodeAbiParameters([{ type: "uint32" }, { type: "uint256" }], [idx, 1n]));
 
-export type Action = { kind: "order"; order: Order; sig: Hex } | { kind: "fill"; a: Hex; b: Hex };
+/**
+ * What the journal replays. `raw` is a user's own signed transaction, accepted through the
+ * RPC gateway (runtime/gateway.ts); replaying the same bytes keeps nonces continuous.
+ */
+export type Action =
+  | { kind: "order"; order: Order; sig: Hex }
+  | { kind: "fill"; a: Hex; b: Hex }
+  | { kind: "raw"; tx: Hex };
 /** Executor state a batch opens from (plans and recoveries start here). */
 export type OpenState = { users: number; reqCursor: number; forcedCursor: number; scannedTo: bigint };
 export type Prepared = {
-  witness: Witness; l1Witness: Witness; forced: { orders: Hex[]; sigs: Hex[] }; depositUsers: number[]; scannedTo: bigint;
+  witness: Witness; l1Witness: Witness; forced: { orders: Hex[] }; depositUsers: number[]; scannedTo: bigint;
 };
 
 
@@ -90,6 +98,7 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
   fin = new Map<number, Account>(); // finalized leaves (L1's committed state, as this operator knows it)
   pendingNext?: { no: bigint; next: Map<number, Account> };
   scannedTo = 0n; // last L1 block scanned for deposits
+  forcedScanFrom = 0n; // where unserved forced orders' events start
 
   constructor(o: {
     view: L1ReadView; exec: Chain; book: C; l1view: C; op: PrivateKeyAccount; l1: Chain; channel: C; anchors: C;
@@ -145,16 +154,17 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
       slots.push(word(s0), word(s0 + 1n));
       users.add(Number(BigInt(await this.view.value(snap, ch, word(s0))) & 0xffffffffn));
     }
-    const forced = { orders: [] as Hex[], sigs: [] as Hex[] };
+    const forced = { orders: [] as Hex[] };
     if (nForced > from.forcedCursor) {
-      const evs = (await this.events("ForcedOrder", 0n, snap.number)).sort((a, b) => Number(a.pos - b.pos));
+      // Forced orders are rare; scan from the last block a known one was in.
+      const evs = (await this.events("ForcedOrder", this.forcedScanFrom, snap.number)).sort((a, b) => Number(a.pos - b.pos));
+      if (evs.length) this.forcedScanFrom = evs[0].block;
       for (let p = from.forcedCursor; p < nForced; p++) {
         const s0 = arraySlot(3n, BigInt(p), 2n);
         slots.push(word(s0), word(s0 + 1n));
         const ev = evs.find((e) => Number(e.pos) === p);
         if (!ev) throw new Error(`forced order ${p}: no event`);
         forced.orders.push(ev.order);
-        forced.sigs.push(ev.sig);
       }
     }
     const depositUsers = [...users].sort((a, b) => a - b);
@@ -168,7 +178,7 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
   protected async openWith(prepared: unknown): Promise<bigint> {
     const p = prepared as Prepared;
     await this.exec.send(this.l1view, "pin", [p.witness.rawHeader, p.witness.package], this.op);
-    await this.exec.send(this.book, "openBatch", [p.witness.anchorId, p.depositUsers, p.forced.orders, p.forced.sigs], this.op);
+    await this.exec.send(this.book, "openBatch", [p.witness.anchorId, p.depositUsers, p.forced.orders], this.op);
     this.scannedTo = p.scannedTo;
     const no = BigInt(await this.exec.read(this.book, "current"));
     this.evidence.pin(`clearing:batch:${no}:${p.witness.anchorId.slice(2, 10)}`, {
@@ -180,7 +190,26 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
 
   protected async run(action: Action) {
     if (action.kind === "order") await this.exec.send(this.book, "submitOrder", [action.order, action.sig], this.op);
-    else await this.exec.send(this.book, "fill", [action.a, action.b], this.op);
+    else if (action.kind === "fill") await this.exec.send(this.book, "fill", [action.a, action.b], this.op);
+    else await this.sendRaw(action.tx);
+  }
+
+  /**
+   * A user's signed transaction, as is. Gas on the executor isn't money (fees settle nowhere),
+   * so the sender is topped up to cover whatever fee the wallet chose before it's sent — the
+   * same deterministic step on every replay. Included-but-reverted still counts as applied:
+   * it consumed the nonce, so replays must send it again.
+   */
+  async sendRaw(tx: Hex) {
+    const t = parseTransaction(tx);
+    const from = await recoverTransactionAddress({ serializedTransaction: tx as any });
+    const price = (t as any).maxFeePerGas ?? (t as any).gasPrice ?? 0n;
+    const need = BigInt(t.gas ?? 0n) * BigInt(price);
+    const have = await this.exec.pub.getBalance({ address: from });
+    if (have < need) await this.exec.rpc("anvil_setBalance", [from, toHex(need)]);
+    const hash = await this.exec.rpc<Hex>("eth_sendRawTransaction", [tx]);
+    await this.exec.pub.waitForTransactionReceipt({ hash });
+    return hash;
   }
 
   protected async sealOne() {
@@ -195,7 +224,7 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
   protected async rebuild() {
     const view = await this.exec.deploy(ROOT_OF(this), this.op, "L1View.sol", "L1View", [BigInt(this.view.chainId)]);
     const [l1v, ch, feed, slot, band] = [view, this.channel.address, this.priceFeed, this.priceSlot, 100n];
-    const book = await this.exec.deploy(ROOT_OF(this), this.op, "ClearingBook.sol", "ClearingBook", [l1v.address, ch, BigInt(this.view.chainId), feed, slot, band, this.op.address]);
+    const book = await this.exec.deploy(ROOT_OF(this), this.op, "ClearingBook.sol", "ClearingBook", [l1v.address, ch, feed, slot, band, this.op.address]);
     this.l1view = view;
     this.book = book;
     const fin = await ClearingOperator.recover(this.l1, this.channel);

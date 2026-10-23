@@ -66,20 +66,23 @@ contract ClearingCodec {
     }
 
     /// Whether a fill breaks ClearingRules (band against the batch's L1 price, limits,
-    /// expiry, same side, same trader) or carries a signature not by its trader.
+    /// expiry, same side, same trader) or carries an order its trader didn't authorize: neither
+    /// a typed signature by the trader nor a forced order the trader posted on L1 (`authA/B`).
     function fillFault(
         R.Order calldata a,
         bytes calldata sigA,
+        bool authA,
         R.Order calldata b,
         bytes calldata sigB,
+        bool authB,
         uint256 l1Price,
         uint256 bandBps,
         uint64 anchorBlock,
         bytes32 domain
     ) external pure returns (bool) {
         return R.check(a, b, l1Price, bandBps, anchorBlock) != R.Reject.None
-            || ChannelTypes.recoverSigner(R.orderDigest(domain, a), sigA) != a.trader
-            || ChannelTypes.recoverSigner(R.orderDigest(domain, b), sigB) != b.trader;
+            || (!authA && ChannelTypes.recoverSigner(R.orderDigest(domain, a), sigA) != a.trader)
+            || (!authB && ChannelTypes.recoverSigner(R.orderDigest(domain, b), sigB) != b.trader);
     }
 
     /// The packed order on side `sideB` of fill `i` (for forced-order statuses).

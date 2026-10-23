@@ -32,7 +32,8 @@ contract ClearingDisputes is ClearingStorage {
             forceDelay,
             maxAnchorAge,
             minBond,
-            takeoverDelay
+            takeoverDelay,
+            appChainId
         );
     }
 
@@ -99,15 +100,19 @@ contract ClearingDisputes is ClearingStorage {
         bool fault = pa.idx >= n || pb.idx >= n;
         if (!fault) {
             Pending storage p = _pending;
+            R.Order memory a = L.toOrder(pa, _users[pa.idx]);
+            R.Order memory b = L.toOrder(pb, _users[pb.idx]);
             fault = codec.fillFault(
-                L.toOrder(pa, _users[pa.idx]),
+                a,
                 sa,
-                L.toOrder(pb, _users[pb.idx]),
+                _forcedAuth[R.orderHash(a)],
+                b,
                 sb,
+                _forcedAuth[R.orderHash(b)],
                 p.price,
                 bandBps,
                 p.anchorBlock,
-                R.domainSeparator(block.chainid, address(this))
+                R.domainSeparator(appChainId, address(this))
             );
         }
         if (!fault) revert NotWrong();

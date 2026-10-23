@@ -6,7 +6,6 @@ import {ClearingDisputes} from "./ClearingDisputes.sol";
 import {ClearingLedger as L} from "./ClearingLedger.sol";
 import {ClearingRules as R} from "./ClearingRules.sol";
 import {SparseTree16} from "../predict/SparseTree16.sol";
-import {ChannelTypes} from "../libraries/ChannelTypes.sol";
 
 /// @notice L1 side of the clearing channel: optimistic, with the app's account state
 ///         committed on L1.
@@ -50,8 +49,11 @@ contract ClearingChannel is ClearingStorage {
         }
     }
 
+    /// Orders are signed for the app network (`appChainId`, the chain wallets are connected to
+    /// when they sign) and this channel. MetaMask-style wallets refuse typed data for any chain
+    /// other than the active one.
     function domain() public view returns (bytes32) {
-        return R.domainSeparator(block.chainid, address(this));
+        return R.domainSeparator(appChainId, address(this));
     }
 
     // ---- users ------------------------------------------------------------------------------
@@ -96,15 +98,17 @@ contract ClearingChannel is ClearingStorage {
         emit WithdrawRequested(pos, idx, token, amount);
     }
 
-    /// @notice Post a signed order on L1 (anyone may relay it). A finalized batch must fill it
-    ///         or publish it as resting within forceDelay.
-    function forceOrder(R.Order calldata o, bytes calldata sig) external {
+    /// @notice The trader posts an order on L1 with an ordinary transaction (msg.sender is the
+    ///         authorization: no typed signature, so it works from a wallet connected to L1).
+    ///         A finalized batch must fill it or publish it as resting within forceDelay.
+    function forceOrder(R.Order calldata o) external {
         uint32 idx = _indexPlusOne[o.trader];
-        if (_frozen || idx == 0) revert WrongState();
-        if (ChannelTypes.recoverSigner(R.orderDigest(domain(), o), sig) != o.trader) revert BadProof();
+        if (_frozen || idx == 0 || msg.sender != o.trader) revert WrongState();
+        bytes32 h = R.orderHash(o);
         uint256 pos = _forced.length;
-        _forced.push(Forced(R.orderHash(o), uint64(block.timestamp)));
-        emit ForcedOrder(pos, idx - 1, L.encodeOrder(idx - 1, o), sig);
+        _forced.push(Forced(h, uint64(block.timestamp)));
+        _forcedAuth[h] = true;
+        emit ForcedOrder(pos, idx - 1, L.encodeOrder(idx - 1, o));
     }
 
     // ---- batches ----------------------------------------------------------------------------

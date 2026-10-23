@@ -88,6 +88,30 @@ The two paths are separate:
 - **Freeze:** a request or forced order unserved past `forceDelay` (≥ 1 day) lets anyone freeze. Every user then `exit`s from L1 with their finalized balances, unapplied deposits and released withdrawals.
 - **Handover:** after `takeoverDelay` without a proposal, anyone with a bond proposes.
 
+## Wallets: a standard JSON-RPC (`ts/runtime/gateway.ts`)
+
+The app network serves the same JSON-RPC as other L2s, so MetaMask, Rabby, viem or cast connect to it like any EVM network. What a user can do there is limited to the app.
+
+| | |
+|---|---|
+| Add the network | `wallet_addEthereumChain`: `chainId` = the app network's id (the executor's, e.g. 7001), `rpcUrls` = the gateway, `nativeCurrency` ETH/18 |
+| Reads | `eth_chainId`, `eth_blockNumber`, `eth_getBlockBy*`, `eth_call`, `eth_estimateGas`, `eth_getTransactionCount`, `eth_getTransactionBy*`/`Receipt`, `eth_getLogs`, `eth_getCode`, `eth_getStorageAt`, `eth_feeHistory`, `net_*`, `web3_clientVersion` |
+| Balance | `eth_getBalance` is the account's ETH **in the channel**: what the user can trade or withdraw |
+| Fees | 0 (`eth_gasPrice`, `eth_maxPriorityFeePerGas`, base fee). Gas on the app network settles nowhere; L1 costs are the operator's |
+| Writes | `eth_sendRawTransaction` only: an ordinary signed transaction, to `ClearingBook`, calling `submitOrder` (the sender's own order) or `cancel`, with no value, on this chain, and only if it succeeds in simulation |
+| Refused | Other contracts and functions (e.g. `fill`, operator-only), value transfers, deployments, `eth_sendTransaction` / `eth_sign*` (the node holds no keys), and the executor's debug and cheat methods (`anvil_*`, `evm_*`, `debug_*`, …), each with a standard JSON-RPC error |
+| App methods | `clearing_account(address)` (pending and finalized), `clearing_order(hash)`, `clearing_batches()` |
+
+**Placing an order takes two wallet actions:**
+1. Sign the order as EIP-712 typed data (`eth_signTypedData_v4`). The domain is `SkimClearing`, chain = the app network's chain id, and `verifyingContract` = the L1 channel. Wallets only sign typed data for the active chain, so the domain uses the app network's id, which L1 also checks (`appChainId`).
+2. Send `submitOrder(order, signature)` as a normal transaction.
+
+The typed signature is what L1 checks in a dispute.
+
+**What goes to L1:** deposits, withdrawal requests and forced orders are L1 transactions, sent from the same wallet on L1. A forced order is authorized by the trader's own L1 transaction (`msg.sender`), so it needs no typed signature for another chain.
+
+**Replays:** every accepted transaction enters the batch journal as its raw bytes and is replayed byte for byte on recovery. Transactions that would revert are refused before inclusion, so they never consume a nonce.
+
 ## What's not built
 
 - **Matching guarantees:** a forced order must be published, but nothing forces it to be matched.
@@ -103,3 +127,5 @@ $ cargo build -p channel-runner
 $ cd ts && npm run e2e-clearing                          # deterministic: anvil L1 + local executors
 $ SKIM_RPC=http://127.0.0.1:8545 npm run live-skim      # live: a skim node following Sepolia
 ```
+
+A wallet connects to the gateway's URL (`new Gateway(operator, port)`; the e2e serves one on `127.0.0.1:18695` while it runs). The executor behind it must not be reachable directly: it has cheat methods.

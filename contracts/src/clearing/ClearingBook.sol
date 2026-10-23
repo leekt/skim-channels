@@ -28,8 +28,9 @@ contract ClearingBook {
 
     struct Resting {
         L.PackedOrder o;
-        bytes sig;
+        bytes sig; // 65 zero bytes for a forced order (its trader authorized it on L1)
         uint256 forcedPlusOne; // position in L1's forced queue + 1, or 0
+        bool live;
     }
 
     struct Batch {
@@ -89,7 +90,6 @@ contract ClearingBook {
     constructor(
         L1View l1_,
         address channel_,
-        uint256 l1ChainId,
         address priceFeed_,
         bytes32 priceSlot_,
         uint256 bandBps_,
@@ -101,7 +101,8 @@ contract ClearingBook {
         priceSlot = priceSlot_;
         bandBps = bandBps_;
         operator = operator_;
-        domain = R.domainSeparator(l1ChainId, channel_);
+        // Orders are signed for this chain (the network wallets connect to) and the L1 channel.
+        domain = R.domainSeparator(block.chainid, channel_);
     }
 
     modifier onlyOperator() {
@@ -159,12 +160,10 @@ contract ClearingBook {
     ///         withdrawal request (as far as a user's per-batch limit allows), and takes the
     ///         new forced orders (data relayed from L1 events, checked against L1's hashes)
     ///         into the book.
-    function openBatch(
-        bytes32 anchor,
-        uint32[] calldata depositUsers,
-        bytes[] calldata forcedOrders,
-        bytes[] calldata forcedSigs
-    ) external onlyOperator {
+    function openBatch(bytes32 anchor, uint32[] calldata depositUsers, bytes[] calldata forcedOrders)
+        external
+        onlyOperator
+    {
         if (current != 0 && !batches[current].sealed_) revert BatchOpen();
         uint256 b = ++current;
         Batch storage bt = batches[b];
@@ -176,7 +175,7 @@ contract ClearingBook {
             _deposit(b, anchor, depositUsers[i]);
         }
         _serveRequests(b, anchor);
-        _takeForced(b, anchor, forcedOrders, forcedSigs);
+        _takeForced(b, anchor, forcedOrders);
         _step(keccak256(abi.encode("open", b, anchor)));
         emit Opened(b, anchor, bt.price);
     }
@@ -212,21 +211,21 @@ contract ClearingBook {
 
     mapping(uint256 => mapping(uint32 => uint256)) internal _perUser;
 
-    function _takeForced(uint256 b, bytes32 anchor, bytes[] calldata orders, bytes[] calldata sigs) internal {
+    function _takeForced(uint256 b, bytes32 anchor, bytes[] calldata orders) internal {
         Batch storage bt = batches[b];
         uint256 n = _l1(anchor, SLOT_FORCED);
         uint64 pos = forcedCursor;
         bt.forcedFrom = pos;
-        if (orders.length != n - pos || sigs.length != orders.length) revert ForcedMismatch(pos);
+        if (orders.length != n - pos) revert ForcedMismatch(pos);
         for (uint256 k; pos < n; ++pos) {
             L.PackedOrder memory p = L.decodeOrder(orders[k]);
             if (p.idx >= users.length) revert UnknownTrader();
             bytes32 h = R.orderHash(L.toOrder(p, users[p.idx]));
             if (bytes32(_l1(anchor, _arraySlot(SLOT_FORCED, pos, 2))) != h) revert ForcedMismatch(pos);
-            if (book[h].sig.length != 0) {
+            if (book[h].live) {
                 book[h].forcedPlusOne = pos + 1; // already relayed off-chain: now also forced
             } else if (!consumed[h]) {
-                book[h] = Resting(p, sigs[k], pos + 1);
+                book[h] = Resting(p, new bytes(65), pos + 1, true);
             } // consumed earlier: L1 sees it published as resting, which is harmless
 
             ++k;
@@ -240,11 +239,23 @@ contract ClearingBook {
         uint32 ip = indexPlusOne[o.trader];
         if (ip == 0) revert UnknownTrader();
         h = R.orderHash(o);
-        if (consumed[h] || book[h].sig.length != 0) revert AlreadySeen();
+        if (consumed[h] || book[h].live) revert AlreadySeen();
         if (ChannelTypes.recoverSigner(R.orderDigest(domain, o), sig) != o.trader) revert BadSignature();
         if (o.nonce <= accounts[ip - 1].nonce) revert StaleNonce();
-        book[h] = Resting(L.PackedOrder(ip - 1, o.sellToken, o.sellAmount, o.buyAmount, o.nonce, o.expiry), sig, 0);
+        book[h] =
+            Resting(L.PackedOrder(ip - 1, o.sellToken, o.sellAmount, o.buyAmount, o.nonce, o.expiry), sig, 0, true);
         _step(keccak256(abi.encode("order", h)));
+    }
+
+    /// The trader withdraws a resting order (AppState only: it was never on L1).
+    function cancel(bytes32 h) external {
+        Resting storage r = book[h];
+        if (!r.live) revert UnknownOrder();
+        if (users[r.o.idx] != msg.sender) revert NotOperator();
+        if (r.forcedPlusOne != 0) revert ForcedMismatch(r.forcedPlusOne - 1); // L1 must see it published
+        consumed[h] = true;
+        delete book[h];
+        _step(keccak256(abi.encode("cancel", h)));
     }
 
     function fill(bytes32 ha, bytes32 hb) external onlyOperator {
@@ -253,7 +264,7 @@ contract ClearingBook {
         if (b == 0 || bt.sealed_) revert NoBatch();
         Resting memory ra = book[ha];
         Resting memory rb = book[hb];
-        if (ra.sig.length == 0 || rb.sig.length == 0) revert UnknownOrder();
+        if (!ra.live || !rb.live) revert UnknownOrder();
         R.Reject why = R.check(
             L.toOrder(ra.o, users[ra.o.idx]), L.toOrder(rb.o, users[rb.o.idx]), bt.price, bandBps, bt.anchorBlock
         );
@@ -334,7 +345,7 @@ contract ClearingBook {
     }
 
     function resting(bytes32 h) external view returns (bool) {
-        return book[h].sig.length != 0;
+        return book[h].live;
     }
 
     function userCount() external view returns (uint256) {
