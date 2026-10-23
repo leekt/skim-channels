@@ -171,7 +171,8 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
   readonly l1: Chain; readonly channel: C; readonly anchors: C; readonly feed: Feed; readonly maxStaleness: bigint;
   readonly evidence: EvidenceStore; readonly bond: bigint;
   fin = new Map<number, Account>(); // finalized leaves (L1's committed state, as this operator knows it)
-  pendingNext?: { b: JournalBatch<Action, OpenState>; next: Map<number, Account> };
+  /** The pending proposal's new leaves (and its journal batch, if this journal has it). */
+  pendingNext?: { b?: JournalBatch<Action, OpenState>; next: Map<number, Account> };
   readonly startBlock: bigint; // the channel's deployment block: no event of it is older
   readonly nextBlock: () => Promise<unknown>;
   scannedTo = 0n; // last L1 block scanned for deposits
@@ -381,15 +382,16 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
     // The finalized leaves this operator kept (adopt checks them against L1's root), else L1's history.
     const fin = this.fin.size ? new Map(this.fin) : await ClearingOperator.recover(this.l1, this.channel, this.startBlock);
     const pend = await this.l1.read<any>(this.channel, "pending");
-    const b = this.batches.findLast((x) => x.state === "proposed" && (x.prepared as Prepared).proposed);
+    const b = this.batches.findLast((x) => x.state === "proposed");
     if (pend.at !== 0n) {
       // Its leaves: from the journal, else from the proposal's own calldata on L1.
-      const next = b ? new Map((b.prepared as Prepared).proposed) : await ClearingOperator.pendingLeaves(this.l1, this.channel, this.startBlock);
+      const kept = (b?.prepared as Prepared | undefined)?.proposed;
+      const next = kept ? new Map(kept) : await ClearingOperator.pendingLeaves(this.l1, this.channel, this.startBlock);
       const merged = new Map(fin);
       for (const [k, v] of next) merged.set(k, v);
       await this.adopt(merged, true);
       this.fin = fin;
-      if (b) this.pendingNext = { b, next };
+      this.pendingNext = { b, next }; // also when the leaves came from L1: they become final
     } else {
       await this.adopt(fin);
     }
@@ -480,11 +482,25 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
     return { ...p, receipt: r };
   }
 
-  /** After L1 finalizes (anyone can call finalize): the operator's view of the committed state. */
+  /**
+   * After L1 finalizes (anyone can call finalize): the operator's view of the committed state.
+   * Checked against L1's finalized root; if the proposal was discarded instead (or anything
+   * else differs), the finalized leaves are taken from L1's history.
+   */
   async finalized() {
     if (!this.pendingNext) return;
-    for (const [k, v] of this.pendingNext.next) this.fin.set(k, v);
-    this.pendingNext.b.state = "finalized";
+    const fin = new Map(this.fin);
+    for (const [k, v] of this.pendingNext.next) fin.set(k, v);
+    const [root] = await this.l1.read<any[]>(this.channel, "state");
+    const n = Number(await this.l1.read(this.channel, "userCount"));
+    const mine = rootOf(levels(Array.from({ length: n }, (_, i) => leafHash(fin.get(i) ?? EMPTY))));
+    if (mine === root) {
+      this.fin = fin;
+      if (this.pendingNext.b) this.pendingNext.b.state = "finalized";
+    } else {
+      this.fin = await ClearingOperator.recover(this.l1, this.channel, this.startBlock);
+      if (this.pendingNext.b) this.pendingNext.b.state = "discarded";
+    }
     this.save();
     this.pendingNext = undefined;
   }

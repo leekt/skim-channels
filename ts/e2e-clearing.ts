@@ -422,7 +422,8 @@ async function run(l1: Chain) {
   await place(A, a7); await place(A, k11);
   await fill(A, a7, k11);
   await A.seal();
-  const pending = await A.propose(cur(), { label: "propose (pending at crash)" });
+  const pendingNo = cur();
+  const pending = await A.propose(pendingNo, { label: "propose (pending at crash)" });
   await watch(A, pending);
   await l1.rpc("anvil_mine", [toHex(1)]);
   await A.open();
@@ -432,11 +433,15 @@ async function run(l1: Chain) {
   A.exec.stop();
   await new Promise((r) => setTimeout(r, 500));
   A.exec = await executor(18691);
+  // As after a process restart with an older journal: the pending batch's leaves aren't in the
+  // journal, so the rebuild takes them from the proposal's calldata on L1.
+  delete (A.batch(pendingNo)!.prepared as any).proposed;
   const r5 = await A.recover(A.current.no, "executor restarted");
   check(r5.status === "recovered", "the runtime rebuilt a fresh executor without any old block: L1's finalized leaves plus the pending proposal's (checked against L1's pending root), then replayed the unproposed batch at the current head");
   await time(WINDOW);
   await l1.send(ch, "finalize", [], watcher);
   await A.finalized();
+  check(A.batch(pendingNo)!.state === "finalized", "once L1 finalizes it, the operator's finalized view includes those leaves (checked against L1's root)");
   await settle(A, cur(), "#10 (after executor rebuild)");
 
   // ==== operator A goes silent; B takes over from L1 data alone =============================
