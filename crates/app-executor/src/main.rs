@@ -21,6 +21,9 @@ struct Args {
     /// L1 accounts the app imports. Every other address is app-local.
     #[arg(long = "import")]
     imports: Vec<Address>,
+    /// L1 accounts the app imports read-only: no overlay writes, so reads are always L1's.
+    #[arg(long = "import-readonly")]
+    readonly: Vec<Address>,
     /// The first pin: a tag (latest, safe, finalized), a number, or a block hash.
     #[arg(long, default_value = "latest")]
     pin: String,
@@ -42,6 +45,7 @@ fn main() {
         &a.l1,
         a.chain_id,
         a.imports.into_iter().collect::<BTreeSet<_>>(),
+        a.readonly.into_iter().collect::<BTreeSet<_>>(),
         &a.pin,
     )
     .unwrap_or_else(|e| fail(e));

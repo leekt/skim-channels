@@ -4,6 +4,7 @@
 //! | Attempt | Rule |
 //! |---|---|
 //! | `SSTORE` in an imported storage context (the frame's target address, so DELEGATECALL is checked against the proxy's storage, not the library's) | L1 value at the pin proven non-zero: the frame reverts with `L1SlotProtected(account, slot)`. Proven zero: allowed, into the overlay. Not fetchable: the whole transaction fails (no frame can catch it) |
+//! | `SSTORE` in a read-only import's storage context | reverts with `L1ReadOnly(account, slot)`, whatever the L1 value |
 //! | `SSTORE` under STATICCALL | Untouched here: the EVM's own static rule refuses it |
 //! | A value transfer from or to an imported account (CALL, CALLCODE, the transaction itself) | reverts with `L1AccountProtected(account)` |
 //! | `CREATE`/`CREATE2` by an imported account (its nonce would change) | reverts with `L1AccountProtected(account)` |
@@ -30,6 +31,7 @@ use crate::db::{Db, DbError};
 sol! {
     error L1SlotProtected(address account, bytes32 slot);
     error L1AccountProtected(address account);
+    error L1ReadOnly(address account, bytes32 slot);
 }
 
 const SSTORE: u8 = 0x55;
@@ -98,6 +100,16 @@ impl<'a> Inspector<MainnetContext<Db<'a>>> for Guard {
         let Ok(slot) = interp.stack.peek(0) else {
             return;
         };
+        if db.is_readonly(&target) {
+            let data = Bytes::from(
+                L1ReadOnly {
+                    account: target,
+                    slot: slot.into(),
+                }
+                .abi_encode(),
+            );
+            return revert(interp, data);
+        }
         match db.base_slot(target, slot) {
             Ok(v) if v.is_zero() => {}
             Ok(_) => revert(interp, slot_protected(target, slot)),

@@ -11,7 +11,7 @@ import { Chain } from "./runtime/executor.ts";
 const ROOT = new URL("..", import.meta.url).pathname;
 const owner = privateKeyToAccount("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"); // L1 deployer
 const appUser = privateKeyToAccount("0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba");
-const ERRORS = parseAbi(["error L1SlotProtected(address account, bytes32 slot)", "error L1AccountProtected(address account)"]);
+const ERRORS = parseAbi(["error L1SlotProtected(address account, bytes32 slot)", "error L1AccountProtected(address account)", "error L1ReadOnly(address account, bytes32 slot)"]);
 const IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
 
 let failures = 0;
@@ -45,7 +45,10 @@ try {
   await l1.send(proxy, "set", [7n], owner);
   const other = await l1.deploy(ROOT, owner, "Probes.sol", "L1Feed", [5n]);
 
-  app = await Chain.appExecutor(ROOT, 18942, 7001, l1.url, [feed.address, proxy.address, impl.address, owner.address], "latest", [[appUser.address, 10n ** 18n]]);
+  const ro = await l1.deploy(ROOT, owner, "Probes.sol", "L1Feed", [9n]); // e.g. a price feed
+  app = await Chain.appExecutor(ROOT, 18942, 7001, l1.url, {
+    imports: [feed.address, proxy.address, impl.address, owner.address], readonly: [ro.address], alloc: [[appUser.address, 10n ** 18n]],
+  });
   const pin0 = await app.rpc("executor_status");
   const probe = await app.deploy(ROOT, appUser, "Probes.sol", "AppProbe");
   const call = (fn: string, args: unknown[] = [], value?: bigint) => app!.pub.readContract({ address: probe.address, abi: [...probe.abi, ...ERRORS], functionName: fn, args, account: appUser.address, ...(value ? { value } : {}) } as any) as Promise<any>;
@@ -79,6 +82,9 @@ try {
     "writing it again is allowed: the check is against L1's value (0), not the overlay's (99)");
   check((await l1.read<bigint>(proxy, "notes", [5n])) === 0n, "L1 itself is unchanged");
   check((await call("staticNote", [proxy.address, 6n, 1n])) === false, "under STATICCALL the same write fails, as on any EVM");
+  const rd = decoded(await rejects(call("tryNote", [ro.address, 5n, 1n])));
+  check(rd?.errorName === "L1ReadOnly" && (await call("read", [ro.address])) === 9n,
+    "a read-only import takes no overlay write, even to a slot that is zero on L1: L1ReadOnly; it still reads L1's value (9)");
   const pay = decoded(await rejects(call("pay", [feed.address], 1n)));
   check(pay?.errorName === "L1AccountProtected", "sending ETH to an imported account reverts: L1AccountProtected");
   const ownerTx = await rejects(app.wallet(owner).sendTransaction({ to: probe.address, data: "0x", gas: 100_000n }));

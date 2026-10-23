@@ -2,9 +2,11 @@
 // ETH/USD proxy at its Sepolia address; the executor reads the proxy and its aggregator from
 // skim with proofs at the pin. Read-only on Sepolia: nothing is sent there.
 // Run: SKIM_RPC=http://127.0.0.1:18545 npm run live-executor
-import { createPublicClient, http, type Address } from "viem";
+import { createPublicClient, http, type Address, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { Chain } from "./runtime/executor.ts";
+import { L1ReadView } from "./runtime/l1view.ts";
+import { AGG_HOT_SLOT, PROXY_PHASE_SLOT, transmissionSlot } from "./runtime/clearing.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const SKIM = process.env.SKIM_RPC ?? "http://127.0.0.1:18545";
@@ -19,7 +21,7 @@ let failures = 0;
 function check(c: unknown, m: string) { console.log(`${c ? "ok  " : "FAIL"} ${m}`); if (!c) failures++; }
 
 async function run(imports: Address[], port: number) {
-  const app = await Chain.appExecutor(ROOT, port, 7001, SKIM, imports, "latest");
+  const app = await Chain.appExecutor(ROOT, port, 7001, SKIM, { readonly: imports });
   const reader = await app.deploy(ROOT, user, "Probes.sol", "FeedReader");
   return { app, reader };
 }
@@ -33,6 +35,16 @@ try {
   const onSepolia = await skim.readContract({ address: PROXY, abi: ABI, functionName: "latestRoundData", blockNumber: BigInt(st.pin.number) });
   check(answer === onSepolia[1] && updatedAt === onSepolia[3],
     `the app's latestRoundData() through Chainlink's Sepolia proxy = ${Number(answer) / 1e8} USD (updated ${new Date(Number(updatedAt) * 1000).toISOString()}), same as Sepolia at block ${st.pin.number} (${ms} ms, cold)`);
+  // The L1 adapter's view of the same block: the proxy's phase slot names the aggregator,
+  // whose latest round and answer must decode to what the executor's call returned.
+  const view = new L1ReadView({ url: SKIM, chainId: 11155111, cli: `${ROOT}target/debug/skim-channels` });
+  const snap = { chainId: 11155111, number: BigInt(st.pin.number), hash: st.pin.hash, parentHash: "0x" as Hex, stateRoot: st.pin.stateRoot, policy: { kind: "latest" } as const, speculative: true };
+  const phase = await view.value(snap, PROXY, PROXY_PHASE_SLOT);
+  const round = (await view.value(snap, AGGREGATOR, AGG_HOT_SLOT)) >> 176n & 0xffffffffn;
+  const t = await view.value(snap, AGGREGATOR, transmissionSlot(round));
+  const wit = view.witness(snap, [{ account: PROXY, slots: [PROXY_PHASE_SLOT] }, { account: AGGREGATOR, slots: [AGG_HOT_SLOT, transmissionSlot(round)] }]);
+  check(BigInt(`0x${(phase >> 16n).toString(16).padStart(40, "0")}`) === BigInt(AGGREGATOR) && (t & ((1n << 192n) - 1n)) === answer && (t >> 192n) === updatedAt,
+    `the slots ChainlinkAdapter verifies at that block decode to the same answer and time (price witness: ${(wit.package.length - 2) / 2} bytes, verified by the CLI)`);
   const ev = await app.rpc("executor_evidence");
   console.log(`     evidence: ${ev.accounts.length} accounts (${ev.accounts.map((a: any) => `${a.address.slice(0, 8)}… ${a.codeBytes} B code`).join(", ")}), ${ev.slots.length} slots, ${(ev.package.length - 2) / 2} bytes`);
 

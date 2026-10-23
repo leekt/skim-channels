@@ -111,6 +111,7 @@ impl Executor {
         l1_url: &str,
         chain_id: u64,
         imported: BTreeSet<Address>,
+        readonly: BTreeSet<Address>,
         pin: &str,
     ) -> Result<Self, String> {
         let l1 = Rpc::new(l1_url);
@@ -125,7 +126,9 @@ impl Executor {
         .map_err(|e| e.to_string())?;
         let h = fetch_header(&l1, pin).map_err(|e| e.to_string())?;
         let anchor = anchor_of(l1_chain_id, &h);
+        let imported = imported.union(&readonly).copied().collect();
         let mut db = AppDb::new(Arc::new(SkimRpc::new(l1_url)), anchor, imported);
+        db.readonly = readonly;
         let genesis = Block {
             number: 0,
             hash: keccak256(b"app-executor genesis"),
@@ -281,14 +284,16 @@ impl Executor {
             tx_type: env.ty(),
             caller: from,
             gas_limit: env.gas_limit(),
-            gas_price: env.max_fee_per_gas(),
+            // Fees are 0 on the app network whatever the wallet signed: gas settles nowhere,
+            // and no app-local balance is ever needed to pay for it.
+            gas_price: 0,
             kind: env.kind(),
             value: env.value(),
             data: env.input().clone(),
             nonce: env.nonce(),
             chain_id: env.chain_id(),
             access_list: env.access_list().cloned().unwrap_or_default(),
-            gas_priority_fee: env.max_priority_fee_per_gas(),
+            gas_priority_fee: env.max_priority_fee_per_gas().map(|_| 0),
             ..Default::default()
         };
         let (result, changes) = self.run(tx, true)?;
@@ -380,6 +385,7 @@ impl Executor {
         json!({
             "pin": self.pin_json(db.overlay.len()),
             "imported": db.imported,
+            "readonly": db.readonly,
             "overlay": db.overlay.iter().map(|((a, s), v)| json!({"account": a, "slot": B256::from(*s), "value": v})).collect::<Vec<_>>(),
         })
     }

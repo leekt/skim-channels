@@ -11,6 +11,9 @@
 //! - **Everything else is app-local.** An address that isn't imported starts empty here,
 //!   whatever it holds on L1, so L1 balances are never spendable on the app.
 //!
+//! - **Read-only imports** (e.g. a price feed the app's settlement checks against L1 itself)
+//!   take no overlay writes at all, so what the app reads there is always L1's value.
+//!
 //! Every verified entry is kept as evidence for the pin: accounts (with code where it ran),
 //! storage read, and the zero proofs behind overlay writes.
 
@@ -62,6 +65,8 @@ pub struct LocalAccount {
 pub struct AppDb {
     pub anchor: L1Anchor,
     pub imported: BTreeSet<Address>,
+    /// Imported accounts that take no overlay writes (a subset of `imported`).
+    pub readonly: BTreeSet<Address>,
     pub local: HashMap<Address, LocalAccount>,
     /// App writes into imported accounts' storage, at slots whose L1 value is zero.
     pub overlay: BTreeMap<(Address, U256), U256>,
@@ -76,6 +81,7 @@ impl AppDb {
         Self {
             anchor,
             imported,
+            readonly: BTreeSet::new(),
             local: HashMap::new(),
             overlay: BTreeMap::new(),
             base: Base::default(),
@@ -87,6 +93,10 @@ impl AppDb {
 
     pub fn is_imported(&self, a: &Address) -> bool {
         self.imported.contains(a)
+    }
+
+    pub fn is_readonly(&self, a: &Address) -> bool {
+        self.readonly.contains(a)
     }
 
     fn fetch(&mut self, addr: Address, slots: &[B256], code: bool) -> Result<(), DbError> {
@@ -184,6 +194,9 @@ impl AppDb {
             }
             for (slot, v) in acc.changed_storage_slots() {
                 let _ = v;
+                if self.is_readonly(addr) {
+                    return Err(format!("imported account {addr} is read-only"));
+                }
                 if !self
                     .base_slot(*addr, *slot)
                     .map_err(|e| e.to_string())?
