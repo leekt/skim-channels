@@ -292,9 +292,9 @@ async function run(l1: Chain, exA: Chain, exB: Chain) {
   const bad = await A.propose(3n, { tamper: (m) => { const x = m.get(ib) ?? A.fin.get(ib)!; m.set(ib, { ...x, usd: x.usd + 1n }); } });
   const w = await watch(A, bad, 1);
   check(w.faults.includes(ib), `the watcher finds bob's leaf wrong (faults: ${w.faults.join(",")})`);
-  const wb = await l1.pub.getBalance({ address: watcher.address });
+  const wb = await l1.read<bigint>(ch, "bondCredit", [watcher.address]);
   await l1.send(ch, "challengeAccount", [ib, A.fin.get(ib)!, siblings(levels(w.finDense), ib), bad.next.get(ib)!, siblings(levels(w.nextDense), ib), bad.fills], watcher, "challengeAccount");
-  check((await l1.pub.getBalance({ address: watcher.address })) > wb, "challenge won: the batch is discarded and the bond paid to the watcher");
+  check((await l1.read<bigint>(ch, "bondCredit", [watcher.address])) === wb + parseEther("1"), "challenge won: the batch is discarded and the bond credited to the watcher");
   await l1.rpc("evm_revert", [snapL1]);
   await settle(A, 3n, "#3 (0 fills)");
 
@@ -464,7 +464,10 @@ async function run(l1: Chain, exA: Chain, exB: Chain) {
     await l1.send(ch, "exit", [i, B.fin.get(i) ?? EMPTY, siblings(levels(dense), i)], watcher, "exit");
     void who;
   }
-  check((await l1.pub.getBalance({ address: ch.address })) === 0n, "after exits the channel holds no ETH");
+  for (const a of [opA, opB, watcher]) {
+    if ((await l1.read<bigint>(ch, "bondCredit", [a.address])) > 0n) await l1.send(ch, "withdrawBond", [], a, "withdrawBond");
+  }
+  check((await l1.pub.getBalance({ address: ch.address })) === 0n, "after exits and bond withdrawals the channel holds no ETH");
   check((await l1.read<bigint>(token, "balanceOf", [ch.address])) === 0n, "and no USD");
   const out = async (a: Address) => [await l1.pub.getBalance({ address: a }), await l1.read<bigint>(token, "balanceOf", [a])];
   const [ae, au] = await out(alice.address);

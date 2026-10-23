@@ -56,19 +56,22 @@ contract ClearingDisputes is ClearingStorage {
         return _pending;
     }
 
+    function bondCredit(address a) external view returns (uint256) {
+        return _bondCredit[a];
+    }
+
     modifier viaChannel() {
         if (address(this) == self) revert WrongState();
         _;
     }
 
-    /// Discard the pending proposal; its bond goes to `to` (a challenger, or back to the
-    /// proposer when a freeze stops settlement).
+    /// Discard the pending proposal; its bond is credited to `to` (a challenger, or back to
+    /// the proposer when a freeze stops settlement).
     function _discard(address to, string memory reason) internal {
         Pending memory p = _pending;
         delete _pending;
         emit Discarded(_batches + 1, to, reason);
-        (bool ok,) = to.call{value: p.bond}("");
-        if (!ok) revert TransferFailed();
+        _creditBond(to, p.bond);
     }
 
     /// @notice Withdrawals released in the finalized leaf, not yet paid.

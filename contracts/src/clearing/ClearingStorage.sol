@@ -92,6 +92,9 @@ abstract contract ClearingStorage {
     bool internal _frozen;
     /// Forced orders were authorized by their trader's own L1 transaction (no typed signature).
     mapping(bytes32 => bool) internal _forcedAuth;
+    /// Bonds owed back (refunds and challenge rewards), paid on request: a proposer that
+    /// can't receive ETH never blocks finalize or freeze.
+    mapping(address => uint256) internal _bondCredit;
 
     address internal immutable operator;
     IERC20Lite internal immutable usd;
@@ -125,6 +128,7 @@ abstract contract ClearingStorage {
     event Discarded(uint256 indexed batch, address challenger, string reason);
     event Frozen(uint256 overdueRequest, uint256 overdueForced);
     event Paid(uint32 indexed idx, uint8 token, uint256 amount);
+    event BondCredited(address indexed to, uint256 amount);
 
     error WrongState();
     error BadPolicy();
@@ -159,6 +163,12 @@ abstract contract ClearingStorage {
         minBond = c.minBond;
         takeoverDelay = c.takeoverDelay;
         appChainId = c.appChainId;
+    }
+
+    function _creditBond(address to, uint256 amount) internal {
+        if (amount == 0) return;
+        _bondCredit[to] += amount;
+        emit BondCredited(to, amount);
     }
 
     /// The oldest unserved request or forced order is past its deadline (fixed when made).

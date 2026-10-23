@@ -175,7 +175,8 @@ contract ClearingChannel is ClearingStorage {
         emit Proposed(_batches + 1, root, msg.sender, price, anchorBlock, reqCursor, forcedCursor);
     }
 
-    /// @notice Anyone, after the window: the pending root becomes final; the bond returns.
+    /// @notice Anyone, after the window: the pending root becomes final; the bond is credited
+    ///         back to the proposer (withdrawBond).
     function finalize() external {
         Pending memory p = _pending;
         if (_frozen || p.at == 0 || block.timestamp < p.at + challengeWindow) revert WrongState();
@@ -185,7 +186,14 @@ contract ClearingChannel is ClearingStorage {
         _batches += 1;
         delete _pending;
         emit Finalized(_batches, p.root);
-        (bool ok,) = p.proposer.call{value: p.bond}("");
+        _creditBond(p.proposer, p.bond);
+    }
+
+    function withdrawBond() external {
+        uint256 b = _bondCredit[msg.sender];
+        if (b == 0) revert WrongState();
+        delete _bondCredit[msg.sender];
+        (bool ok,) = msg.sender.call{value: b}("");
         if (!ok) revert TransferFailed();
     }
 

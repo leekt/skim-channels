@@ -15,6 +15,22 @@ import {WitnessVerifier} from "../../src/verifiers/WitnessVerifier.sol";
 
 /// Shared setup for the v2 clearing channel: L1 price 7000 (fixture slot 0 at block 101),
 /// three users, and a model of the finalized account tree.
+/// A proposer that can't receive ETH (its bond refund must not block anything).
+contract Unpayable {
+    function propose(ClearingChannel ch, bytes calldata data) external payable {
+        (bool ok, bytes memory err) = address(ch).call{value: msg.value}(data);
+        if (!ok) {
+            assembly {
+                revert(add(err, 32), mload(err))
+            }
+        }
+    }
+
+    function withdrawBond(ClearingChannel ch) external {
+        ch.withdrawBond();
+    }
+}
+
 abstract contract ClearingChannelBase is Test {
     uint256 constant ETH1 = 1 ether;
     ClearingChannel ch;
@@ -206,9 +222,12 @@ contract ClearingChannelTest is ClearingChannelBase {
             vm.expectRevert(ClearingStorage.NotWrong.selector);
             _challengeAccount(i, n, fills); // carol's untouched leaf too
         }
-        uint256 before = op.balance;
         _finalize(n);
-        assertEq(op.balance - before, 1 ether, "bond returned");
+        assertEq(D.bondCredit(op), 1 ether, "bond credited back");
+        uint256 before = op.balance;
+        vm.prank(op);
+        ch.withdrawBond();
+        assertEq(op.balance - before, 1 ether, "and withdrawn");
         // Batch 2 continues from the committed state.
         L.Account[] memory m = _copyFin();
         m[0] = L.Account(1 ether, 14_000, 3 ether, 0, 0, 0, 2, 0);
@@ -244,10 +263,9 @@ contract ClearingChannelTest is ClearingChannelBase {
         bytes memory fills = _fill(a, b);
         (, L.Account[] memory n) = _batch1();
         _propose(fills, n, 0, 0, "");
-        uint256 before = watcher.balance;
         vm.prank(watcher);
         D.challengeFill(fills, 0);
-        assertEq(watcher.balance - before, 1 ether, "bond to the challenger");
+        assertEq(D.bondCredit(watcher), 1 ether, "bond to the challenger");
         assertEq(D.pending().at, 0, "batch discarded");
     }
 
@@ -526,9 +544,9 @@ contract ClearingChannelTest is ClearingChannelBase {
         vm.expectRevert(ClearingStorage.NotOverdue.selector);
         D.freeze();
         vm.warp(block.timestamp + 1 days);
-        uint256 before = op.balance;
         D.freeze();
-        assertEq(op.balance - before, 1 ether, "a frozen batch's bond goes back to its proposer");
+        // Batch 1's bond (finalized, not yet withdrawn) plus the frozen batch's.
+        assertEq(D.bondCredit(op), 2 ether, "a frozen batch's bond is credited back to its proposer");
         vm.expectRevert(ClearingStorage.WrongState.selector);
         ch.finalize();
         uint256[3] memory wantEth = [uint256(2 ether), 1 ether, 1 ether];
@@ -540,8 +558,31 @@ contract ClearingChannelTest is ClearingChannelBase {
             assertEq(who[i].balance - e0, wantEth[i]);
             assertEq(usd.balanceOf(who[i]) - u0, wantUsd[i]);
         }
-        assertEq(address(ch).balance, 0);
+        assertEq(address(ch).balance, 2 ether, "only the credited bonds are left");
         assertEq(usd.balanceOf(address(ch)), 0);
+    }
+
+    /// Regression: a proposer that rejects ETH used to make finalize (and freeze) revert,
+    /// stalling settlement. Its bond is now credited; withdrawing is its own problem.
+    function test_proposerThatRejectsEthBlocksNothing() public {
+        Unpayable p = new Unpayable();
+        vm.warp(block.timestamp + 2 days + 1); // takeover
+        (bytes memory fills, L.Account[] memory n) = _batch1();
+        (bytes memory u, bytes32[] memory proof) = _updates(n);
+        p.propose{value: 1 ether}(ch, abi.encodeCall(ch.propose, (pkg1, fills, u, proof, 0, 0, "")));
+        _finalize(n);
+        assertEq(D.bondCredit(address(p)), 1 ether);
+        vm.expectRevert(ClearingStorage.TransferFailed.selector);
+        p.withdrawBond(ch);
+        // Its next proposal is discarded by a freeze: that works too.
+        vm.prank(who[0]);
+        ch.requestWithdraw(R.ETH, 1);
+        vm.warp(block.timestamp + 2 days + 1);
+        L.Account[] memory m = _copyFin();
+        (u, proof) = _updates(m);
+        p.propose{value: 1 ether}(ch, abi.encodeCall(ch.propose, (pkg1, "", u, proof, 0, 0, "")));
+        D.freeze();
+        assertEq(D.bondCredit(address(p)), 2 ether);
     }
 
     /// The trader's own L1 transaction authorizes a forced order: nobody else can post one.
