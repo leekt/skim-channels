@@ -49,7 +49,7 @@ contract SlotPriceAdapter is IPriceAdapter {
     function price(bytes calldata witness, AnchorRegistry anchors, uint256 maxAge)
         external
         view
-        returns (uint256 value, uint64 anchorBlock)
+        returns (uint256 value, uint64 anchorBlock, uint64 updatedAt)
     {
         WitnessLib.WitnessPackage memory p = WitnessLib.decode(witness);
         WitnessLib.Read[] memory reads = WitnessLib.verify(p);
@@ -58,6 +58,14 @@ contract SlotPriceAdapter is IPriceAdapter {
             a.chainId != block.chainid || a.stateRoot == 0
                 || anchors.stateRootOf(ChannelTypes.anchorId(a)) != a.stateRoot || block.number > a.blockNumber + maxAge
         ) revert ChainlinkAdapter.BadAnchor();
-        return (WitnessLib.find(reads, feed, slot), a.blockNumber);
+        // The fixture slot has no answer time: the anchor's own time.
+        return
+            (WitnessLib.find(reads, feed, slot), a.blockNumber, uint64(anchors.timestampOf(ChannelTypes.anchorId(a))));
+    }
+
+    uint256 public maxStaleness = 3650 days;
+
+    function setMaxStaleness(uint256 s) external {
+        maxStaleness = s;
     }
 }

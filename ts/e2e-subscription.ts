@@ -8,6 +8,11 @@
 //    next fill in the same batch runs at the new head and starts a new oracle segment by
 //    itself. L1 verifies both segments' prices at their anchors, a watcher finds nothing to
 //    challenge, and the batch finalizes. No new session and no L1 keep-alive.
+//    Regressions (review of 174ecfc): the feed moves after a batch opens but before its first
+//    fill: one segment, starting at that fill, at the new price (#1). The executor moves on with
+//    the same round: the next fill starts a segment at the new head that reuses the price (no
+//    new witness), and an order that expired by that head is refused although the price is the
+//    same (#2). L1 accepts both shapes.
 // Run: npm run e2e-subscription  (needs anvil, forge build, cargo build -p channel-runner -p app-executor)
 import { writeFileSync, mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -134,8 +139,8 @@ async function partB(l1: Chain) {
     journal: join(dir, "journal.json"), maxAnchorAge: 256n, ageMargin: 16n, nextBlock: () => l1.rpc("anvil_mine", [toHex(1)]),
   });
   const domain = { name: "SkimClearing", version: "0", chainId: 7001, verifyingContract: ch.address, salt: pad(toHex(1n), { size: 32 }) };
-  const order = async (who: typeof alice, sellToken: number, sellAmount: bigint, buyAmount: bigint, nonce: bigint) => {
-    const o: Order = { trader: who.address, sellToken, sellAmount, buyAmount, nonce, expiry: 10n ** 9n };
+  const order = async (who: typeof alice, sellToken: number, sellAmount: bigint, buyAmount: bigint, nonce: bigint, expiry = 10n ** 9n) => {
+    const o: Order = { trader: who.address, sellToken, sellAmount, buyAmount, nonce, expiry };
     return { o, sig: await who.signTypedData({ domain, types: eip712Order, primaryType: "Order", message: o as any }), h: orderHash(o) };
   };
 
@@ -158,7 +163,7 @@ async function partB(l1: Chain) {
   check((await A.apply({ kind: "fill", a: a2.h, b: k2.h })).ok, "fill 2 at 2100 in the same batch: the executor followed L1, so the book saw the new round");
   const segs = await ex.read<any[]>(book, "segments", [BigInt(A.current.no)]);
   check(segs.length === 2 && segs[0].price === usd(2000) && segs[1].price === usd(2100) && Number(segs[1].firstFill) === 1,
-    `the batch has 2 oracle segments: 2000 at L1 block ${segs[0].anchorBlock}, 2100 at ${segs[1].anchorBlock} (from fill 1)`);
+    `the batch has 2 segments: 2000 at L1 block ${segs[0].head}, 2100 at ${segs[1].head} (from fill 1)`);
   const acc = await ex.read<any>(book, "account", [0]);
   check(BigInt(acc.eth) === parseEther("1") && BigInt(acc.usd) === usd(2050), "app state carried across the segments: alice holds 1 ETH and 2050 USD");
 
@@ -166,10 +171,10 @@ async function partB(l1: Chain) {
   const p = await A.propose(BigInt(A.current.no), { label: "propose (2 segments)" });
   check((p.segments?.length ?? 0) === 2, "proposed with both segments' price witnesses: L1 verified each price at its own anchor");
   const ev = await l1.pub.getContractEvents({ address: ch.address, abi: ch.abi, eventName: "Segments", fromBlock: 0n }) as any[];
-  const { firstFills, prices, anchorBlocks } = ev[ev.length - 1].args;
+  const { firstFills, prices, heads } = ev[ev.length - 1].args;
   for (const i of [0n, 1n]) {
     let fault = true;
-    try { await l1.pub.simulateContract({ account: op, address: ch.address, abi: ch.abi, functionName: "challengeFill", args: [p.fills, i, firstFills, prices, anchorBlocks] }); } catch { fault = false; }
+    try { await l1.pub.simulateContract({ account: op, address: ch.address, abi: ch.abi, functionName: "challengeFill", args: [p.fills, i, firstFills, prices, heads] }); } catch { fault = false; }
     check(!fault, `a watcher can't challenge fill ${i}: it's within the band of its own segment's price (${Number(prices[Number(i)]) / 1e6})`);
   }
   await l1.rpc("evm_increaseTime", [3601]);
@@ -177,7 +182,55 @@ async function partB(l1: Chain) {
   await l1.send(ch, "finalize", [], op);
   await A.finalized();
   check(Number((await l1.read<any[]>(ch, "state"))[3]) === 1, "and the batch finalized: one session, one batch, two oracle contexts, no L1 keep-alive");
-  out.clearing = { segments: segs.map((g) => ({ anchorBlock: String(g.anchorBlock), price: String(g.price), firstFill: Number(g.firstFill) })), proposeGas: l1.gas["propose (2 segments)"] };
+
+  // #1: the feed moves after the batch opens, before its first fill.
+  const b2 = await A.open();
+  await l1.send(agg, "transmit", [answer(2200)], op);
+  await headAtLeast(ex, await l1.height());
+  const a3 = await order(alice, 0, parseEther("0.1"), usd(220), 3n);
+  const k3 = await order(bob, 1, usd(220), parseEther("0.1"), 3n);
+  await A.apply({ kind: "order", order: a3.o, sig: a3.sig });
+  await A.apply({ kind: "order", order: k3.o, sig: k3.sig });
+  check((await A.apply({ kind: "fill", a: a3.h, b: k3.h })).ok, "batch 2: the feed moved to 2200 after the batch opened; the first fill runs at 2200");
+  let s2 = await ex.read<any[]>(book, "segments", [BigInt(A.current.no)]);
+  check(s2.length === 1 && Number(s2[0].firstFill) === 0 && s2[0].price === usd(2200) && s2[0].head > b2.snap.number && s2[0].priceBlock === s2[0].head,
+    `#1: one segment, from fill 0, at the head the fill ran at (${s2[0].head}; the batch opened at ${b2.snap.number}): no empty segment for the opening price`);
+
+  // #2: the executor moves on, the round doesn't. An order that expired by the new head is refused.
+  const h2 = BigInt(s2[0].head);
+  await l1.rpc("anvil_mine", [toHex(1)]);
+  await headAtLeast(ex, h2 + 1n);
+  const a4 = await order(alice, 0, parseEther("0.1"), usd(220), 4n, h2); // last block: the previous head
+  const k4 = await order(bob, 1, usd(220), parseEther("0.1"), 4n, h2);
+  await A.apply({ kind: "order", order: a4.o, sig: a4.sig });
+  await A.apply({ kind: "order", order: k4.o, sig: k4.sig });
+  let why: any;
+  try { await ex.pub.simulateContract({ account: op, address: book.address, abi: book.abi, functionName: "fill", args: [a4.h, k4.h] }); } catch (e: any) { why = e?.cause?.data; }
+  check(why?.errorName === "Rejected" && Number(why.args[0]) === 6,
+    `#2: an order whose last block was ${h2} is refused at the new head (Expired), although the round and price are unchanged`);
+  const a5 = await order(alice, 0, parseEther("0.1"), usd(220), 4n);
+  const k5 = await order(bob, 1, usd(220), parseEther("0.1"), 4n);
+  await A.apply({ kind: "order", order: a5.o, sig: a5.sig });
+  await A.apply({ kind: "order", order: k5.o, sig: k5.sig });
+  check((await A.apply({ kind: "fill", a: a5.h, b: k5.h })).ok, "a live order fills at the new head");
+  s2 = await ex.read<any[]>(book, "segments", [BigInt(A.current.no)]);
+  check(s2.length === 2 && s2[1].head > h2 && s2[1].priceBlock === s2[0].priceBlock && s2[1].price === s2[0].price,
+    `it starts segment 1 at head ${s2[1].head}, reusing the price read at block ${s2[1].priceBlock}`);
+  await A.seal();
+  const p2 = await A.propose(BigInt(A.current.no), { label: "propose (reused price)" });
+  const ev2 = await l1.pub.getContractEvents({ address: ch.address, abi: ch.abi, eventName: "Segments", fromBlock: 0n }) as any[];
+  const g2 = ev2[ev2.length - 1].args;
+  check(g2.heads.length === 2 && g2.heads[1] === s2[1].head && (A.batch(BigInt(A.current.no))!.prepared as any).segments.filter((s: any) => s.witness).length === 1,
+    "L1 accepted it: 2 segments, 1 price witness, and each fill's head is committed for disputes");
+  for (const i of [0n, 1n]) {
+    let fault = true;
+    try { await l1.pub.simulateContract({ account: op, address: ch.address, abi: ch.abi, functionName: "challengeFill", args: [p2.fills, i, g2.firstFills, g2.prices, g2.heads] }); } catch { fault = false; }
+    check(!fault, `and fill ${i} isn't challengeable`);
+  }
+  out.clearing = {
+    segments: segs.map((g) => ({ head: String(g.head), priceBlock: String(g.priceBlock), price: String(g.price), firstFill: Number(g.firstFill) })),
+    proposeGas: l1.gas["propose (2 segments)"], reusedPriceProposeGas: l1.gas["propose (reused price)"],
+  };
 }
 
 async function main() {

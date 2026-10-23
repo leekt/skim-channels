@@ -9,7 +9,7 @@ import {ChannelTypes} from "../libraries/ChannelTypes.sol";
 
 /// The L1 channel's views, called at their L1 address: on the app executor the channel (and
 /// its disputes half) are imported read-only, so each call runs L1's code on L1's state at
-/// the executor's pin.
+/// the L1 head the executor has applied.
 interface IClearingL1 {
     function users(uint256 i) external view returns (address);
     function userCount() external view returns (uint256);
@@ -39,12 +39,13 @@ interface IAggregatorV3 {
 ///         (ClearingLedger), the order book, and the open batch. L1 state is read with
 ///         ordinary calls at L1 addresses: the channel's users, deposits and queues, and the
 ///         price from the real Chainlink feed (`latestRoundData()` through its proxy), all at
-///         the executor's pin. Balances move only through ClearingLedger, the function L1
-///         replays in disputes.
+///         the L1 head the executor has applied. Balances move only through ClearingLedger,
+///         the function L1 replays in disputes.
 ///
-/// Price rule (the same one ChainlinkAdapter enforces on L1 from proofs at the batch's
-/// anchor): the feed's latest round at the pin, answered no later than the pin's block time
-/// and no more than `maxStaleness` before it, scaled to 6 decimals.
+/// Every fill is judged at the L1 head it ran against (its segment, below): expiry against
+/// that head's number, and the price must be the feed's latest round as read at or before it
+/// (the same rule ChainlinkAdapter enforces on L1 from proofs), answered no later than its
+/// read block's time and no more than `maxStaleness` before the fill's head time.
 ///
 /// A new operator can take over from L1 data alone: `adopt` imports the finalized leaves
 /// (from published proposals or a session package) and checks them against L1's root.
@@ -58,13 +59,21 @@ contract ClearingBook {
         bool live;
     }
 
-    /// One oracle context of a batch: the L1 head the price was read at, the feed round, and
-    /// the first fill priced with it. L1 verifies each segment's price at its own anchor.
+    /// One execution segment of a batch: the fills from `firstFill` on ran at L1 head `head`
+    /// (block `hash`, header time `time`), priced with the feed's round `round` as first read
+    /// at L1 block `priceBlock` (answered at `updatedAt`). A segment starts whenever a fill runs
+    /// at a new head; the price is re-read there only if the round changed, otherwise the
+    /// earlier read (and its L1 witness) is reused. L1 checks each segment's head (recorded,
+    /// recent), its price at `priceBlock` ≤ `head`, and freshness at the head's time; disputes
+    /// judge expiry against `head`.
     struct Segment {
-        uint64 anchorBlock;
-        uint64 anchorTime;
-        uint80 round;
+        uint64 head;
+        uint64 time;
+        bytes32 hash;
         uint32 firstFill;
+        uint80 round;
+        uint64 priceBlock;
+        uint64 updatedAt;
         uint256 price;
     }
 
@@ -101,10 +110,10 @@ contract ClearingBook {
     mapping(uint256 => mapping(uint256 => uint16)) internal forcedStatus; // batch → forced pos → status
     bytes32 public stateDigest;
 
-    event Opened(uint256 indexed batch, uint64 anchorBlock, uint256 price);
-    /// A new oracle segment: the executor had moved to a newer L1 head and the feed's round had
-    /// changed. The operator fetches the price witness at `anchorBlock` for L1.
-    event SegmentStarted(uint256 indexed batch, uint256 segment, uint64 anchorBlock, uint256 price);
+    event Opened(uint256 indexed batch, uint64 l1Block);
+    /// A new execution segment: a fill ran at a new L1 head. When `priceBlock == head` the feed
+    /// had a new round there, and the operator fetches L1's price witness at that block.
+    event SegmentStarted(uint256 indexed batch, uint256 segment, uint64 head, uint64 priceBlock, uint256 price);
     event Filled(uint256 indexed batch, bytes32 a, bytes32 b);
     event Sealed(uint256 indexed batch, uint256 fills, uint256 accounts);
 
@@ -121,7 +130,10 @@ contract ClearingBook {
     error Insufficient(uint32 idx);
     error ForcedMismatch(uint256 pos);
     error RootMismatch(bytes32 computed, bytes32 onL1);
-    error StalePrice(uint256 updatedAt, uint64 anchorTime);
+    error StalePrice(uint256 updatedAt, uint64 headTime);
+    /// The executor's L1 head is a different block at or below the batch's last segment head:
+    /// L1 reorganized under the batch. The runtime recovers (BatchRuntime.tick).
+    error L1Rewound(uint64 lastHead, uint256 head);
 
     constructor(
         address channel_,
@@ -157,30 +169,33 @@ contract ClearingBook {
         }
     }
 
-    /// The feed's latest round at the executor's current L1 head, fresh at that head's time, in
-    /// 6 decimals: a segment starting at `firstFill`.
-    function _segment(uint32 firstFill) internal view returns (Segment memory g) {
-        (uint256 number,, uint256 time) = L1_HEAD.head();
-        (uint80 round, int256 answer,, uint256 updatedAt,) = priceFeed.latestRoundData();
-        if (answer <= 0 || updatedAt > time || time > updatedAt + maxStaleness) {
-            revert StalePrice(updatedAt, uint64(time));
-        }
-        g = Segment(uint64(number), uint64(time), round, firstFill, uint256(answer) * 1e6 / 10 ** priceFeed.decimals());
-    }
-
-    /// The segment fill `b`'s next fill is priced in. When the executor has moved to a newer L1
-    /// head and the feed has a new round there, a new segment starts at that head. Same round:
-    /// the same price, so the current segment (and its anchor) stays.
+    /// The segment batch `b`'s next fill runs in: the current one if the executor is still at
+    /// its head, else a new one at the executor's head. Segments exist only for fills (a
+    /// batch's first segment starts at its first fill), so no segment is ever empty and their
+    /// first fills strictly increase. Freshness is checked at every head, also when the round
+    /// (and so the price and its witness) is reused.
     function _currentSegment(uint256 b) internal returns (Segment memory g) {
         Batch storage bt = batches[b];
-        g = bt.segments[bt.segments.length - 1];
-        (uint256 number,,) = L1_HEAD.head();
-        if (number == g.anchorBlock) return g;
-        (uint80 round,,,,) = priceFeed.latestRoundData();
-        if (round == g.round) return g;
-        g = _segment(uint32(bt.fills.length / L.FILL_BYTES));
+        (uint256 number, bytes32 hash, uint256 time) = L1_HEAD.head();
+        uint256 n = bt.segments.length;
+        Segment memory last;
+        if (n != 0) {
+            last = bt.segments[n - 1];
+            if (hash == last.hash) return last;
+            if (number <= last.head) revert L1Rewound(last.head, number);
+        }
+        (uint80 round, int256 answer,, uint256 updatedAt,) = priceFeed.latestRoundData();
+        g = Segment(uint64(number), uint64(time), hash, uint32(bt.fills.length / L.FILL_BYTES), round, 0, 0, 0);
+        if (n != 0 && round == last.round) {
+            (g.priceBlock, g.updatedAt, g.price) = (last.priceBlock, last.updatedAt, last.price);
+        } else {
+            if (answer <= 0 || updatedAt > time) revert StalePrice(updatedAt, uint64(time));
+            (g.priceBlock, g.updatedAt, g.price) =
+            (uint64(number), uint64(updatedAt), uint256(answer) * 1e6 / 10 ** priceFeed.decimals());
+        }
+        if (time > g.updatedAt + maxStaleness) revert StalePrice(g.updatedAt, uint64(time));
         bt.segments.push(g);
-        emit SegmentStarted(b, bt.segments.length - 1, g.anchorBlock, g.price);
+        emit SegmentStarted(b, n, g.head, g.priceBlock, g.price);
     }
 
     // ---- handover ----------------------------------------------------------------------------
@@ -214,9 +229,9 @@ contract ClearingBook {
 
     // ---- batches -----------------------------------------------------------------------------
 
-    /// @notice Open the next batch at the L1 head the executor has applied now (its number and
-    ///         time come from the L1 head account; the price witness L1 checks is for that
-    ///         block). Applies, in order: deposits of
+    /// @notice Open the next batch at the L1 head the executor has applied now. The price isn't
+    ///         read here: each fill reads it at its own head (`_currentSegment`), so a stale
+    ///         feed never blocks deposits or withdrawals. Applies, in order: deposits of
     ///         `depositUsers` (any user may be left for later; nothing is lost), every queued
     ///         withdrawal request (as far as a user's per-batch limit allows), and takes the
     ///         new forced orders (data relayed from L1 events, checked against L1's hashes)
@@ -224,17 +239,15 @@ contract ClearingBook {
     function openBatch(uint32[] calldata depositUsers, bytes[] calldata forcedOrders) external onlyOperator {
         if (current != 0 && !batches[current].sealed_) revert BatchOpen();
         uint256 b = ++current;
-        Batch storage bt = batches[b];
-        Segment memory g = _segment(0);
-        bt.segments.push(g);
         _syncUsers();
         for (uint256 i; i < depositUsers.length; ++i) {
             _deposit(b, depositUsers[i]);
         }
         _serveRequests(b);
         _takeForced(b, forcedOrders);
-        _step(keccak256(abi.encode("open", b, g.anchorBlock, g.price)));
-        emit Opened(b, g.anchorBlock, g.price);
+        (uint256 number,,) = L1_HEAD.head();
+        _step(keccak256(abi.encode("open", b)));
+        emit Opened(b, uint64(number));
     }
 
     function _deposit(uint256 b, uint32 idx) internal {
@@ -323,9 +336,8 @@ contract ClearingBook {
         Resting memory rb = book[hb];
         if (!ra.live || !rb.live) revert UnknownOrder();
         Segment memory seg = _currentSegment(b);
-        R.Reject why = R.check(
-            L.toOrder(ra.o, users[ra.o.idx]), L.toOrder(rb.o, users[rb.o.idx]), seg.price, bandBps, seg.anchorBlock
-        );
+        R.Reject why =
+            R.check(L.toOrder(ra.o, users[ra.o.idx]), L.toOrder(rb.o, users[rb.o.idx]), seg.price, bandBps, seg.head);
         if (why != R.Reject.None) revert Rejected(why);
         L.Account memory a = _touch(b, ra.o.idx);
         if (!L.applySide(a, ra.o.sellToken, ra.o.sellAmount, rb.o.sellAmount, ra.o.nonce)) {
@@ -360,8 +372,8 @@ contract ClearingBook {
 
     // ---- views for the proposal --------------------------------------------------------------
 
-    /// Everything L1's `propose` needs for batch `b` (the price witnesses, one per segment at its
-    /// anchor, come from the runtime).
+    /// Everything L1's `propose` needs for batch `b` (the price witnesses, one per distinct
+    /// `priceBlock`, and the raw headers of the segments' heads come from the runtime).
     function proposal(uint256 b)
         external
         view
@@ -399,12 +411,18 @@ contract ClearingBook {
         return accounts[i];
     }
 
-    /// Batch `b`'s latest oracle segment: the L1 block and time, and the price it uses.
-    function batchInfo(uint256 b) external view returns (uint64 anchorBlock, uint64 anchorTime, uint256 price) {
+    /// Batch `b`'s latest segment: its L1 head and time, and its price. The open batch before
+    /// its first fill: the executor's head and the feed's price there (unchecked; a preview).
+    function batchInfo(uint256 b) external view returns (uint64 head, uint64 time, uint256 price) {
         Segment[] storage g = batches[b].segments;
-        if (g.length == 0) return (0, 0, 0);
-        Segment storage last = g[g.length - 1];
-        return (last.anchorBlock, last.anchorTime, last.price);
+        if (g.length != 0) {
+            Segment storage last = g[g.length - 1];
+            return (last.head, last.time, last.price);
+        }
+        if (b != current || batches[b].sealed_) return (0, 0, 0);
+        (uint256 number,, uint256 t) = L1_HEAD.head();
+        (, int256 answer,,,) = priceFeed.latestRoundData();
+        return (uint64(number), uint64(t), answer > 0 ? uint256(answer) * 1e6 / 10 ** priceFeed.decimals() : 0);
     }
 
     function segments(uint256 b) external view returns (Segment[] memory) {

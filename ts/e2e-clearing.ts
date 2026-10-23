@@ -258,13 +258,19 @@ async function run(l1: Chain) {
     const fresh = await ClearingOperator.deployBook(exC, l1, opA, ch, feed, MAX_STALE);
     for (const b of A.batches.slice(0, 2)) {
       const pr = b.prepared as any;
-      await exC.rpc("executor_pin", [pr.segments[0].hash]); // the same L1 block, re-read and re-verified
+      await exC.rpc("executor_pin", [pr.opened.hash]); // the same L1 block, re-read and re-verified
       await exC.send(fresh, "openBatch", [pr.depositUsers, pr.forced.orders], opA);
+      let nFill = 0;
       for (const l of b.log) {
         if (!l.ok) continue;
         const a = l.action as any;
         if (a.kind === "order") await exC.send(fresh, "submitOrder", [a.order, a.sig], opA);
-        else if (a.kind === "fill") await exC.send(fresh, "fill", [a.a, a.b], opA);
+        else if (a.kind === "fill") {
+          const seg = (await A.exec.read<any[]>(A.book, "segments", [BigInt(b.no)])).find((g) => Number(g.firstFill) === nFill);
+          if (seg) await exC.rpc("executor_pin", [seg.hash]); // each segment's head, as it ran
+          await exC.send(fresh, "fill", [a.a, a.b], opA);
+          nFill++;
+        }
         else await exC.pub.waitForTransactionReceipt({ hash: await exC.rpc<Hex>("eth_sendRawTransaction", [a.tx]) }); // users' own txs, byte for byte
       }
       await exC.send(fresh, "seal", [], opA);
@@ -465,7 +471,13 @@ async function run(l1: Chain) {
   ]);
   await l1.send(anchors, "record", [wUp.rawHeader], opA);
   check(await refuses(() => l1.read(adapter, "price", [wUp.package, anchors.address, 256n])), "L1's adapter refuses a price from the new aggregator (unsupported feed)");
-  check(await refuses(() => B.open()), "and the executor can't price a batch from it (the new aggregator isn't imported)");
+  await B.open();
+  console.log("ok  opening a batch still works (the price is read per fill, so a broken feed never blocks deposits or withdrawals)");
+  const aUp = await order(alice, ETH, parseEther("0.1"), usd(200), 9n);
+  const kUp = await order(bob, USD, usd(210), parseEther("0.1"), 14n);
+  await place(B, aUp); await place(B, kUp);
+  check(await refuses(() => B.exec.pub.simulateContract({ account: opB, address: B.book.address, abi: B.book.abi, functionName: "fill", args: [aUp.h, kUp.h] })),
+    "but the executor can't price a fill from it (the new aggregator isn't imported)");
   await l1.send(proxy, "setAggregator", [agg.address], opA); // back to the supported one
   await l1.rpc("anvil_mine", [toHex(2)]);
   if (B.batches.length && B.current.state === "open") await B.recover(B.current.no, "feed restored");

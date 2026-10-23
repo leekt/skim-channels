@@ -140,10 +140,13 @@ contract ClearingChannel is ClearingStorage {
 
     // ---- batches ----------------------------------------------------------------------------
 
-    /// @param witnesses one price witness per oracle segment, at that segment's anchor (recorded,
-    ///        ≤ maxAnchorAge old), as the session's price adapter reads it
-    /// @param firstFills each segment's first fill: 0, then strictly increasing, all below the
-    ///        number of fills (a batch without fills has one segment)
+    /// @param witnesses the price witnesses, in order, each at the block its price was read
+    ///        (recorded, ≤ maxAnchorAge old), as the session's price adapter reads it
+    /// @param segs the execution segments (none iff there are no fills): first fills 0, then
+    ///        strictly increasing below the number of fills; heads strictly increasing,
+    ///        recorded and ≤ maxAnchorAge old; witness numbers 0, then the same or the next,
+    ///        ending at the last witness; each price read at or before its head and fresh at
+    ///        the head's time
     /// @param fills packed fills (ClearingLedger.FILL_BYTES each), in execution order
     /// @param updates changed accounts (ClearingLedger.UPDATE_BYTES each), indices ascending
     /// @param proof multiproof of unchanged subtrees (SparseTree16.transition)
@@ -153,7 +156,7 @@ contract ClearingChannel is ClearingStorage {
     ///        0 = rests in the book, else 2·fill + side + 1 = filled there
     function propose(
         bytes[] calldata witnesses,
-        uint32[] calldata firstFills,
+        SegmentRef[] calldata segs,
         bytes calldata fills,
         bytes calldata updates,
         bytes32[] calldata proof,
@@ -175,7 +178,7 @@ contract ClearingChannel is ClearingStorage {
         if (forcedCursor < f0 || forcedCursor > _forced.length || forcedStatus.length != 2 * (forcedCursor - f0)) {
             revert BadBatch("forcedCursor");
         }
-        bytes32 segments = _segments(witnesses, firstFills, fills.length / L.FILL_BYTES);
+        bytes32 segments = _segments(witnesses, segs, fills.length / L.FILL_BYTES);
         for (uint256 j = f0; j < forcedCursor; ++j) {
             uint16 s = uint16(bytes2(forcedStatus[2 * (j - f0):2 * (j - f0) + 2]));
             if (s == 0) {
@@ -201,21 +204,42 @@ contract ClearingChannel is ClearingStorage {
         emit Proposed(_batches + 1, root, msg.sender, segments, reqCursor, forcedCursor);
     }
 
-    /// Verifies every segment's price at its anchor; returns the commitment challengeFill checks.
-    function _segments(bytes[] calldata witnesses, uint32[] calldata firstFills, uint256 nFills)
+    /// Verifies every price and every segment's head; returns the commitment challengeFill
+    /// checks. A head is the L1 block the fills ran at: expiry is judged against it, and the
+    /// price must be fresh at its time, also when its witness is reused from an earlier head.
+    function _segments(bytes[] calldata witnesses, SegmentRef[] calldata segs, uint256 nFills)
         internal
         returns (bytes32)
     {
-        uint256 n = witnesses.length;
-        if (n == 0 || firstFills.length != n || firstFills[0] != 0) revert BadBatch("segments");
-        uint256[] memory prices = new uint256[](n);
-        uint64[] memory blocks = new uint64[](n);
-        for (uint256 s; s < n; ++s) {
-            if (s > 0 && (firstFills[s] <= firstFills[s - 1] || firstFills[s] >= nFills)) revert BadBatch("segments");
-            (prices[s], blocks[s]) = _cfg.priceAdapter.price(witnesses[s], _cfg.anchors, _cfg.maxAnchorAge);
+        uint256 n = segs.length;
+        uint256 k = witnesses.length;
+        if (nFills == 0 ? (n != 0 || k != 0) : (n == 0 || k == 0 || segs[n - 1].price != k - 1)) {
+            revert BadBatch("segments");
         }
-        emit Segments(_batches + 1, firstFills, prices, blocks);
-        return keccak256(abi.encode(firstFills, prices, blocks));
+        uint256[] memory value = new uint256[](k);
+        uint64[] memory readAt = new uint64[](k);
+        uint64[] memory answered = new uint64[](k);
+        for (uint256 w; w < k; ++w) {
+            (value[w], readAt[w], answered[w]) = _cfg.priceAdapter.price(witnesses[w], _cfg.anchors, _cfg.maxAnchorAge);
+        }
+        uint256 stale = _cfg.priceAdapter.maxStaleness();
+        uint32[] memory firstFills = new uint32[](n);
+        uint256[] memory prices = new uint256[](n);
+        uint64[] memory heads = new uint64[](n);
+        for (uint256 s; s < n; ++s) {
+            SegmentRef calldata g = segs[s];
+            bool ordered = s == 0
+                ? g.firstFill == 0 && g.price == 0
+                : g.firstFill > segs[s - 1].firstFill && g.firstFill < nFills && g.head > segs[s - 1].head
+                    && (g.price == segs[s - 1].price || g.price == segs[s - 1].price + 1);
+            if (!ordered || g.head < readAt[g.price]) revert BadBatch("segments");
+            bytes32 id = _cfg.anchors.anchorIdAt(g.head);
+            if (id == 0 || block.number > g.head + _cfg.maxAnchorAge) revert BadAnchor();
+            if (_cfg.anchors.timestampOf(id) > answered[g.price] + stale) revert BadBatch("stale");
+            (firstFills[s], prices[s], heads[s]) = (g.firstFill, value[g.price], g.head);
+        }
+        emit Segments(_batches + 1, firstFills, prices, heads);
+        return keccak256(abi.encode(firstFills, prices, heads));
     }
 
     /// @notice Anyone, after the window: the pending root becomes final; the bond is credited

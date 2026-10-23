@@ -215,6 +215,12 @@ contract ClearingCompareTest is Test {
         proof = Tree.multiproof(h, idx);
     }
 
+    /// One execution segment: every fill at block 101 (the fixture's anchor), one witness.
+    function _seg101() internal pure returns (ClearingStorage.SegmentRef[] memory s) {
+        s = new ClearingStorage.SegmentRef[](1);
+        s[0] = ClearingStorage.SegmentRef(0, 0, 101);
+    }
+
     function _channelRun(F[] memory p, string memory label, bool measure) internal returns (bytes memory fills) {
         bytes memory u;
         bytes32[] memory proof;
@@ -222,9 +228,8 @@ contract ClearingCompareTest is Test {
         (fills, u, proof, next) = _channelBatch(p);
         bytes[] memory ws = new bytes[](1);
         ws[0] = pkg1;
-        uint256 g = _txGas(
-            op, address(chn), abi.encodeCall(chn.propose, (ws, new uint32[](1), fills, u, proof, 0, 0, "")), 1 ether
-        );
+        uint256 g =
+            _txGas(op, address(chn), abi.encodeCall(chn.propose, (ws, _seg101(), fills, u, proof, 0, 0, "")), 1 ether);
         vm.warp(block.timestamp + 1 hours);
         uint256 g2 = _txGas(address(0x5EE), address(chn), abi.encodeCall(chn.finalize, ()), 0);
         for (uint256 i; i < next.length; ++i) {
@@ -341,7 +346,7 @@ contract ClearingCompareTest is Test {
         vm.prank(op);
         bytes[] memory ws = new bytes[](1);
         ws[0] = pkg1;
-        chn.propose{value: 1 ether}(ws, new uint32[](1), fills, u, proof, 0, 0, "");
+        chn.propose{value: 1 ether}(ws, _seg101(), fills, u, proof, 0, 0, "");
         uint256 snap = vm.snapshotState();
         bytes32[] memory nh = new bytes32[](fin.length);
         for (uint256 i; i < fin.length; ++i) {

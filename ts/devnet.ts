@@ -294,7 +294,7 @@ async function main() {
     return {
       anchorBlock: String(anchorBlock), anchorTime: String(anchorTime), price: String(p),
       segments: prep?.segments?.length ?? 0,
-      priceWitnessBytes: (prep?.segments ?? []).reduce((n: number, s: any) => n + (s.witness.package.length - 2) / 2, 0), fills,
+      priceWitnessBytes: (prep?.segments ?? []).reduce((n: number, s: any) => n + (s.witness ? (s.witness.package.length - 2) / 2 : 0), 0), fills,
     };
   }
 

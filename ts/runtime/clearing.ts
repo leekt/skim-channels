@@ -7,11 +7,12 @@
 // the head it was read at.
 //
 // Per batch: open the batch at the executor's current head (deposits, withdrawal requests and
-// forced orders applied first, as L1 replays them; the price from the feed's latest round),
-// then fetch the price witness for L1's ChainlinkAdapter at that same block right away →
-// orders and fills → seal → propose: the packed fills, the changed accounts with a multiproof
-// against the finalized root, the queue cursors, the forced-order statuses, the price
-// witness, and a bond. Anyone finalizes after the window. Nothing ever needs an old block:
+// forced orders applied first, as L1 replays them) → orders and fills. Each fill runs at the
+// executor's head then; a fill at a new head starts an execution segment, and if the feed's
+// round changed there, the operator fetches L1's price witness at that block right away →
+// seal → propose: the packed fills, the segments (each head recorded on L1, each price
+// witnessed), the changed accounts with a multiproof against the finalized root, the queue
+// cursors, the forced-order statuses, and a bond. Anyone finalizes after the window. Nothing ever needs an old block:
 // a restart adopts the finalized and pending leaves instead of re-executing.
 //
 // `recover` rebuilds the finalized accounts from L1 alone (published proposals that
@@ -93,13 +94,15 @@ export type Prepared = {
   forced: { orders: Hex[] }; depositUsers: number[];
   requests: number; // withdrawal requests queued on L1 that this batch will serve
   scannedTo: bigint;
-  // The batch's oracle segments as they happen: the head each was read at, and L1's price
-  // witness there (segment 0 at open; another whenever a fill starts one).
+  // The head the batch opened at (from openBatch's receipt).
+  opened?: Snapshot;
+  // The batch's execution segments as they happen: each fill head, its raw header (recorded
+  // on L1 at proposal), and L1's price witness where the feed's round changed.
   segments?: Segment[];
   // Set at proposal: the leaves it commits (a restart adopts them while it's pending).
   proposed?: [number, Account][];
 };
-export type Segment = { number: bigint; hash: Hex; time: bigint; snap: Snapshot; witness: Witness };
+export type Segment = { number: bigint; hash: Hex; time: bigint; snap: Snapshot; priceBlock: bigint; rawHeader: Hex; witness?: Witness };
 /** The Chainlink feed a session prices from: the proxy apps call, and its aggregator. */
 export type Feed = { proxy: Address; aggregator: Address };
 
@@ -278,52 +281,66 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
     await this.exec.rpc("executor_sync"); // catch up with L1's head now (it follows on its own too)
     const r = await this.exec.send(this.book, "openBatch", [p.depositUsers, p.forced.orders], this.op);
     this.scannedTo = p.scannedTo;
-    const no = BigInt(await this.exec.read(this.book, "current"));
-    // The head this batch opened at (the executor follows L1's head), and the price witness
-    // there, fetched right away while that block is recent.
-    p.segments = [await this.segmentAt(r.transactionHash, no, `clearing:batch:${no}:seg0`)];
-    return no;
+    const raw = await this.exec.rpc<any>("eth_getTransactionReceipt", [r.transactionHash]);
+    p.opened = await this.snapAt(BigInt(raw.l1BlockNumber), raw.l1BlockHash);
+    p.segments = []; // segments start at fills
+    return BigInt(await this.exec.read(this.book, "current"));
+  }
+
+  private async snapAt(number: bigint, hash: Hex): Promise<Snapshot> {
+    const blk = await this.l1.pub.getBlock({ blockHash: hash });
+    return {
+      chainId: this.view.chainId, number, hash, parentHash: blk.parentHash, stateRoot: blk.stateRoot,
+      policy: this.policy, speculative: this.policy.kind === "latest",
+    };
   }
 
   /**
-   * The oracle segment a transaction on the app network started: the L1 head it executed
-   * against (from its receipt), the book's price there, and L1's price witness at that block,
-   * fetched right away while it's recent. The executor's evidence at that head is kept too.
+   * The execution segment a fill started: the L1 head it ran against (from its receipt, checked
+   * against the book), the head's raw header (L1 records it at proposal), and, where the feed's
+   * round changed (`priceBlock == head`), L1's price witness at that block, fetched right
+   * away while it's recent. The executor's evidence at that head is kept too.
    */
-  private async segmentAt(tx: Hex, no: bigint, key: string): Promise<Segment> {
+  private async segmentAt(tx: Hex, no: bigint, ev: { segment: bigint; head: bigint; priceBlock: bigint }): Promise<Segment> {
     const raw = await this.exec.rpc<any>("eth_getTransactionReceipt", [tx]);
-    const [number, time] = await this.exec.read<any[]>(this.book, "batchInfo", [no]);
-    if (BigInt(number) !== BigInt(raw.l1BlockNumber)) throw new Error(`segment of batch ${no}: book and receipt disagree on the L1 head`);
-    const blk = await this.l1.pub.getBlock({ blockHash: raw.l1BlockHash });
-    const snap: Snapshot = {
-      chainId: this.view.chainId, number: BigInt(number), hash: raw.l1BlockHash, parentHash: blk.parentHash, stateRoot: blk.stateRoot,
-      policy: this.policy, speculative: this.policy.kind === "latest",
-    };
-    const witness = await this.priceWitness(snap);
-    const ev = await this.exec.rpc<{ package: Hex }>("executor_evidence");
-    this.evidence.pin(key, {
-      purpose: `clearing batch ${no}`, anchor: { chainId: this.view.chainId, blockNumber: `${number}`, blockHash: raw.l1BlockHash },
-      rawHeader: witness.rawHeader, package: ev.package, reads: [], note: `price witness: ${witness.package}`,
+    if (ev.head !== BigInt(raw.l1BlockNumber)) throw new Error(`segment of batch ${no}: book and receipt disagree on the L1 head`);
+    const g = (await this.exec.read<any[]>(this.book, "segments", [no]))[Number(ev.segment)];
+    if (g.hash !== raw.l1BlockHash) throw new Error(`segment of batch ${no}: book and receipt disagree on the L1 block`);
+    const snap = await this.snapAt(ev.head, raw.l1BlockHash);
+    const witness = ev.priceBlock === ev.head ? await this.priceWitness(snap) : undefined;
+    const rawHeader = witness?.rawHeader ?? this.view.witness(snap, []).rawHeader;
+    const evd = await this.exec.rpc<{ package: Hex }>("executor_evidence");
+    this.evidence.pin(`clearing:batch:${no}:seg${ev.segment}`, {
+      purpose: `clearing batch ${no}`, anchor: { chainId: this.view.chainId, blockNumber: `${ev.head}`, blockHash: raw.l1BlockHash },
+      rawHeader, package: evd.package, reads: [], note: witness ? `price witness: ${witness.package}` : `price reused from block ${ev.priceBlock}`,
     });
-    return { number: BigInt(number), hash: raw.l1BlockHash, time: BigInt(time), snap, witness };
+    return { number: ev.head, hash: raw.l1BlockHash, time: BigInt(g.time), snap, priceBlock: ev.priceBlock, rawHeader, witness };
   }
 
   protected openedAt(prepared: unknown): Snapshot | undefined {
-    return (prepared as Prepared).segments?.[0]?.snap;
+    return (prepared as Prepared).opened;
+  }
+
+  protected heads(b: JournalBatch<Action, OpenState>): Snapshot[] {
+    return ((b.prepared as Prepared).segments ?? []).map((s) => s.snap);
+  }
+
+  /** L1 reorganized under the open batch (the book refuses to run at another branch's head). */
+  protected transient(e: any): boolean {
+    return e?.cause?.data?.errorName === "L1Rewound" || /L1Rewound/.test(String(e?.shortMessage ?? e?.message ?? ""));
   }
 
   protected async run(action: Action) {
     if (action.kind === "order") await this.exec.send(this.book, "submitOrder", [action.order, action.sig], this.op);
     else if (action.kind === "fill") {
       const r = await this.exec.send(this.book, "fill", [action.a, action.b], this.op);
-      // A fill at a newer L1 head with a new feed round starts a segment: witness it now.
-      const started = r.logs.some((l) => {
-        try { return (decodeEventLog({ abi: this.book.abi, data: l.data, topics: l.topics }) as any).eventName === "SegmentStarted"; } catch { return false; }
-      });
-      if (started) {
+      // A fill at a new L1 head starts a segment: record its head (and witness a new price) now.
+      for (const l of r.logs) {
+        let ev: any;
+        try { ev = decodeEventLog({ abi: this.book.abi, data: l.data, topics: l.topics }); } catch { continue; }
+        if (ev.eventName !== "SegmentStarted") continue;
         const p = this.current.prepared as Prepared;
-        const no = BigInt(this.current.no);
-        p.segments = [...(p.segments ?? []), await this.segmentAt(r.transactionHash, no, `clearing:batch:${no}:seg${p.segments?.length ?? 0}`)];
+        p.segments = [...(p.segments ?? []), await this.segmentAt(r.transactionHash, BigInt(this.current.no), ev.args)];
       }
     }
     else await this.sendRaw(action.tx);
@@ -413,38 +430,47 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
       : "0x";
     const proof = changed.length ? multiproof(levels(dense), changed) : [];
     return {
-      segments: (segments as any[]).map((g) => ({ anchorBlock: BigInt(g.anchorBlock), firstFill: Number(g.firstFill), price: BigInt(g.price) })),
+      segments: (segments as any[]).map((g) => ({
+        head: BigInt(g.head), hash: g.hash as Hex, priceBlock: BigInt(g.priceBlock), firstFill: Number(g.firstFill), price: BigInt(g.price),
+      })),
       fills: fills as Hex, updates: updates as Hex, proof, reqTo: BigInt(reqTo), forcedTo: BigInt(forcedTo), statuses: (statuses as Hex) || "0x", next };
   }
 
   /**
-   * Propose batch `no`. Refuses unless its anchor is known canonical and young enough;
-   * `tick()` reopens a batch that isn't at a recent head.
+   * Propose batch `no`. Refuses unless every block it executed against (its opening head
+   * and every segment's head) is known canonical and young enough; `tick()` recovers a batch
+   * that isn't.
    */
   async propose(no: bigint, opts: { tamper?: (news: Map<number, Account>) => void; label?: string } = {}) {
     const b = this.batch(no);
     if (!b || b.state !== "sealed") throw new Error(`batch ${no}: not sealed (or already proposed)`);
     const status = await this.anchorStatus(b);
-    if (status !== "canonical") throw new Error(`batch ${no}: anchor ${status}; run tick() first`);
-    if ((await this.view.head()) - b.snap.number > this.maxAnchorAge) throw new Error(`batch ${no}: anchor too old; run tick() first`);
-    const p0 = b.prepared as Prepared;
-    const segs = p0.segments ?? [];
+    if (status !== "canonical") throw new Error(`batch ${no}: an L1 block it executed against is ${status}; run tick() first`);
+    if ((await this.view.head()) - this.oldest(b) > this.maxAnchorAge) throw new Error(`batch ${no}: anchor too old; run tick() first`);
+    const segs = (b.prepared as Prepared).segments ?? [];
     const p = await this.proposal(no, opts.tamper);
-    if (segs.length !== p.segments.length || segs.some((s, i) => s.number !== p.segments[i].anchorBlock)) {
-      throw new Error(`batch ${no}: its price witnesses don't match the book's oracle segments`);
+    if (segs.length !== p.segments.length || segs.some((s, i) => s.number !== p.segments[i].head || s.hash !== p.segments[i].hash || s.priceBlock !== p.segments[i].priceBlock)) {
+      throw new Error(`batch ${no}: the journal's segments don't match the book's`);
     }
-    // L1 records an anchor only once a later block exists (BLOCKHASH covers past blocks).
-    for (let i = 0; (await this.l1.height()) <= segs[segs.length - 1].number; i++) {
-      if (i > 120) throw new Error(`batch ${no}: L1 hasn't moved past its last segment's anchor`);
+    // L1 records a block only once a later block exists (BLOCKHASH covers past blocks).
+    for (let i = 0; segs.length && (await this.l1.height()) <= segs[segs.length - 1].number; i++) {
+      if (i > 120) throw new Error(`batch ${no}: L1 hasn't moved past its last segment's head`);
       await this.nextBlock();
     }
     for (const s of segs) {
-      if (!(await this.l1.read<boolean>(this.anchors, "recorded", [s.witness.anchorId]))) {
-        await this.l1.send(this.anchors, "record", [s.witness.rawHeader], this.op, "AnchorRegistry.record");
+      if ((await this.l1.read<Hex>(this.anchors, "anchorIdAt", [s.number])) === zeroHash) {
+        await this.l1.send(this.anchors, "record", [s.rawHeader], this.op, "AnchorRegistry.record");
       }
     }
+    // One witness per new price, in order; each segment names the witness it was priced by.
+    const witnesses: Hex[] = [];
+    const refs = segs.map((s, i) => {
+      if (s.witness) witnesses.push(s.witness.package);
+      else if (i === 0) throw new Error(`batch ${no}: its first segment has no price witness`);
+      return { firstFill: p.segments[i].firstFill, price: witnesses.length - 1, head: s.number };
+    });
     const r = await this.l1.send(this.channel, "propose",
-      [segs.map((s) => s.witness.package), p.segments.map((s) => s.firstFill), p.fills, p.updates, p.proof, p.reqTo, p.forcedTo, p.statuses],
+      [witnesses, refs, p.fills, p.updates, p.proof, p.reqTo, p.forcedTo, p.statuses],
       this.op, opts.label, this.bond);
     if (!opts.tamper) {
       (b.prepared as Prepared).proposed = [...p.next];

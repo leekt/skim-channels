@@ -81,18 +81,18 @@ contract ClearingDisputes is ClearingStorage {
 
     /// @notice Fill `i` of the pending batch is invalid: an unknown trader, a signature not
     ///         by its trader, or a ClearingRules rejection (band against the price of the fill's
-    ///         own oracle segment, limits, expiry at that segment's anchor, same side, same
+    ///         own segment, limits, expiry at the L1 head it ran at, same side, same
     ///         trader). The segments are the proposal's (checked against its commitment).
     function challengeFill(
         bytes calldata fills,
         uint256 i,
         uint32[] calldata firstFills,
         uint256[] calldata prices,
-        uint64[] calldata anchorBlocks
+        uint64[] calldata heads
     ) external viaChannel {
         _live(fills);
         if (i >= fills.length / L.FILL_BYTES) revert WrongState();
-        if (keccak256(abi.encode(firstFills, prices, anchorBlocks)) != _pending.segments) revert BadProof();
+        if (keccak256(abi.encode(firstFills, prices, heads)) != _pending.segments) revert BadProof();
         uint256 s = firstFills.length - 1;
         while (firstFills[s] > i) --s;
         (L.PackedOrder memory pa, bytes calldata sa, L.PackedOrder memory pb, bytes calldata sb) = L.fillAt(fills, i);
@@ -111,7 +111,7 @@ contract ClearingDisputes is ClearingStorage {
                     _forcedAuth[R.orderHash(b)],
                     prices[s],
                     _cfg.bandBps,
-                    anchorBlocks[s],
+                    heads[s],
                     _domain()
                 );
         }

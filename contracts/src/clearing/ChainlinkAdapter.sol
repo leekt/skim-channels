@@ -10,10 +10,14 @@ import {WitnessLib} from "../libraries/WitnessLib.sol";
 interface IPriceAdapter {
     /// @return value USD per ETH, 6 decimals
     /// @return anchorBlock the witness's anchor (recorded, of this chain, at most `maxAge` old)
+    /// @return updatedAt when the price was answered (L1 checks freshness at each fill's head)
     function price(bytes calldata witness, AnchorRegistry anchors, uint256 maxAge)
         external
         view
-        returns (uint256 value, uint64 anchorBlock);
+        returns (uint256 value, uint64 anchorBlock, uint64 updatedAt);
+
+    /// A price is usable at an L1 head at most this long (seconds) after it was answered.
+    function maxStaleness() external view returns (uint256);
 }
 
 /// @notice The price an app read with `latestRoundData()` through one Chainlink proxy, checked
@@ -70,7 +74,7 @@ contract ChainlinkAdapter is IPriceAdapter {
     function price(bytes calldata witness, AnchorRegistry anchors, uint256 maxAge)
         external
         view
-        returns (uint256 value, uint64 anchorBlock)
+        returns (uint256 value, uint64 anchorBlock, uint64 updatedAt)
     {
         WitnessLib.WitnessPackage memory p = WitnessLib.decode(witness);
         WitnessLib.Read[] memory reads = WitnessLib.verify(p);
@@ -89,7 +93,7 @@ contract ChainlinkAdapter is IPriceAdapter {
         uint256 t = WitnessLib.find(reads, aggregator, transmissionSlot(round));
         int192 answer = int192(uint192(t));
         if (answer <= 0) revert NoAnswer();
-        uint256 updatedAt = t >> 192;
+        updatedAt = uint64(t >> 192);
         uint256 at = anchors.timestampOf(id);
         if (updatedAt > at || at > updatedAt + maxStaleness) revert StalePrice(updatedAt, at);
         value = uint256(uint192(answer)) * 1e6 / 10 ** decimals;

@@ -39,7 +39,7 @@ abstract contract ClearingStorage {
         IERC20Lite usd;
         AnchorRegistry anchors;
         ClearingCodec codec;
-        IPriceAdapter priceAdapter; // the batch price, from a witness at the batch's anchor
+        IPriceAdapter priceAdapter; // segment prices, from witnesses at the blocks they were read
         uint256 bandBps;
         uint256 challengeWindow; // proposals stay challengeable this long
         uint256 forceDelay; // a request or forced order must be served by a finalized batch within this
@@ -79,11 +79,19 @@ abstract contract ClearingStorage {
         uint64 time;
     }
 
+    /// One execution segment of a proposal: fills from `firstFill` on ran at L1 block `head`
+    /// (recorded in the AnchorRegistry), priced by witness number `price`.
+    struct SegmentRef {
+        uint32 firstFill;
+        uint32 price;
+        uint64 head;
+    }
+
     struct Pending {
         bytes32 root;
         bytes32 fillsHash;
-        /// keccak256(abi.encode(firstFills, prices, anchorBlocks)): the batch's oracle segments,
-        /// each price verified at its own anchor when the batch was proposed.
+        /// keccak256(abi.encode(firstFills, prices, heads)): the batch's execution segments,
+        /// each head recorded and each price verified (and fresh at its head) at proposal.
         bytes32 segments;
         uint64 at;
         uint64 reqCursor;
@@ -127,8 +135,8 @@ abstract contract ClearingStorage {
     event Proposed(
         uint256 indexed batch, bytes32 root, address proposer, bytes32 segments, uint64 reqCursor, uint64 forcedCursor
     );
-    /// A proposal's oracle segments: each price verified at its anchor (challengeFill takes them).
-    event Segments(uint256 indexed batch, uint32[] firstFills, uint256[] prices, uint64[] anchorBlocks);
+    /// A proposal's execution segments: each fill's head and price (challengeFill takes them).
+    event Segments(uint256 indexed batch, uint32[] firstFills, uint256[] prices, uint64[] heads);
     event ForcedRested(uint256 indexed pos);
     event Finalized(uint256 indexed batch, bytes32 root);
     event Discarded(uint256 indexed batch, address challenger, string reason);

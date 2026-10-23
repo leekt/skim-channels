@@ -43,7 +43,7 @@ contract ChainlinkAdapterTest is Test {
     function test_thePriceTheProxyReturnsAtTheAnchor() public {
         ChainlinkAdapter ad = _adapter(agg, aggHash, proxyHash, 3 hours);
         uint256 g = gasleft();
-        (uint256 p, uint64 at) = ad.price(pkg, anchors, 256);
+        (uint256 p, uint64 at,) = ad.price(pkg, anchors, 256);
         emit log_named_uint("adapter.price gas (execution)", g - gasleft());
         emit log_named_uint("witness bytes", pkg.length);
         assertEq(p, answer / 100, "8 decimals to 6");
@@ -97,7 +97,7 @@ contract ChainlinkAdapterTest is Test {
         for (uint256 i = 300; i < pkg.length; i += 1499) {
             bytes memory p = bytes.concat(pkg);
             p[i] = p[i] ^ 0x01;
-            try ad.price(p, anchors, 256) returns (uint256 v, uint64) {
+            try ad.price(p, anchors, 256) returns (uint256 v, uint64, uint64) {
                 assertEq(v, answer / 100, "a flip that verifies must not change the price");
                 revert("tampered witness accepted");
             } catch {}
