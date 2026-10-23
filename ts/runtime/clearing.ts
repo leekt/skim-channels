@@ -224,7 +224,8 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
   protected async rebuild() {
     const view = await this.exec.deploy(ROOT_OF(this), this.op, "L1View.sol", "L1View", [BigInt(this.view.chainId)]);
     const [l1v, ch, feed, slot, band] = [view, this.channel.address, this.priceFeed, this.priceSlot, 100n];
-    const book = await this.exec.deploy(ROOT_OF(this), this.op, "ClearingBook.sol", "ClearingBook", [l1v.address, ch, feed, slot, band, this.op.address]);
+    const { sessionId } = await this.l1.read<{ sessionId: bigint }>(this.channel, "config");
+    const book = await this.exec.deploy(ROOT_OF(this), this.op, "ClearingBook.sol", "ClearingBook", [l1v.address, ch, feed, slot, band, this.op.address, sessionId]);
     this.l1view = view;
     this.book = book;
     const fin = await ClearingOperator.recover(this.l1, this.channel);

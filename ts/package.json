@@ -13,7 +13,8 @@
     "devnet": "node --experimental-strip-types devnet.ts",
     "devnet-smoke": "node --experimental-strip-types devnet-smoke.ts",
     "e2e-executor": "node --experimental-strip-types e2e-executor.ts",
-    "live-executor": "node --experimental-strip-types live-executor.ts"
+    "live-executor": "node --experimental-strip-types live-executor.ts",
+    "e2e-sessions": "node --experimental-strip-types e2e-sessions.ts"
   },
   "dependencies": {
     "viem": "2.30.0"

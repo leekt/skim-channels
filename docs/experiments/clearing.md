@@ -15,7 +15,7 @@
 | What L1 checks at proposal | The price at a recorded, recent anchor; that the old leaves are in the finalized root (L1 computes the new root itself); queue cursors; forced-order statuses. **Nothing per fill** |
 | What a watcher can prove (one transaction each) | `challengeFill`: a bad signature, band, limit, expiry, same side, or unknown trader. `challengeAccount`: L1 replays one account (deposits → requests → fills) with `ClearingLedger` and compares it to the published leaf. This catches a wrong balance, a stale nonce, an uncovered sale, an omitted trader, or a request skipped, applied early, or consumed without its deposits |
 | Who proposes | The operator. After `takeoverDelay` without a proposal, anyone with a bond |
-| Exits | Withdrawal requests are served at the start of a batch and claimed from finalized leaves. A request or forced order unserved past `forceDelay` lets anyone freeze, and everyone exits from the finalized leaf |
+| Exits | Withdrawal requests are served at the start of a batch and claimed from finalized leaves. A request or forced order unserved past `forceDelay` lets anyone freeze, which closes the session; everyone redeems from the final leaf ([sessions](sessions.md)) |
 | Policy bounds | `challengeWindow` from 1 h to 30 d, with 2 × window ≤ `forceDelay`; `forceDelay` from 1 d to 60 d; `takeoverDelay` ≤ 60 d; `maxAnchorAge` ≤ 8191 blocks |
 
 **An earlier design was measured and dropped.** It checked every fill's economics on L1 and left only signatures optimistic. Against the same batch fully verified at once (below), it saved at most about 10k gas per fill, and cost more for sparse batches. That isn't worth a challenge window and a watcher.
@@ -43,7 +43,7 @@
 | R4: real block progress | While batch P waits out its window (300 blocks), batch Q is built. Q's anchor is then older than `maxAnchorAge` (256 blocks), so the runtime refuses to propose it until `tick()` re-pins it |
 | R5: executor lost | Executor A dies with one batch proposed and one unproposed. A fresh executor is rebuilt: `adopt` from L1's finalized state, the pending batch re-executed from the journal, the unproposed one replayed. Then both settle |
 | Handover | A goes silent for 2 days. Operator B rebuilds every account from L1 calldata alone; `adopt` accepts them (their root equals L1's) and B continues |
-| Freeze | A forced order nobody serves. Freeze is refused before its deadline and works after it. Every user exits, and the channel ends with 0 ETH and 0 USD |
+| Freeze | A forced order nobody serves. Freeze is refused before its deadline and works after it, closing the session. Every user redeems; after bond withdrawals the channel ends with 0 ETH and 0 USD |
 
 - **Live** (`SKIM_RPC=… npm run live-skim`, a skim node following Sepolia; read path only, nothing settled):
   - `skim_streamNext` reports WETH state changes from block access lists.

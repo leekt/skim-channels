@@ -6,7 +6,7 @@
 //   SKIM_RPC=http://127.0.0.1:8545 npm run live-skim
 import { privateKeyToAccount } from "viem/accounts";
 import { mkdirSync, writeFileSync } from "node:fs";
-import type { Address, Hex } from "viem";
+import { pad, toHex, type Address, type Hex } from "viem";
 import { Chain } from "./runtime/executor.ts";
 import { L1ReadView, ProofNotReady } from "./runtime/l1view.ts";
 import { eip712Order, type Order } from "./runtime/clearing.ts";
@@ -60,11 +60,11 @@ async function main() {
   const ex = await Chain.anvil(18668, 7001);
   try {
     const l1v = await ex.deploy(ROOT, op, "L1View.sol", "L1View", [BigInt(SEPOLIA)]);
-    const book = await ex.deploy(ROOT, op, "ClearingBook.sol", "ClearingBook", [l1v.address, NOBODY, BigInt(SEPOLIA), WETH, slot, 10_000n, op.address]);
+    const book = await ex.deploy(ROOT, op, "ClearingBook.sol", "ClearingBook", [l1v.address, NOBODY, BigInt(SEPOLIA), WETH, slot, 10_000n, op.address, 1n]);
     await ex.send(l1v, "pin", [wA.rawHeader, wA.package], op);
     check((await ex.read<bigint>(l1v, "read", [wA.anchorId, WETH, slot])) === valueA, "the executor verified the skim proofs: same value as skim's stateReady answer");
     await ex.send(book, "openBatch", [wA.anchorId, [], [], []], op);
-    const domain = { name: "SkimClearing", version: "0", chainId: SEPOLIA, verifyingContract: NOBODY };
+    const domain = { name: "SkimClearing", version: "0", chainId: SEPOLIA, verifyingContract: NOBODY, salt: pad(toHex(1n), { size: 32 }) };
     const o: Order = { trader: alice.address, sellToken: 0, sellAmount: 10n ** 15n, buyAmount: 1n, nonce: 1n, expiry: 10n ** 12n };
     const sig = await alice.signTypedData({ domain, types: eip712Order, primaryType: "Order", message: o as any });
     let refusedOrder = false;

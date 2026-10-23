@@ -73,7 +73,9 @@ contract ClearingCompareTest is Test {
                     maxAnchorAge: 8191,
                     minBond: 1 ether,
                     takeoverDelay: 2 days,
-                    appChainId: 7001
+                    appChainId: 7001,
+                    vault: address(0),
+                    sessionId: 1
                 })
             )
         );

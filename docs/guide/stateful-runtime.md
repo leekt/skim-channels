@@ -118,12 +118,48 @@ Tests:
 
 ## Withdrawals, forced orders, handover
 
-- **`requestWithdraw(token, amount)`:**
-  - It joins a queue and is served at the start of a batch, before that batch's fills.
-  - It releases up to `amount` of what is free, covers every deposit made before it, and is claimable from the finalized leaf.
-- **`forceOrder(order, sig)`** posts a signed order on L1. A finalized batch must fill it, or publish it as resting.
-- **Freeze:** a request or forced order unserved past `forceDelay` (≥ 1 day) lets anyone freeze. Every user then `exit`s from L1 with their finalized balances, unapplied deposits and released withdrawals.
+- **`requestWithdraw(token, amount)`** joins a queue and is served at the start of a batch, before its fills. It releases up to `amount` of what is free and covers every deposit made before it. The release is claimable (`claim`) once the batch is final.
+- **`forceOrder(order)`** posts an order from the trader's own L1 transaction. A finalized batch must fill it or publish it as resting within `forceDelay`.
+- **Freeze:** a request or forced order unserved past `forceDelay` (≥ 1 day) lets anyone freeze. Freezing closes the session at once (below).
 - **Handover:** after `takeoverDelay` without a proposal, anyone with a bond proposes.
+- **Bonds are pulled:** a finalized proposal's bond, and a challenge reward, are credited (`bondCredit`, `withdrawBond`). A proposer that can't receive ETH blocks nothing.
+
+## Sessions: open, close, start again
+
+The app is stable; its execution sessions are disposable. One **`ClearingVault`** is the app's identity and holds users' free balances. Each **session** is a `ClearingChannel` registered in the vault with the next id. The session id is the `salt` of the standard EIP-712 domain, so an order signed for one session never verifies in another.
+
+```
+vault ── session 1: run → close ── session 2: run → close ── …
+```
+
+**Lifecycle: Active → Closing → Closed.**
+
+| Phase | What can happen | Who must be watching |
+|---|---|---|
+| Active | Deposits, requests, forced orders, batches. Idle costs no L1 transactions | Someone: after `takeoverDelay` anyone may propose, so an idle session can still receive a claim |
+| Closing (`beginClose`: the operator, or anyone once the session is idle for `takeoverDelay`) | The admission cutoff is fixed: no deposits, requests or forced orders. Only the operator may still propose, to settle what it executed, and only until `takeoverDelay` after Closing began. So Closed is reachable by anyone within `takeoverDelay` + one challenge window | Watch until nothing is pending |
+| Closed (`close`: nothing pending; the operator, or anyone `takeoverDelay` after Closing began; or a freeze) | Terminal. No proposal, takeover, finalize or reopening. The final root never changes | Nothing, once the close transaction is final on L1 |
+
+**After close, each user redeems alone** (`redeem(idx, leaf, path, toVault)`). They get the final leaf's balances, plus deposits no batch applied, plus released withdrawals, minus everything already paid:
+- Queued withdrawal requests and unapplied deposits are covered.
+- Forced orders not filled by then are void, since nothing was traded.
+- No executor, watcher, oracle read or new execution proof is involved.
+
+**Rollover.** `redeem(…, toVault = true)` pays the same entitlement into the vault as the user's free balance:
+- **Who may do it:** only the user.
+- **Shared accounting:** the wallet path and the vault path share one payout record, so earlier claims are deducted and nothing is paid twice.
+- **Isolation:** a closed session keeps its outstanding liabilities. The vault never takes funds from a session, and a credit must arrive with its ETH and USD.
+- **Funding a new session:** the user moves free balance in with `vault.fund(session, token, amount)`. The operator can't move anyone's funds.
+- **What carries over:** only settled funds. Session 2 starts with an empty order book and empty AppState.
+
+**Recovery material** (`ts/runtime/recovery.ts`):
+- **What it holds:** the **session package** has every final leaf and the user list, as a passive file. A **claim file** has one user's leaf and path.
+- **How it's checked:** anyone verifies a package against the session's final root with current-state reads only (no logs, no old transactions). A package that doesn't rebuild the root is refused.
+- **Optional publication on L1:** `publishFinal(start, leaves, path)` takes aligned chunks of 2^k leaves, each accepted only if it is part of the final root.
+  - Cost is linear: about 5k execution gas plus 108 calldata bytes per user, and each chunk is bounded.
+  - Publication doesn't promise that nodes keep serving that calldata: history retention isn't guaranteed by the protocol. Keep the file.
+
+Measured end to end: [sessions](../experiments/sessions.md).
 
 ## Wallets: a standard JSON-RPC (`ts/runtime/gateway.ts`)
 
@@ -162,6 +198,7 @@ The typed signature is what L1 checks in a dispute.
 $ cd contracts && forge build && forge test --match-path 'test/clearing/*'
 $ cargo build -p channel-runner
 $ cd ts && npm run e2e-clearing                          # deterministic: anvil L1 + local executors
+$ cd ts && npm run e2e-sessions                          # close a session, delete everything, start the next
 $ SKIM_RPC=http://127.0.0.1:8545 npm run live-skim      # live: a skim node following Sepolia
 ```
 

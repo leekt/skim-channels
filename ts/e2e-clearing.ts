@@ -8,7 +8,7 @@
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { createPublicClient, createWalletClient, defineChain, encodeAbiParameters, encodeFunctionData, http, parseEther, toHex, zeroHash, type Address, type Hex } from "viem";
+import { createPublicClient, createWalletClient, defineChain, encodeAbiParameters, encodeFunctionData, http, pad, parseEther, toHex, zeroAddress, zeroHash, type Address, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { Chain, type C } from "./runtime/executor.ts";
 import { L1ReadView } from "./runtime/l1view.ts";
@@ -76,7 +76,7 @@ async function run(l1: Chain, exA: Chain, exB: Chain) {
   const disputes = await l1.deploy(ROOT, opA, "ClearingDisputes.sol", "ClearingDisputes", [{
     operator: opA.address, usd: token.address, anchors: anchors.address, witnessVerifier: wv.address, codec: codec.address,
     priceFeed: oracle.address, priceSlot: SLOT0, bandBps: 100n, challengeWindow: BigInt(WINDOW), forceDelay: BigInt(DAY),
-    maxAnchorAge: 256n, minBond: parseEther("1"), takeoverDelay: BigInt(2 * DAY), appChainId: 7001n,
+    maxAnchorAge: 256n, minBond: parseEther("1"), takeoverDelay: BigInt(2 * DAY), appChainId: 7001n, vault: zeroAddress, sessionId: 1n,
   }], "deploy ClearingDisputes");
   const core = await l1.deploy(ROOT, opA, "ClearingChannel.sol", "ClearingChannel", [disputes.address], "deploy ClearingChannel");
   const ch = mergeAbi(core, disputes);
@@ -107,7 +107,7 @@ async function run(l1: Chain, exA: Chain, exB: Chain) {
   // ---- operator A's executor ----
   async function deployBook(ex: Chain, operator: typeof opA) {
     const view = await ex.deploy(ROOT, operator, "L1View.sol", "L1View", [900n]);
-    const book = await ex.deploy(ROOT, operator, "ClearingBook.sol", "ClearingBook", [view.address, ch.address, oracle.address, SLOT0, 100n, operator.address]);
+    const book = await ex.deploy(ROOT, operator, "ClearingBook.sol", "ClearingBook", [view.address, ch.address, oracle.address, SLOT0, 100n, operator.address, 1n]);
     return { view, book };
   }
   const reader = new L1ReadView({ url: l1.url, chainId: 900, cli: CLI });
@@ -123,7 +123,7 @@ async function run(l1: Chain, exA: Chain, exB: Chain) {
   };
   const A = await mkOp(exA, opA);
   // Orders are signed on the app network (chain 7001), as a wallet connected to it would.
-  const domain = { name: "SkimClearing", version: "0", chainId: 7001, verifyingContract: ch.address };
+  const domain = { name: "SkimClearing", version: "0", chainId: 7001, verifyingContract: ch.address, salt: pad(toHex(1n), { size: 32 }) };
   async function order(who: typeof alice, sellToken: number, sellAmount: bigint, buyAmount: bigint, nonce: bigint, signer = who) {
     const o: Order = { trader: who.address, sellToken, sellAmount, buyAmount, nonce, expiry: FAR };
     const sig = await signer.signTypedData({ domain, types: eip712Order, primaryType: "Order", message: o as any });
@@ -450,7 +450,7 @@ async function run(l1: Chain, exA: Chain, exB: Chain) {
   const pend = await l1.read<any[]>(ch, "state");
   check(Number(pend[3]) === 11, `L1 counts ${pend[3]} finalized batches across the recoveries and the handover`);
 
-  // ==== a forced order nobody serves: freeze, everyone exits ================================
+  // ==== a forced order nobody serves: freeze closes the session, everyone redeems ============
   const cg = await order(carol, USD, usd(100), parseEther("0.04"), 5n);
   await l1.send(ch, "forceOrder", [cg.o], carol);
   await l1.rpc("anvil_mine", [toHex(1)]);
@@ -461,13 +461,13 @@ async function run(l1: Chain, exA: Chain, exB: Chain) {
   await l1.send(ch, "freeze", [], watcher, "freeze");
   const dense = Array.from({ length: 4 }, (_, i) => leafHash(B.fin.get(i) ?? EMPTY));
   for (const [i, who] of [[ia, alice], [ib, bob], [ic, carol], [id, dave]] as const) {
-    await l1.send(ch, "exit", [i, B.fin.get(i) ?? EMPTY, siblings(levels(dense), i)], watcher, "exit");
+    await l1.send(ch, "redeem", [i, B.fin.get(i) ?? EMPTY, siblings(levels(dense), i), false], watcher, "redeem");
     void who;
   }
   for (const a of [opA, opB, watcher]) {
     if ((await l1.read<bigint>(ch, "bondCredit", [a.address])) > 0n) await l1.send(ch, "withdrawBond", [], a, "withdrawBond");
   }
-  check((await l1.pub.getBalance({ address: ch.address })) === 0n, "after exits and bond withdrawals the channel holds no ETH");
+  check((await l1.pub.getBalance({ address: ch.address })) === 0n, "after redemptions and bond withdrawals the channel holds no ETH");
   check((await l1.read<bigint>(token, "balanceOf", [ch.address])) === 0n, "and no USD");
   const out = async (a: Address) => [await l1.pub.getBalance({ address: a }), await l1.read<bigint>(token, "balanceOf", [a])];
   const [ae, au] = await out(alice.address);

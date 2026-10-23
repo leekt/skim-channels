@@ -47,6 +47,7 @@ abstract contract ClearingChannelBase is Test {
     uint256[3] keys = [uint256(0xA11CE), 0xB0B, 0xCA201];
     address[3] who;
     L.Account[] fin; // finalized leaves by index
+    address vaultAddr; // none unless a suite sets one up (_beforeChannel)
 
     function setUp() public virtual {
         vm.chainId(11155111);
@@ -62,6 +63,7 @@ abstract contract ClearingChannelBase is Test {
         vm.roll(200);
         vm.setBlockhash(101, keccak256(raw1));
         anchors.record(raw1);
+        _beforeChannel();
         ch = new ClearingChannel(new ClearingDisputes(_config()));
         D = ClearingDisputes(address(ch));
         vm.deal(op, 100 ether);
@@ -74,6 +76,8 @@ abstract contract ClearingChannelBase is Test {
         _fund(1, 0, 20_000);
         _fund(2, 1 ether, 10_000);
     }
+
+    function _beforeChannel() internal virtual {}
 
     function _config() internal view returns (ClearingStorage.Config memory) {
         return ClearingStorage.Config({
@@ -90,7 +94,9 @@ abstract contract ClearingChannelBase is Test {
             maxAnchorAge: 256,
             minBond: 1 ether,
             takeoverDelay: 2 days,
-            appChainId: 7001
+            appChainId: 7001,
+            vault: vaultAddr,
+            sessionId: 1
         });
     }
 
@@ -187,7 +193,7 @@ abstract contract ClearingChannelBase is Test {
         for (uint256 i; i < next.length; ++i) {
             fin[i] = next[i];
         }
-        (bytes32 root,,,,,) = D.state();
+        (bytes32 root,,,,,,) = D.state();
         assertEq(root, Tree.root(_hashes(_copyFin())), "model root");
     }
 
@@ -485,13 +491,13 @@ contract ClearingChannelTest is ClearingChannelBase {
         vm.prank(who[0]);
         ch.requestWithdraw(R.USD, 1);
         vm.warp(block.timestamp + 1 days);
-        D.freeze(); // alice's isn't served
-        // Exits pay once.
+        D.freeze(); // alice's isn't served: the session closes
+        // Redemptions pay once.
         uint256 e0 = who[2].balance;
-        D.exit(2, fin[2], _sib(_copyFin(), 2));
+        D.redeem(2, fin[2], _sib(_copyFin(), 2), false);
         assertEq(who[2].balance - e0, 1 ether, "carol's released 1 ETH");
         vm.expectRevert(ClearingStorage.WrongState.selector);
-        D.exit(2, fin[2], _sib(_copyFin(), 2));
+        D.redeem(2, fin[2], _sib(_copyFin(), 2), false);
     }
 
     function test_badAnchorRejected() public {
@@ -554,7 +560,7 @@ contract ClearingChannelTest is ClearingChannelBase {
         for (uint32 i; i < 3; ++i) {
             uint256 e0 = who[i].balance;
             uint256 u0 = usd.balanceOf(who[i]);
-            D.exit(i, fin[i], _sib(_copyFin(), i));
+            D.redeem(i, fin[i], _sib(_copyFin(), i), false);
             assertEq(who[i].balance - e0, wantEth[i]);
             assertEq(usd.balanceOf(who[i]) - u0, wantUsd[i]);
         }
@@ -622,9 +628,10 @@ contract ClearingChannelTest is ClearingChannelBase {
         D.challengeFill(fills, 0);
     }
 
-    /// Orders are signed in the app network's domain (what a wallet connected to it can sign).
-    function test_domainIsTheAppChain() public view {
-        assertEq(ch.domain(), R.domainSeparator(7001, address(ch)));
+    /// Orders are signed in the app network's domain (what a wallet connected to it can sign),
+    /// salted with the session id.
+    function test_domainIsTheAppChainAndSession() public view {
+        assertEq(ch.domain(), R.domainSeparator(7001, address(ch), bytes32(uint256(1))));
     }
 
     // ---- handover -----------------------------------------------------------------------------

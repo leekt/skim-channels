@@ -25,7 +25,14 @@ import {SparseTree16} from "../predict/SparseTree16.sol";
 ///   published leaves and fills, and the request and forced-order queues.
 /// - **Forced orders:** a user posts a signed order on L1. A finalized batch must fill it
 ///   or publish it as resting (ForcedRested) within `forceDelay`; otherwise anyone can
-///   freeze, as for an unserved withdrawal request. Then every user exits from L1.
+///   freeze, as for an unserved withdrawal request: the session closes at once.
+/// - **Session lifecycle** (one session of an app; its ClearingVault outlives it):
+///   Active → `beginClose` → Closing → `close` → Closed. Closing fixes the admission cutoff
+///   (no deposits, withdrawal requests or forced orders after it). In Closed nothing can
+///   propose, take over or reopen it, and each user redeems from the final root: the leaf's
+///   balance, plus deposits it never applied, plus released withdrawals, minus what was paid.
+///   That covers queued withdrawal requests and unapplied deposits; forced orders not filled
+///   by then are void (nothing was traded, so nothing is owed for them).
 contract ClearingChannel is ClearingStorage {
     ClearingDisputes public immutable disputes;
 
@@ -53,19 +60,30 @@ contract ClearingChannel is ClearingStorage {
     /// when they sign) and this channel. MetaMask-style wallets refuse typed data for any chain
     /// other than the active one.
     function domain() public view returns (bytes32) {
-        return R.domainSeparator(appChainId, address(this));
+        return _domain();
     }
 
     // ---- users ------------------------------------------------------------------------------
 
     function deposit(uint8 token, uint128 amount) external payable {
-        if (_frozen || amount == 0) revert WrongState();
-        uint32 idx = _indexPlusOne[msg.sender];
+        _deposit(msg.sender, msg.sender, token, amount);
+    }
+
+    /// @notice The vault moves a user's free balance into this session, on that user's own
+    ///         request (ClearingVault.fund).
+    function depositFor(address user, uint8 token, uint128 amount) external payable {
+        if (msg.sender != vault || vault == address(0)) revert WrongState();
+        _deposit(user, msg.sender, token, amount);
+    }
+
+    function _deposit(address user, address from, uint8 token, uint128 amount) internal {
+        if (_phase != Phase.Active || amount == 0) revert WrongState();
+        uint32 idx = _indexPlusOne[user];
         if (idx == 0) {
             if (_users.length >= 1 << 16) revert WrongState();
-            _users.push(msg.sender);
+            _users.push(user);
             idx = uint32(_users.length);
-            _indexPlusOne[msg.sender] = idx;
+            _indexPlusOne[user] = idx;
         }
         idx -= 1;
         Totals storage t = _cumIn[idx];
@@ -74,13 +92,13 @@ contract ClearingChannel is ClearingStorage {
             t.eth += amount;
             _userFunds.eth += amount;
         } else if (token == R.USD) {
-            if (msg.value != 0 || !usd.transferFrom(msg.sender, address(this), amount)) revert WrongState();
+            if (msg.value != 0 || !usd.transferFrom(from, address(this), amount)) revert WrongState();
             t.usd += amount;
             _userFunds.usd += amount;
         } else {
             revert WrongState();
         }
-        emit Deposited(idx, msg.sender, token, amount);
+        emit Deposited(idx, user, token, amount);
     }
 
     /// @notice Withdraw up to `amount` of `token`. Served at the start of a batch (before its
@@ -88,7 +106,7 @@ contract ClearingChannel is ClearingStorage {
     ///         deposit made before it. Deadline: forceDelay, fixed now.
     function requestWithdraw(uint8 token, uint128 amount) external {
         uint32 idx = _indexPlusOne[msg.sender];
-        if (idx == 0 || token > R.USD || amount == 0) revert WrongState();
+        if (_phase != Phase.Active || idx == 0 || token > R.USD || amount == 0) revert WrongState();
         idx -= 1;
         uint256 pos = _requests.length;
         _requests.push(
@@ -103,7 +121,7 @@ contract ClearingChannel is ClearingStorage {
     ///         A finalized batch must fill it or publish it as resting within forceDelay.
     function forceOrder(R.Order calldata o) external {
         uint32 idx = _indexPlusOne[o.trader];
-        if (_frozen || idx == 0 || msg.sender != o.trader) revert WrongState();
+        if (_phase != Phase.Active || idx == 0 || msg.sender != o.trader) revert WrongState();
         bytes32 h = R.orderHash(o);
         uint256 pos = _forced.length;
         _forced.push(Forced(h, uint64(block.timestamp)));
@@ -130,10 +148,14 @@ contract ClearingChannel is ClearingStorage {
         uint64 forcedCursor,
         bytes calldata forcedStatus
     ) external payable {
-        if (msg.sender != operator && block.timestamp <= _lastProposalAt + takeoverDelay) {
-            revert WrongState();
-        }
-        if (_frozen || _pending.at != 0 || msg.value < minBond) revert WrongState();
+        // Active: the operator, or anyone after takeoverDelay. Closing: only the operator
+        // settles what it executed, and only until anyone may close (so proposals can't
+        // hold a session open forever). Closed: nobody.
+        Phase ph = _phase;
+        bool open = ph == Phase.Active && block.timestamp > _lastProposalAt + takeoverDelay;
+        if (ph == Phase.Closed || (msg.sender != operator && !open)) revert WrongState();
+        if (ph == Phase.Closing && block.timestamp > _closingAt + takeoverDelay) revert WrongState();
+        if (_pending.at != 0 || msg.value < minBond) revert WrongState();
         if (fills.length % L.FILL_BYTES != 0 || fills.length / L.FILL_BYTES > MAX_FILLS) revert BadBatch("fills");
         if (reqCursor < _finalizedReq || reqCursor > _requests.length) revert BadBatch("reqCursor");
         uint256 f0 = _finalizedForced;
@@ -179,7 +201,7 @@ contract ClearingChannel is ClearingStorage {
     ///         back to the proposer (withdrawBond).
     function finalize() external {
         Pending memory p = _pending;
-        if (_frozen || p.at == 0 || block.timestamp < p.at + challengeWindow) revert WrongState();
+        if (_phase == Phase.Closed || p.at == 0 || block.timestamp < p.at + challengeWindow) revert WrongState();
         _finalizedRoot = p.root;
         _finalizedReq = p.reqCursor;
         _finalizedForced = p.forcedCursor;
@@ -195,6 +217,28 @@ contract ClearingChannel is ClearingStorage {
         delete _bondCredit[msg.sender];
         (bool ok,) = msg.sender.call{value: b}("");
         if (!ok) revert TransferFailed();
+    }
+
+    // ---- lifecycle --------------------------------------------------------------------------
+
+    /// @notice Stop admitting deposits, withdrawal requests and forced orders. The operator,
+    ///         or anyone once the session has been idle for takeoverDelay (abandoned).
+    function beginClose() external {
+        if (_phase != Phase.Active) revert WrongState();
+        if (msg.sender != operator && block.timestamp <= _lastProposalAt + takeoverDelay) revert WrongState();
+        _phase = Phase.Closing;
+        _closingAt = uint64(block.timestamp);
+        emit ClosingStarted(_requests.length, _forced.length, msg.sender);
+    }
+
+    /// @notice Make the session terminal. Nothing may be pending: a proposal must have
+    ///         finalized (or been discarded) first. The operator any time in Closing; anyone
+    ///         takeoverDelay after Closing began.
+    function close() external {
+        if (_phase != Phase.Closing || _pending.at != 0) revert WrongState();
+        if (msg.sender != operator && block.timestamp <= _closingAt + takeoverDelay) revert WrongState();
+        _phase = Phase.Closed;
+        emit Closed(_finalizedRoot, _batches);
     }
 
     // ---- views ------------------------------------------------------------------------------

@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {ClearingLedger as L} from "./ClearingLedger.sol";
 import {ClearingCodec} from "./ClearingCodec.sol";
+import {ClearingRules as R} from "./ClearingRules.sol";
 import {SparseTree16} from "../predict/SparseTree16.sol";
 import {AnchorRegistry} from "../AnchorRegistry.sol";
 import {WitnessVerifier} from "../verifiers/WitnessVerifier.sol";
@@ -10,6 +11,13 @@ import {WitnessVerifier} from "../verifiers/WitnessVerifier.sol";
 interface IERC20Lite {
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
     function transfer(address to, uint256 amount) external returns (bool);
+    function approve(address spender, uint256 amount) external returns (bool);
+    function balanceOf(address who) external view returns (uint256);
+}
+
+/// The vault side of a redemption into the vault (ClearingVault.credit).
+interface IClearingVault {
+    function credit(address user, uint128 usdAmount) external payable;
 }
 
 /// @notice State shared by ClearingChannel and ClearingDisputes (the channel delegatecalls
@@ -41,6 +49,18 @@ abstract contract ClearingStorage {
         uint256 minBond; // per proposal
         uint256 takeoverDelay; // after this long without a proposal, anyone may propose
         uint256 appChainId; // the app network's chain id: the EIP-712 domain orders are signed in
+        address vault; // the app's ClearingVault (may fund deposits; receives redemptions)
+        uint64 sessionId; // this session's id in the vault (≥ 1), the EIP-712 domain's salt
+    }
+
+    /// Active → Closing → Closed. Closing fixes the admission cutoff: no new deposits,
+    /// withdrawal requests or forced orders; the operator may still settle what was executed.
+    /// Closed is terminal: the finalized root never changes again, and every user redeems
+    /// from it without an executor, watcher or oracle (see `redeem`).
+    enum Phase {
+        Active,
+        Closing,
+        Closed
     }
 
     struct Totals {
@@ -89,12 +109,13 @@ abstract contract ClearingStorage {
     uint256 internal _batches; // finalized
     uint256 internal _lastProposalAt;
     Pending internal _pending;
-    bool internal _frozen;
+    Phase internal _phase;
+    uint64 internal _closingAt;
+    /// Bonds owed back (refunds and challenge rewards), paid on request: a proposer that
+    /// can't receive ETH never blocks finalize, freeze or close.
+    mapping(address => uint256) internal _bondCredit;
     /// Forced orders were authorized by their trader's own L1 transaction (no typed signature).
     mapping(bytes32 => bool) internal _forcedAuth;
-    /// Bonds owed back (refunds and challenge rewards), paid on request: a proposer that
-    /// can't receive ETH never blocks finalize or freeze.
-    mapping(address => uint256) internal _bondCredit;
 
     address internal immutable operator;
     IERC20Lite internal immutable usd;
@@ -110,6 +131,8 @@ abstract contract ClearingStorage {
     uint256 internal immutable minBond;
     uint256 internal immutable takeoverDelay;
     uint256 internal immutable appChainId;
+    address internal immutable vault;
+    uint64 internal immutable sessionId;
 
     event Deposited(uint32 indexed idx, address user, uint8 token, uint256 amount);
     event WithdrawRequested(uint256 indexed pos, uint32 indexed idx, uint8 token, uint256 amount);
@@ -128,6 +151,10 @@ abstract contract ClearingStorage {
     event Discarded(uint256 indexed batch, address challenger, string reason);
     event Frozen(uint256 overdueRequest, uint256 overdueForced);
     event Paid(uint32 indexed idx, uint8 token, uint256 amount);
+    event ClosingStarted(uint256 requestCutoff, uint256 forcedCutoff, address by);
+    event Closed(bytes32 finalRoot, uint256 batches);
+    event FinalPublished(bytes32 finalRoot, uint256 start, uint256 count);
+    event Redeemed(uint32 indexed idx, uint128 eth, uint128 usd, bool toVault);
     event BondCredited(address indexed to, uint256 amount);
 
     error WrongState();
@@ -145,7 +172,7 @@ abstract contract ClearingStorage {
             c.challengeWindow < MIN_CHALLENGE_WINDOW || c.challengeWindow > MAX_CHALLENGE_WINDOW
                 || c.forceDelay < MIN_FORCE_DELAY || c.forceDelay > MAX_FORCE_DELAY
                 || 2 * c.challengeWindow > c.forceDelay || c.takeoverDelay > MAX_TAKEOVER_DELAY
-                || c.maxAnchorAge > MAX_ANCHOR_AGE || c.bandBps > 10_000
+                || c.maxAnchorAge > MAX_ANCHOR_AGE || c.bandBps > 10_000 || c.sessionId == 0
         ) {
             revert BadPolicy();
         }
@@ -163,6 +190,12 @@ abstract contract ClearingStorage {
         minBond = c.minBond;
         takeoverDelay = c.takeoverDelay;
         appChainId = c.appChainId;
+        vault = c.vault;
+        sessionId = c.sessionId;
+    }
+
+    function _domain() internal view returns (bytes32) {
+        return R.domainSeparator(appChainId, address(this), bytes32(uint256(sessionId)));
     }
 
     function _creditBond(address to, uint256 amount) internal {
@@ -183,12 +216,19 @@ abstract contract ClearingStorage {
         if (SparseTree16.rootFrom(L.leafHash(a), idx, sib) != root) revert BadProof();
     }
 
-    function _pay(uint32 idx, uint128 eth, uint128 dollars) internal {
+    /// Pays out of users' funds to the user's wallet, or (`toVault`) into the app's vault as
+    /// the user's free balance. Callers record the payout in `_paid` first.
+    function _pay(uint32 idx, uint128 eth, uint128 dollars, bool toVault) internal {
         Totals storage f = _userFunds;
         if (eth > f.eth || dollars > f.usd) revert Insolvent();
         f.eth -= eth;
         f.usd -= dollars;
         address to = _users[idx];
+        if (toVault) {
+            if (dollars > 0 && !usd.transfer(vault, dollars)) revert TransferFailed();
+            IClearingVault(vault).credit{value: eth}(to, dollars);
+            return;
+        }
         if (eth > 0) {
             emit Paid(idx, 0, eth);
             (bool ok,) = to.call{value: eth}("");

@@ -22,7 +22,7 @@ import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  createWalletClient, decodeFunctionData, defineChain, http, parseEther, parseTransaction, toHex, type Address, type Hex,
+  createWalletClient, decodeFunctionData, defineChain, http, pad, parseEther, zeroAddress, parseTransaction, toHex, type Address, type Hex,
 } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { Chain, type C } from "./runtime/executor.ts";
@@ -85,14 +85,14 @@ async function main() {
   const disputes = await l1.deploy(ROOT, op, "ClearingDisputes.sol", "ClearingDisputes", [{
     operator: op.address, usd: token.address, anchors: anchors.address, witnessVerifier: wv.address, codec: codec.address,
     priceFeed: oracle.address, priceSlot: SLOT0, bandBps: 100n, challengeWindow: BigInt(WINDOW), forceDelay: BigInt(DAY),
-    maxAnchorAge: 256n, minBond: parseEther("1"), takeoverDelay: BigInt(2 * DAY), appChainId: BigInt(APP_ID),
+    maxAnchorAge: 256n, minBond: parseEther("1"), takeoverDelay: BigInt(2 * DAY), appChainId: BigInt(APP_ID), vault: zeroAddress, sessionId: 1n,
   }]);
   const core = await l1.deploy(ROOT, op, "ClearingChannel.sol", "ClearingChannel", [disputes.address]);
   const ch = mergeAbi(core, disputes);
 
   // ---- app network ----
   const view = await ex.deploy(ROOT, op, "L1View.sol", "L1View", [BigInt(L1_ID)]);
-  const book = await ex.deploy(ROOT, op, "ClearingBook.sol", "ClearingBook", [view.address, ch.address, oracle.address, SLOT0, 100n, op.address]);
+  const book = await ex.deploy(ROOT, op, "ClearingBook.sol", "ClearingBook", [view.address, ch.address, oracle.address, SLOT0, 100n, op.address, 1n]);
   const reader = new L1ReadView({ url: l1.url, chainId: L1_ID, cli: CLI });
   const A = new ClearingOperator({
     view: reader, exec: ex, book, l1view: view, op, l1, channel: ch, anchors, priceFeed: oracle.address, priceSlot: SLOT0,
@@ -109,7 +109,7 @@ async function main() {
   await l1.send(ch, "deposit", [1, usd(500_000)], maker);
   const appChain = defineChain({ id: APP_ID, name: "skim clearing (devnet)", nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 }, rpcUrls: { default: { http: [gw.url] } } });
   const makerWallet = createWalletClient({ account: maker, chain: appChain, transport: http(gw.url), pollingInterval: 50 });
-  const domain = { name: "SkimClearing", version: "0", chainId: APP_ID, verifyingContract: ch.address };
+  const domain = { name: "SkimClearing", version: "0", chainId: APP_ID, verifyingContract: ch.address, salt: pad(toHex(1n), { size: 32 }) };
   note(`L1 channel ${ch.address}, app book ${book.address}, maker ${maker.address}`);
 
   // ---- orders seen on the app network (from the journal's raw transactions) ----
@@ -234,7 +234,7 @@ async function main() {
     busy = true;
     try {
       const st = await l1.read<any[]>(ch, "state");
-      if (st[5]) return; // frozen: users exit on L1
+      if (st[5] === 2) return; // closed: users redeem on L1
       const t = await A.tick();
       if (t.status === "recovered") note(`recovered batch ${t.from} (${t.reason}): ${t.dropped.length} action(s) dropped`);
       if (!A.batches.length || A.current.state !== "open") {
@@ -323,7 +323,7 @@ async function main() {
         for (const k of known.values()) orders.push({ ...k, resting: await ex.read<boolean>(book, "resting", [k.hash]) });
         return json(res, {
           price: p.toString(), l1Block: (await l1.height()).toString(), l1Time: (await l1.pub.getBlock()).timestamp.toString(),
-          frozen: st[5], finalizedBatches: st[3].toString(),
+          frozen: st[5] === 2, finalizedBatches: st[3].toString(),
           pending: pend.at === 0n ? null : { at: pend.at.toString(), proposer: pend.proposer, finalizableAt: (pend.at + BigInt(WINDOW)).toString() },
           sepolia: {
             mirrored: relayed.slice(-8).reverse().map((m) => ({ ...str(m) })),

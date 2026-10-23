@@ -93,7 +93,8 @@ contract ClearingBook {
         address priceFeed_,
         bytes32 priceSlot_,
         uint256 bandBps_,
-        address operator_
+        address operator_,
+        uint64 sessionId_
     ) {
         l1 = l1_;
         channel = channel_;
@@ -101,8 +102,9 @@ contract ClearingBook {
         priceSlot = priceSlot_;
         bandBps = bandBps_;
         operator = operator_;
-        // Orders are signed for this chain (the network wallets connect to) and the L1 channel.
-        domain = R.domainSeparator(block.chainid, channel_);
+        // Orders are signed for this chain (the network wallets connect to), the L1 channel
+        // and its session.
+        domain = R.domainSeparator(block.chainid, channel_, bytes32(uint256(sessionId_)));
     }
 
     modifier onlyOperator() {

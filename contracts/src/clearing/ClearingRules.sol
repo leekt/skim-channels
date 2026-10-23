@@ -44,15 +44,20 @@ library ClearingRules {
         OutsideBand
     }
 
-    /// Orders are signed for the L1 settlement contract on L1's chain, never for the executor.
-    function domainSeparator(uint256 l1ChainId, address settlement) internal pure returns (bytes32) {
+    /// The standard EIP-712 domain with all five fields: `chainId` is the chain wallets sign on
+    /// (the app network), `verifyingContract` the L1 settlement contract, and `salt` the
+    /// session id, so an order signed for one session never verifies in another.
+    function domainSeparator(uint256 chainId, address settlement, bytes32 salt) internal pure returns (bytes32) {
         return keccak256(
             abi.encode(
-                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+                keccak256(
+                    "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract,bytes32 salt)"
+                ),
                 keccak256("SkimClearing"),
                 keccak256("0"),
-                l1ChainId,
-                settlement
+                chainId,
+                settlement,
+                salt
             )
         );
     }

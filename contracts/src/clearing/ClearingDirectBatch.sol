@@ -56,7 +56,7 @@ contract ClearingDirectBatch {
         bandBps = band;
         maxAnchorAge = maxAge;
         usd = usd_;
-        domain = R.domainSeparator(block.chainid, address(this));
+        domain = R.domainSeparator(block.chainid, address(this), bytes32(0));
     }
 
     function deposit(uint8 token, uint128 amount) external payable {

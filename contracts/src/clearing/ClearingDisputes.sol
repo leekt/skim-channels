@@ -5,7 +5,7 @@ import {ClearingStorage} from "./ClearingStorage.sol";
 import {ClearingCodec} from "./ClearingCodec.sol";
 import {ClearingLedger as L} from "./ClearingLedger.sol";
 import {ClearingRules as R} from "./ClearingRules.sol";
-import {ChannelTypes} from "../libraries/ChannelTypes.sol";
+import {SparseTree16} from "../predict/SparseTree16.sol";
 
 /// @notice Challenges, freeze and the operator-free exit of ClearingChannel. Runs only by
 ///         delegatecall from the channel (shared ClearingStorage layout).
@@ -33,7 +33,9 @@ contract ClearingDisputes is ClearingStorage {
             maxAnchorAge,
             minBond,
             takeoverDelay,
-            appChainId
+            appChainId,
+            vault,
+            sessionId
         );
     }
 
@@ -46,18 +48,19 @@ contract ClearingDisputes is ClearingStorage {
             uint256 finalizedForced,
             uint256 batches,
             uint256 lastProposalAt,
-            bool frozen
+            Phase phase,
+            uint64 closingAt
         )
     {
-        return (_finalizedRoot, _finalizedReq, _finalizedForced, _batches, _lastProposalAt, _frozen);
-    }
-
-    function pending() external view returns (Pending memory) {
-        return _pending;
+        return (_finalizedRoot, _finalizedReq, _finalizedForced, _batches, _lastProposalAt, _phase, _closingAt);
     }
 
     function bondCredit(address a) external view returns (uint256) {
         return _bondCredit[a];
+    }
+
+    function pending() external view returns (Pending memory) {
+        return _pending;
     }
 
     modifier viaChannel() {
@@ -74,16 +77,17 @@ contract ClearingDisputes is ClearingStorage {
         _creditBond(to, p.bond);
     }
 
-    /// @notice Withdrawals released in the finalized leaf, not yet paid.
+    /// @notice While the session runs: withdrawals released in the finalized leaf, not yet
+    ///         paid. After it closes, use `redeem`.
     function claim(uint32 idx, L.Account calldata leaf, bytes32[16] calldata sib) external viaChannel {
-        if (_frozen || idx >= _users.length) revert WrongState();
+        if (_phase == Phase.Closed || idx >= _users.length) revert WrongState();
         _prove(leaf, idx, sib, _finalizedRoot);
         Totals storage pd = _paid[idx];
         uint128 e = leaf.ethOut - pd.eth;
         uint128 u = leaf.usdOut - pd.usd;
         if (e == 0 && u == 0) revert WrongState();
         (pd.eth, pd.usd) = (leaf.ethOut, leaf.usdOut);
-        _pay(idx, e, u);
+        _pay(idx, e, u, false);
     }
 
     function _live(bytes calldata fills) internal view {
@@ -115,7 +119,7 @@ contract ClearingDisputes is ClearingStorage {
                 p.price,
                 bandBps,
                 p.anchorBlock,
-                R.domainSeparator(appChainId, address(this))
+                _domain()
             );
         }
         if (!fault) revert NotWrong();
@@ -168,19 +172,30 @@ contract ClearingDisputes is ClearingStorage {
     }
 
     /// @notice Anyone: the oldest unserved withdrawal request or forced order is past its
-    ///         deadline. Stops settlement (a pending batch is dropped, its bond returned).
+    ///         deadline. The session closes at once (a pending batch is dropped, its bond
+    ///         credited back to its proposer).
     function freeze() external viaChannel {
-        if (_frozen) revert WrongState();
+        if (_phase == Phase.Closed) revert WrongState();
         if (!_overdue()) revert NotOverdue();
-        _frozen = true;
         if (_pending.at != 0) _discard(_pending.proposer, "frozen");
+        _phase = Phase.Closed;
+        if (_closingAt == 0) _closingAt = uint64(block.timestamp);
         emit Frozen(_finalizedReq, _finalizedForced);
+        emit Closed(_finalizedRoot, _batches);
     }
 
-    /// @notice After a freeze: the finalized leaf's balances, plus deposits it hasn't
-    ///         applied, plus its released withdrawals, minus what was already paid.
-    function exit(uint32 idx, L.Account calldata leaf, bytes32[16] calldata sib) external viaChannel {
-        if (!_frozen || idx >= _users.length) revert WrongState();
+    /// @notice After the session closed: everything the user is owed, from the final root.
+    ///         The leaf's balances, plus deposits it never applied, plus its released
+    ///         withdrawals, minus everything already paid (claims and earlier redemptions).
+    ///         Paid to the user's wallet (anyone may trigger it), or, by the user alone, into
+    ///         the app's vault as free balance for another session. Both record the same
+    ///         payout, so nothing can be redeemed twice either way.
+    function redeem(uint32 idx, L.Account calldata leaf, bytes32[16] calldata sib, bool toVault)
+        external
+        viaChannel
+    {
+        if (_phase != Phase.Closed || idx >= _users.length) revert WrongState();
+        if (toVault && (vault == address(0) || msg.sender != _users[idx])) revert WrongState();
         _prove(leaf, idx, sib, _finalizedRoot);
         Totals memory ins = _cumIn[idx];
         Totals storage pd = _paid[idx];
@@ -189,6 +204,24 @@ contract ClearingDisputes is ClearingStorage {
         if (e == 0 && u == 0) revert WrongState();
         pd.eth += e;
         pd.usd += u;
-        _pay(idx, e, u);
+        emit Redeemed(idx, e, u, toVault);
+        _pay(idx, e, u, toVault);
+    }
+
+    /// @notice After close, optionally: publish final leaves, one complete aligned subtree
+    ///         at a time (2^k leaves from `start`, ClearingLedger.LEAF_BYTES each, with the
+    ///         16 − k siblings above it). Accepted only if the chunk is part of the final
+    ///         root, so each chunk's calldata is recovery data L1 has checked. Chunks keep
+    ///         every transaction bounded whatever the session's size; indices past the last
+    ///         user must be empty leaves.
+    function publishFinal(uint256 start, bytes calldata leaves, bytes32[] calldata path) external viaChannel {
+        if (_phase != Phase.Closed || leaves.length % L.LEAF_BYTES != 0) revert WrongState();
+        uint256 n = leaves.length / L.LEAF_BYTES;
+        bytes32[] memory h = new bytes32[](n);
+        for (uint256 i; i < n; ++i) {
+            h[i] = L.leafHash(L.decodeLeaf(leaves[i * L.LEAF_BYTES:(i + 1) * L.LEAF_BYTES]));
+        }
+        if (SparseTree16.rootOfSubtree(h, start, path) != _finalizedRoot) revert BadProof();
+        emit FinalPublished(_finalizedRoot, start, n);
     }
 }

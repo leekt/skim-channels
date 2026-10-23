@@ -35,7 +35,7 @@ contract ClearingL1 {
         feed = feed_;
         bandBps = bandBps_;
         usd = usd_;
-        domain = R.domainSeparator(block.chainid, address(this));
+        domain = R.domainSeparator(block.chainid, address(this), bytes32(0));
     }
 
     function deposit(uint8 token, uint128 amount) external payable {

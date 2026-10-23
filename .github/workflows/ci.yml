@@ -91,3 +91,6 @@ jobs:
       - name: e2e app executor (imported L1 accounts, write rules, pin moves)
         working-directory: ts
         run: npm run -s e2e-executor
+      - name: e2e sessions (close, forget, restart from recovery material)
+        working-directory: ts
+        run: npm run -s e2e-sessions

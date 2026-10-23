@@ -212,7 +212,7 @@
               <div class="ds-field"><label class="ds-label" for="wAmt">Amount</label><input class="ds-input" id="wAmt" value="0.1" inputmode="decimal"></div>
               <button class="ds-button" id="request">Request on L1</button>
             </div>
-            <div class="row"><button class="ds-button" id="claim">Claim released funds</button><button class="ds-button ds-button--destructive" id="exit">Exit after a freeze</button></div>
+            <div class="row"><button class="ds-button" id="claim">Claim released funds</button><button class="ds-button ds-button--destructive" id="exit">Redeem after close</button></div>
             <p class="note">A request is served at the start of the next batch and becomes claimable once that batch is final on L1, after a 1-hour challenge window. On the devnet, skip ahead with “+1 hour” under Batches.</p>
           </div>
         </div>
@@ -456,7 +456,7 @@ async function leafArgs() {
   return [r.idx, l, r.siblings];
 }
 on("claim", "Claim on L1", async () => send(l1Chain, cfg.l1.channel, cfg.abi.channel, "claim", await leafArgs()));
-on("exit", "Exit on L1", async () => send(l1Chain, cfg.l1.channel, cfg.abi.channel, "exit", await leafArgs()));
+on("exit", "Redeem on L1", async () => send(l1Chain, cfg.l1.channel, cfg.abi.channel, "redeem", [...(await leafArgs()), false]));
 on("place", "Place order", async () => {
   const o = buildOrder();
   await ensureChain(appChain); // wallets sign typed data only for the active chain
@@ -510,7 +510,7 @@ function renderBatches(s) {
   $("blkTime").textContent = new Date(Number(s.l1Time) * 1000).toLocaleString();
   $("pend").innerHTML = s.pending ? `${chip("wait", "Challenge window")} until ${new Date(Number(s.pending.finalizableAt) * 1000).toLocaleTimeString()}` : "nothing";
   $("frozen").className = "chip " + (s.frozen ? "fail" : "ok");
-  $("frozen").textContent = s.frozen ? "Frozen: exit on L1" : "Running";
+  $("frozen").textContent = s.frozen ? "Closed: redeem on L1" : "Running";
 }
 
 async function refresh() {

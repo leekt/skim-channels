@@ -13,7 +13,7 @@ library SparseTree16 {
 
     function zero(uint256 level) internal pure returns (bytes32 z) {
         for (uint256 i; i < level; ++i) {
-            z = keccak256(abi.encodePacked(z, z));
+            z = hashPair(z, z);
         }
     }
 
@@ -21,13 +21,48 @@ library SparseTree16 {
         return zero(DEPTH);
     }
 
+    /// keccak256(a ‖ b) in scratch space: no memory allocation, so long loops stay linear.
+    function hashPair(bytes32 a, bytes32 b) internal pure returns (bytes32 h) {
+        assembly {
+            mstore(0x00, a)
+            mstore(0x20, b)
+            h := keccak256(0x00, 0x40)
+        }
+    }
+
+    /// @notice The root of a complete aligned subtree of `hashes.length` = 2^k leaves starting
+    ///         at index `start` (a multiple of 2^k), carried up with the 16 − k siblings in
+    ///         `path`. Overwrites `hashes`.
+    function rootOfSubtree(bytes32[] memory hashes, uint256 start, bytes32[] calldata path)
+        internal
+        pure
+        returns (bytes32 h)
+    {
+        uint256 n = hashes.length;
+        uint256 k;
+        while ((1 << k) < n) ++k;
+        if (n == 0 || (1 << k) != n || start % n != 0 || start + n > 1 << DEPTH || path.length != DEPTH - k) {
+            revert BadProof();
+        }
+        for (; n > 1; n >>= 1) {
+            for (uint256 i; i < n / 2; ++i) {
+                hashes[i] = hashPair(hashes[2 * i], hashes[2 * i + 1]);
+            }
+        }
+        h = hashes[0];
+        uint256 pos = start >> k;
+        for (uint256 j; j < path.length; ++j) {
+            h = (pos >> j) & 1 == 0 ? hashPair(h, path[j]) : hashPair(path[j], h);
+        }
+    }
+
     function rootFrom(bytes32 leaf, uint256 index, bytes32[DEPTH] memory siblings) internal pure returns (bytes32 h) {
         if (index >= 1 << DEPTH) revert BadProof();
         h = leaf;
         for (uint256 i; i < DEPTH; ++i) {
             h = (index >> i) & 1 == 0
-                ? keccak256(abi.encodePacked(h, siblings[i]))
-                : keccak256(abi.encodePacked(siblings[i], h));
+                ? hashPair(h, siblings[i])
+                : hashPair(siblings[i], h);
         }
     }
 
@@ -62,11 +97,11 @@ library SparseTree16 {
                     i += 1;
                 }
                 indices[m] = idx >> 1;
-                leaves[m] = keccak256(abi.encodePacked(left, right));
+                leaves[m] = hashPair(left, right);
                 m++;
             }
             n = m;
-            z = keccak256(abi.encodePacked(z, z));
+            z = hashPair(z, z);
         }
         return leaves[0];
     }
@@ -93,19 +128,19 @@ library SparseTree16 {
                 uint256 idx = indices[i];
                 indices[m] = idx >> 1;
                 if (idx & 1 == 0 && i + 1 < n && indices[i + 1] == idx + 1) {
-                    oldLeaves[m] = keccak256(abi.encodePacked(oldLeaves[i], oldLeaves[i + 1]));
-                    newLeaves[m] = keccak256(abi.encodePacked(newLeaves[i], newLeaves[i + 1]));
+                    oldLeaves[m] = hashPair(oldLeaves[i], oldLeaves[i + 1]);
+                    newLeaves[m] = hashPair(newLeaves[i], newLeaves[i + 1]);
                     i += 2;
                 } else {
                     bytes32 sib = proof[p++];
                     (oldLeaves[m], newLeaves[m]) = idx & 1 == 0
                         ? (
-                            keccak256(abi.encodePacked(oldLeaves[i], sib)),
-                            keccak256(abi.encodePacked(newLeaves[i], sib))
+                            hashPair(oldLeaves[i], sib),
+                            hashPair(newLeaves[i], sib)
                         )
                         : (
-                            keccak256(abi.encodePacked(sib, oldLeaves[i])),
-                            keccak256(abi.encodePacked(sib, newLeaves[i]))
+                            hashPair(sib, oldLeaves[i]),
+                            hashPair(sib, newLeaves[i])
                         );
                     i += 1;
                 }
