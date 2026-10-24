@@ -78,9 +78,22 @@ export class Chain {
     return this.pub.getBlockNumber({ cacheTime: 0 });
   }
 
+  /**
+   * The priority fee to pay, when set (a public network). Unset, viem tips 1 gwei, which on a
+   * quiet testnet can be millions of times the base fee: deploying session code under
+   * Amsterdam's code pricing then costs real ETH for nothing.
+   */
+  tip?: bigint;
+
+  private async fees() {
+    if (this.tip === undefined) return {};
+    const base = (await this.pub.getBlock({ blockTag: "latest" })).baseFeePerGas ?? 0n;
+    return { maxPriorityFeePerGas: this.tip, maxFeePerGas: 2n * base + this.tip };
+  }
+
   async deploy(root: string, from: PrivateKeyAccount, file: string, name: string, args: unknown[] = [], label?: string): Promise<C> {
     const a = artifact(root, file, name);
-    const hash = await this.wallet(from).deployContract({ abi: a.abi, bytecode: a.bytecode, args } as any);
+    const hash = await this.wallet(from).deployContract({ abi: a.abi, bytecode: a.bytecode, args, ...(await this.fees()) } as any);
     const r = await this.pub.waitForTransactionReceipt({ hash });
     if (label) this.gas[label] = Number(r.gasUsed);
     return { address: r.contractAddress as Address, abi: a.abi };
@@ -89,7 +102,7 @@ export class Chain {
   /** Simulate first (reverts surface with their decoded error), then send and wait. */
   async send(c: C, fn: string, args: unknown[], from: PrivateKeyAccount, label?: string, value?: bigint) {
     const { request } = await this.pub.simulateContract({ account: from, address: c.address, abi: c.abi, functionName: fn, args, value });
-    const hash = await this.wallet(from).writeContract(request);
+    const hash = await this.wallet(from).writeContract({ ...request, ...(await this.fees()) } as any);
     const r = await this.pub.waitForTransactionReceipt({ hash });
     if (r.status !== "success") throw new Error(`${fn} failed`);
     if (label) this.gas[label] = (this.gas[label] ?? 0) + Number(r.gasUsed);

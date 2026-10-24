@@ -60,7 +60,7 @@ const maker = privateKeyToAccount(OPERATOR_KEY ? keccak256(concat([OPERATOR_KEY,
 // What each network can afford: the maker's float, the faucet, and how stale a price may be.
 const P = NET === "local"
   ? { makerEth: parseEther("50"), makerUsd: usd(500_000), faucetEth: parseEther("5"), faucetUsd: usd(20_000), bond: parseEther("1"), maxStale: BigInt(DAY), policy: { kind: "confirmations", n: 2 } as const }
-  : { makerEth: parseEther("0.02"), makerUsd: usd(50_000), faucetEth: parseEther("0.005"), faucetUsd: usd(20_000), bond: parseEther("0.003"), maxStale: BigInt(6 * 3600), policy: { kind: "safe" } as const };
+  : { makerEth: parseEther("0.002"), makerUsd: usd(50_000), faucetEth: parseEther("0.005"), faucetUsd: usd(20_000), bond: parseEther("0.003"), maxStale: BigInt(6 * 3600), policy: { kind: "safe" } as const };
 
 type Known = { hash: Hex; order: Order; from: Address; maker: boolean; answered?: boolean; at: number };
 const log: string[] = [];
@@ -81,6 +81,7 @@ async function main() {
     l1 = await Chain.anvil(18901, 900, ["--block-time", "2"]);
   } else {
     l1 = new Chain(SKIM_RPC, SEPOLIA);
+    l1.tip = 10_000_000n; // 0.01 gwei: Sepolia's base fee is tiny, and viem's default 1 gwei tip isn't
     const id = await l1.pub.getChainId().catch((e) => { throw new Error(`no skim node at ${SKIM_RPC}: ${e.message}`); });
     if (id !== SEPOLIA) throw new Error(`${SKIM_RPC} follows chain ${id}, not Sepolia`);
     const bal = await l1.pub.getBalance({ address: op.address });
@@ -249,7 +250,7 @@ async function main() {
 
   // ---- the market maker: funded on L1 like any user (once per session) ----
   const makerIn = Number(await l1.read(ch, "indexPlusOne", [maker.address])) > 0;
-  const makerNeeds = P.makerEth + parseEther("0.005"); // its deposit, plus gas
+  const makerNeeds = P.makerEth + parseEther(NET === "sepolia" ? "0.001" : "0.005"); // its deposit, plus gas
   const makerHas = NET === "sepolia" ? await l1.pub.getBalance({ address: maker.address }) : makerNeeds;
   if (!makerIn && makerHas < makerNeeds) {
     await l1.wallet(op).sendTransaction({ to: maker.address, value: makerNeeds - makerHas }).then((h) => l1.pub.waitForTransactionReceipt({ hash: h }));
