@@ -46,8 +46,10 @@ if (deposited) {
   await tx(wl1, l1, cfg.l1.channel, cfg.abi.channel, "deposit", [1, USD_IN]);
   check(true, `deposited ${Number(DEP) / 1e18} ETH and 4,000 USD on ${cfg.l1.name} (through /rpc/l1)`);
 }
-await until("deposits on the app network", async () => (await account())?.pending?.eth && BigInt((await account()).pending.eth) === DEP, SEP ? 1_200_000 : 90_000);
+await until("deposits on the app network", async () => (await account())?.pending?.eth && BigInt((await account()).pending.eth) >= DEP - SELL, SEP ? 1_200_000 : 90_000);
 check(true, "the next batch applied them: eth_getBalance on the app network = " + (await app.getBalance({ address: me.address })) + " wei");
+const sold = BigInt((await account()).pending.eth) === DEP - SELL; // a resumed run that already sold
+if (!sold) {
 
 const price = BigInt((await (await fetch(BASE + "/api/state")).json()).price);
 const o = { trader: me.address, sellToken: 0, sellAmount: SELL, buyAmount: (price * SELL) / 10n ** 18n, nonce: BigInt(Date.now()), expiry: 10n ** 12n };
@@ -57,6 +59,7 @@ check(true, `placed "sell ${Number(SELL) / 1e18} ETH @ ${Number(price) / 1e6}" w
 await until("the maker's answer and the fill", async () => BigInt((await account()).pending.eth) === DEP - SELL, SEP ? 300_000 : 90_000);
 const acc = await account();
 check(BigInt(acc.pending.usd) === USD_IN + o.buyAmount, `filled: pending ${Number(DEP - SELL) / 1e18} ETH, ${Number(BigInt(acc.pending.usd)) / 1e6} USD`);
+} else check(true, `already sold ${Number(SELL) / 1e18} ETH in an earlier run: pending ${Number(DEP - SELL) / 1e18} ETH`);
 
 await tx(wl1, l1, cfg.l1.channel, cfg.abi.channel, "requestWithdraw", [0, OUT]);
 check(true, `requested ${Number(OUT) / 1e18} ETH on L1`);
