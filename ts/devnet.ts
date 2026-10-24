@@ -93,6 +93,7 @@ async function main() {
   type App = {
     token: Address; anchors: Address; codec: Address; adapter: Address; vault: Address; feed: Feed;
     sessionCode?: { channel: Address; disputes: Address }; // deployed once; sessions are proxies of it
+    codeId?: Hex; // the bytecode the session code and adapter were deployed from (CODE_ID)
     sessions: { id: string; channel: Address; disputes: Address; vault?: Address; startBlock?: string; makerRedeemed?: boolean }[];
   };
   // Each session's finalized leaves, kept on disk so a closed session can be redeemed after a restart.
@@ -104,6 +105,8 @@ async function main() {
       eth: BigInt(v.eth), usd: BigInt(v.usd), ethIn: BigInt(v.ethIn), usdIn: BigInt(v.usdIn), ethOut: BigInt(v.ethOut), usdOut: BigInt(v.usdOut), nonce: BigInt(v.nonce), requests: Number(v.requests),
     }]));
   };
+  // The session code and the adapter, as built now: a change means new sessions need new copies.
+  const CODE_ID = keccak256(concat(["ClearingChannel", "ClearingDisputes", "ChainlinkAdapter"].map((n) => artifact(ROOT, `${n}.sol`, n).bytecode)));
   let app: App;
   const saved: App | undefined = NET === "sepolia" && existsSync(STATE_FILE) ? JSON.parse(readFileSync(STATE_FILE, "utf8")) : undefined;
   if (saved) {
@@ -128,7 +131,7 @@ async function main() {
     const code = await deploySessionCode(l1, op);
     app = {
       token: token.address, anchors: anchors.address, codec: codec.address, adapter: adapter.address, vault: vault.address, feed,
-      sessionCode: { channel: code.channel.address, disputes: code.disputes.address }, sessions: [],
+      sessionCode: { channel: code.channel.address, disputes: code.disputes.address }, codeId: CODE_ID, sessions: [],
     };
   }
   // An app saved before sessions were proxies has no session code, and its vault can't open
@@ -138,6 +141,18 @@ async function main() {
     const v = await l1.deploy(ROOT, op, "ClearingVault.sol", "ClearingVault", [op.address, app.token]);
     app = { ...app, vault: v.address, sessionCode: { channel: code.channel.address, disputes: code.disputes.address } };
     note(`session code deployed once (${code.channel.address}); new vault ${v.address}`);
+  }
+  // The session code (or the adapter's interface) changed since it was deployed: deploy both
+  // again and open the next session on them. The vault stays: `openSession` takes any
+  // implementation, and earlier sessions keep their own code until they're closed.
+  let codeChanged = false;
+  if ((app.codeId ?? null) !== CODE_ID && NET === "sepolia") {
+    const code = await deploySessionCode(l1, op);
+    const adapter = await l1.deploy(ROOT, op, "ChainlinkAdapter.sol", "ChainlinkAdapter",
+      [app.feed.proxy, await codeHash(app.feed.proxy), app.feed.aggregator, await codeHash(app.feed.aggregator), 8, P.maxStale]);
+    app = { ...app, adapter: adapter.address, sessionCode: { channel: code.channel.address, disputes: code.disputes.address }, codeId: CODE_ID };
+    codeChanged = true;
+    note(`session code changed: deployed it again (${code.channel.address}) and its adapter (${adapter.address}); the next session uses them`);
   }
   const save = () => {
     if (NET !== "sepolia") return;
@@ -156,7 +171,7 @@ async function main() {
   // ---- the session: resume the active one, or open a new one (the previous one starts closing) ----
   const last = app.sessions.at(-1);
   // Only a session of the current vault resumes (an older generation's sessions are only closed).
-  const resume = NET === "sepolia" && !process.env.NEW_SESSION && !!last && last.vault === app.vault
+  const resume = NET === "sepolia" && !process.env.NEW_SESSION && !codeChanged && !!last && last.vault === app.vault
     && Number((await l1.read<any[]>(sessionC(last.channel), "state"))[5]) === 0;
   if (!resume) {
     // A session is one transaction: the vault opens a proxy of the session code with this config.
