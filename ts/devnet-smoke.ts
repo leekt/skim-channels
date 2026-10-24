@@ -34,12 +34,18 @@ async function tx(w: any, pub: any, address: Hex, abi: any, functionName: string
 }
 const account = async () => app.request({ method: "clearing_account" as any, params: [me.address] as any }) as Promise<any>;
 
-check((await post("/api/faucet", { address: me.address })).ok, "faucet funded a fresh wallet on L1");
-await until("faucet funds", async () => (await l1.getBalance({ address: me.address })) > DEP, SEP ? 300_000 : 30_000);
-await tx(wl1, l1, cfg.l1.channel, cfg.abi.channel, "deposit", [0, DEP], DEP);
-await tx(wl1, l1, cfg.l1.token, cfg.abi.token, "approve", [cfg.l1.channel, USD_IN]);
-await tx(wl1, l1, cfg.l1.channel, cfg.abi.channel, "deposit", [1, USD_IN]);
-check(true, `deposited ${Number(DEP) / 1e18} ETH and 4,000 USD on ${cfg.l1.name} (through /rpc/l1)`);
+// A wallet (SMOKE_KEY) that already deposited into this session continues from there.
+const deposited = await l1.readContract({ address: cfg.l1.channel, abi: cfg.abi.channel, functionName: "indexPlusOne", args: [me.address] }) as number;
+if (deposited) {
+  check(true, `this wallet already deposited into the session (user ${deposited - 1}): continuing from its deposit`);
+} else {
+  check((await post("/api/faucet", { address: me.address })).ok, "faucet funded a fresh wallet on L1");
+  await until("faucet funds", async () => (await l1.getBalance({ address: me.address })) > DEP, SEP ? 300_000 : 30_000);
+  await tx(wl1, l1, cfg.l1.channel, cfg.abi.channel, "deposit", [0, DEP], DEP);
+  await tx(wl1, l1, cfg.l1.token, cfg.abi.token, "approve", [cfg.l1.channel, USD_IN]);
+  await tx(wl1, l1, cfg.l1.channel, cfg.abi.channel, "deposit", [1, USD_IN]);
+  check(true, `deposited ${Number(DEP) / 1e18} ETH and 4,000 USD on ${cfg.l1.name} (through /rpc/l1)`);
+}
 await until("deposits on the app network", async () => (await account())?.pending?.eth && BigInt((await account()).pending.eth) === DEP, SEP ? 1_200_000 : 90_000);
 check(true, "the next batch applied them: eth_getBalance on the app network = " + (await app.getBalance({ address: me.address })) + " wei");
 

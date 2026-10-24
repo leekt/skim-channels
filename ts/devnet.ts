@@ -35,7 +35,7 @@ import {
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { artifact, Chain, type C } from "./runtime/executor.ts";
-import { L1ReadView } from "./runtime/l1view.ts";
+import { L1ReadView, type Policy } from "./runtime/l1view.ts";
 import { EvidenceStore } from "./runtime/evidence.ts";
 import { Gateway } from "./runtime/gateway.ts";
 import { levels, rootOf, siblings } from "./runtime/tree.ts";
@@ -234,10 +234,17 @@ async function main() {
   process.on("SIGINT", () => { if (NET === "local") l1.stop(); ex.stop(); process.exit(0); });
   const book = await ClearingOperator.deployBook(ex, l1, op, ch, app.feed, P.maxStale);
   const reader = new L1ReadView({ url: l1.url, chainId: l1.chainId, cli: CLI });
+  // The batch snapshot policy. On Sepolia it's the node's safe head; a node that has none to
+  // serve right now (its finality view is missing) falls back to 3 confirmations.
+  let policy: Policy = P.policy;
+  if (NET === "sepolia" && !(await l1.rpc<any>("eth_getBlockByNumber", ["safe", false]).catch(() => null))) {
+    policy = { kind: "confirmations", n: 3 };
+    note("the L1 node serves no safe head right now: batches snapshot at 3 confirmations instead");
+  }
   const A = new ClearingOperator({
     view: reader, exec: ex, book, op, l1, channel: ch, anchors, feed: app.feed, maxStaleness: P.maxStale,
     evidence: new EvidenceStore(NET === "sepolia" ? join(homedir(), ".skim-devnet", `session-${cur.id.replace(/[^\w]/g, "-")}-evidence`) : join(tmpdir(), `skim-devnet-evidence-${process.pid}`)),
-    policy: P.policy, bond: P.bond, maxAnchorAge: 256n, ageMargin: 32n, startBlock,
+    policy, bond: P.bond, maxAnchorAge: 256n, ageMargin: 32n, startBlock,
     journal: NET === "sepolia" ? join(homedir(), ".skim-devnet", `session-${cur.id.replace(/[^\w]/g, "-")}-journal.json`) : join(tmpdir(), `skim-devnet-journal-${process.pid}.json`),
   });
   if (resume) {
