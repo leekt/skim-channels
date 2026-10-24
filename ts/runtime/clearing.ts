@@ -112,6 +112,11 @@ const LEGACY_PROPOSE = [{
   type: "function", name: "propose", stateMutability: "payable", outputs: [],
   inputs: ["bytes", "bytes", "bytes", "bytes32[]", "uint64", "uint64", "bytes"].map((type, i) => ({ type, name: `a${i}` })),
 }] as const;
+/** `propose` with oracle segments as first fills only (174ecfc): witnesses, then firstFills. */
+const SEGMENTS_PROPOSE = [{
+  type: "function", name: "propose", stateMutability: "payable", outputs: [],
+  inputs: ["bytes[]", "uint32[]", "bytes", "bytes", "bytes32[]", "uint64", "uint64", "bytes"].map((type, i) => ({ type, name: `a${i}` })),
+}] as const;
 /** The `Proposed` event before oracle segments (one price and anchor). */
 const LEGACY_PROPOSED = [{
   type: "event", name: "Proposed", anonymous: false,
@@ -129,6 +134,10 @@ const historyAbi = (channel: C) => [...channel.abi, ...LEGACY_PROPOSED] as any;
 function proposalUpdates(channel: C, input: Hex): Hex {
   try {
     const { args } = decodeFunctionData({ abi: channel.abi, data: input }) as any;
+    return args[3]; // propose(witnesses, segments, fills, updates, …)
+  } catch { /* an earlier layout */ }
+  try {
+    const { args } = decodeFunctionData({ abi: SEGMENTS_PROPOSE, data: input }) as any;
     return args[3]; // propose(witnesses, firstFills, fills, updates, …)
   } catch {
     const { args } = decodeFunctionData({ abi: LEGACY_PROPOSE, data: input }) as any;
