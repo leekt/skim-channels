@@ -5,7 +5,9 @@
 // - recovery starts at the EARLIEST affected batch and replays every later unproposed batch
 //   too (a later batch may spend what an earlier one produced);
 // - every L1 block a batch executed against is watched (its opening head and every
-//   execution segment's head), and the earliest batch with an orphaned one is recovered;
+//   execution segment's head), and the earliest batch with an orphaned one is recovered:
+//   from the orphaned segment's checkpoint inside that batch when there is one (what ran
+//   before it, against canonical blocks, is kept), otherwise from the whole batch;
 // - the new snapshot and its proofs are obtained BEFORE anything is rolled back; if that
 //   fails, nothing changes;
 // - the original batches stay in the journal, untouched, until a recovery completes: the
@@ -41,13 +43,18 @@ export type Journal<A, O> = {
    * unchanged until it completes; `merged` is the replay being built (discarded and rebuilt
    * if the process stops before it's swapped in).
    */
-  recovering?: { from: string; reason: string; snap: Snapshot; prepared: unknown; merged?: JournalBatch<A, O> };
+  recovering?: {
+    from: string; reason: string; snap: Snapshot; prepared: unknown; merged?: JournalBatch<A, O>;
+    /** Recovery inside batch `from`: back to this executor checkpoint, keeping its log before `logIndex`. */
+    within?: { checkpoint: Hex; logIndex: number; segment: number };
+  };
 };
 
 export type RecoveryReport<A> = {
   status: "recovered" | "nothing" | "unknown" | "proof-unavailable";
   from?: string;
   reason?: string;
+  segment?: number; // set when the recovery started inside batch `from`, at this segment
   replayed: Logged<A>[];
   dropped: Logged<A>[]; // accepted before, refused now
   notRetried: Logged<A>[]; // rejected before: reported, not replayed
@@ -100,7 +107,23 @@ export abstract class BatchRuntime<A, O> {
   protected abstract run(action: A): Promise<void>;
   /** Every L1 block batch `b` executed against after it opened (its execution segments). */
   protected heads(_b: JournalBatch<A, O>): Snapshot[] {
+    return this.segmentPoints(_b).map((p) => p.snap);
+  }
+  /**
+   * Batch `b`'s execution segments in order: each head, and where one was taken, the executor
+   * checkpoint just before the action that started it and that action's index in the log.
+   */
+  protected segmentPoints(_b: JournalBatch<A, O>): { snap: Snapshot; checkpoint?: Hex; logIndex?: number }[] {
     return [];
+  }
+  /**
+   * After the executor returned to a checkpoint inside a batch: bring its L1 view to the
+   * current head (a checkpoint holds the head it was taken at, possibly the orphaned block).
+   */
+  protected async afterRollback(): Promise<void> {}
+  /** `prepared` as it was before segment `i` started (a recovery inside the batch keeps it). */
+  protected preparedBefore(prepared: unknown, _i: number): unknown {
+    return prepared;
   }
   /**
    * An action that failed for a reason outside it (e.g. L1 reorganized under the batch): not
@@ -226,7 +249,20 @@ export abstract class BatchRuntime<A, O> {
         this.paused = true;
         return { status: "unknown", from: b.no, reason: "anchor status unknown", replayed: [], dropped: [], notRetried: [] };
       }
-      if (s === "orphaned") return this.recover(b.no, "orphaned");
+      if (s === "orphaned") {
+        // The earliest orphaned segment, if the batch's opening block is still canonical and
+        // that segment has a checkpoint: recover from there inside the batch.
+        if ((await this.snapStatus(b.snap)) === "canonical") {
+          const pts = this.segmentPoints(b);
+          for (let i = 0; i < pts.length; i++) {
+            if ((await this.snapStatus(pts[i].snap)) !== "orphaned") continue;
+            const p = pts[i];
+            if (p.checkpoint && p.logIndex !== undefined) return this.recoverWithin(b.no, i, p.checkpoint, p.logIndex);
+            break;
+          }
+        }
+        return this.recover(b.no, "orphaned");
+      }
       if (head - this.oldest(b) > this.maxAnchorAge - this.ageMargin) return this.recover(b.no, "aged");
     }
     return { status: "nothing", replayed: [], dropped: [], notRetried: [] };
@@ -263,6 +299,26 @@ export abstract class BatchRuntime<A, O> {
   }
 
   /**
+   * Recover from segment `seg` of batch `from`: return the executor to the checkpoint taken just
+   * before that segment started, keep the batch's log before it, and replay the rest (and
+   * every later unproposed batch) at the executor's head now. The batch keeps its number,
+   * opening and earlier segments. No new proofs are needed up front: nothing at an old block
+   * is read again.
+   */
+  async recoverWithin(from: string, seg: number, checkpoint: Hex, logIndex: number): Promise<RecoveryReport<A>> {
+    const i = this.batches.findLastIndex((b) => b.no === from);
+    const b = this.batches[i];
+    if (this.batches.slice(i).some((x) => x.state !== "open" && x.state !== "sealed")) {
+      throw new Error(`batch ${from}: a later batch is already proposed; resolve it on L1 first`);
+    }
+    this.journal.recovering = {
+      from, reason: "orphaned", snap: b.snap, prepared: copy(this.preparedBefore(b.prepared, seg)), within: { checkpoint, logIndex, segment: seg },
+    };
+    this.save();
+    return this.resume();
+  }
+
+  /**
    * Finish a recorded recovery (also at startup, if the journal has one). The affected
    * batches are read, never modified, until the final swap; a replay a crash interrupted is
    * discarded and redone from them.
@@ -274,6 +330,28 @@ export abstract class BatchRuntime<A, O> {
     const i = this.batches.findLastIndex((b) => b.no === r.from);
     if (i < 0) throw new Error(`recovery from ${r.from}: the batch isn't in the journal`);
     const affected = this.batches.slice(i);
+    if (r.within) {
+      // Inside the batch: back to the segment's checkpoint. If it's gone (the executor
+      // restarted, or an earlier revert dropped it), recover the whole batch instead.
+      if (!(await this.exec.rpc<boolean>("evm_revert", [r.within.checkpoint]).catch(() => false))) {
+        this.journal.recovering = undefined;
+        this.save();
+        return this.recover(r.from, r.reason);
+      }
+      await this.afterRollback();
+      const b = affected[0];
+      const kept = b.log.slice(0, r.within.logIndex);
+      r.merged = { ...b, state: "open", prepared: copy(r.prepared), log: copy(kept) };
+      this.save();
+      const later = [{ ...b, log: b.log.slice(r.within.logIndex) }, ...affected.slice(1)];
+      const replayed: Logged<A>[] = [];
+      for (const l of later.flatMap((x) => x.log.filter((y) => y.ok))) replayed.push(await this.apply(l.action));
+      if (affected.some((x) => x.state === "sealed")) await this.seal();
+      this.journal.batches = [...this.batches.slice(0, i), r.merged];
+      this.journal.recovering = undefined;
+      this.save();
+      return { status: "recovered", from: r.from, reason: r.reason, segment: r.within.segment, replayed, dropped: replayed.filter((x) => !x.ok), notRetried: later.flatMap((x) => x.log.filter((y) => !y.ok)) };
+    }
     // 3. Roll the executor back to just before the first affected batch.
     const cp = affected[0].checkpoint;
     if (!cp || !(await this.exec.rpc<boolean>("evm_revert", [cp]).catch(() => false))) {

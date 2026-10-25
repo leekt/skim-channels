@@ -102,7 +102,12 @@ export type Prepared = {
   // Set at proposal: the leaves it commits (a restart adopts them while it's pending).
   proposed?: [number, Account][];
 };
-export type Segment = { number: bigint; hash: Hex; time: bigint; snap: Snapshot; priceBlock: bigint; rawHeader: Hex; witness?: Witness };
+export type Segment = {
+  number: bigint; hash: Hex; time: bigint; snap: Snapshot; priceBlock: bigint; rawHeader: Hex; witness?: Witness;
+  // The executor checkpoint just before the fill that started it, and that fill's index in the
+  // batch's log: a reorg of this head recovers from here, inside the batch.
+  checkpoint?: Hex; logIndex?: number;
+};
 /** The Chainlink feed a session prices from: the proxy apps call, and its aggregator. */
 export type Feed = { proxy: Address; aggregator: Address };
 
@@ -331,8 +336,17 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
     return (prepared as Prepared).opened;
   }
 
-  protected heads(b: JournalBatch<Action, OpenState>): Snapshot[] {
-    return ((b.prepared as Prepared).segments ?? []).map((s) => s.snap);
+  protected segmentPoints(b: JournalBatch<Action, OpenState>) {
+    return ((b.prepared as Prepared).segments ?? []).map((s) => ({ snap: s.snap, checkpoint: s.checkpoint, logIndex: s.logIndex }));
+  }
+
+  protected async afterRollback() {
+    await this.exec.rpc("executor_sync");
+  }
+
+  protected preparedBefore(prepared: unknown, i: number): unknown {
+    const p = prepared as Prepared;
+    return { ...p, segments: (p.segments ?? []).slice(0, i) };
   }
 
   /** L1 reorganized under the open batch (the book refuses to run at another branch's head). */
@@ -343,14 +357,22 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
   protected async run(action: Action) {
     if (action.kind === "order") await this.exec.send(this.book, "submitOrder", [action.order, action.sig], this.op);
     else if (action.kind === "fill") {
+      // A fill at a new L1 head starts a segment. Checkpoint just before it, so a reorg of
+      // that head can be recovered inside the batch (if the head moves in between, the segment
+      // has no checkpoint and recovery takes the whole batch).
+      const p = this.current.prepared as Prepared;
+      const head = (await this.exec.rpc<any>("executor_status")).pin;
+      const checkpoint = (p.segments ?? []).at(-1)?.hash !== head.hash ? await this.exec.checkpoint() : undefined;
+      const logIndex = this.current.log.length;
       const r = await this.exec.send(this.book, "fill", [action.a, action.b], this.op);
-      // A fill at a new L1 head starts a segment: record its head (and witness a new price) now.
+      // Record the segment's head (and witness a new price) now.
       for (const l of r.logs) {
         let ev: any;
         try { ev = decodeEventLog({ abi: this.book.abi, data: l.data, topics: l.topics }); } catch { continue; }
         if (ev.eventName !== "SegmentStarted") continue;
-        const p = this.current.prepared as Prepared;
-        p.segments = [...(p.segments ?? []), await this.segmentAt(r.transactionHash, BigInt(this.current.no), ev.args)];
+        const g = await this.segmentAt(r.transactionHash, BigInt(this.current.no), ev.args);
+        if (checkpoint && g.hash === head.hash) Object.assign(g, { checkpoint, logIndex });
+        p.segments = [...(p.segments ?? []), g];
       }
     }
     else await this.sendRaw(action.tx);
@@ -405,7 +427,10 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
     } else {
       await this.adopt(fin);
     }
-    for (const x of this.batches) x.checkpoint = undefined;
+    for (const x of this.batches) {
+      x.checkpoint = undefined;
+      for (const g of (x.prepared as Prepared).segments ?? []) g.checkpoint = undefined;
+    }
   }
 
   /**

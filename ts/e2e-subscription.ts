@@ -227,6 +227,40 @@ async function partB(l1: Chain) {
     try { await l1.pub.simulateContract({ account: op, address: ch.address, abi: ch.abi, functionName: "challengeFill", args: [p2.fills, i, g2.firstFills, g2.prices, g2.heads] }); } catch { fault = false; }
     check(!fault, `and fill ${i} isn't challengeable`);
   }
+  await l1.rpc("evm_increaseTime", [3601]);
+  await l1.rpc("anvil_mine", [toHex(1)]);
+  await l1.send(ch, "finalize", [], op);
+  await A.finalized();
+
+  // A reorg of a later segment's head, recovered inside the batch from that segment's checkpoint.
+  await A.open();
+  const a6 = await order(alice, 0, parseEther("0.1"), usd(220), 5n);
+  const k6 = await order(bob, 1, usd(220), parseEther("0.1"), 5n);
+  await A.apply({ kind: "order", order: a6.o, sig: a6.sig });
+  await A.apply({ kind: "order", order: k6.o, sig: k6.sig });
+  await A.apply({ kind: "fill", a: a6.h, b: k6.h });
+  const hR = BigInt((await ex.rpc<any>("executor_status")).pin.number);
+  await l1.rpc("anvil_mine", [toHex(1)]);
+  await headAtLeast(ex, hR + 1n);
+  const a7 = await order(alice, 0, parseEther("0.1"), usd(220), 6n);
+  const k7 = await order(bob, 1, usd(220), parseEther("0.1"), 6n);
+  await A.apply({ kind: "order", order: a7.o, sig: a7.sig });
+  await A.apply({ kind: "order", order: k7.o, sig: k7.sig });
+  await A.apply({ kind: "fill", a: a7.h, b: k7.h });
+  const s3 = await ex.read<any[]>(book, "segments", [BigInt(A.current.no)]);
+  const no3 = A.current.no;
+  await l1.rpc("anvil_reorg", [1, []]); // replaces segment 1's block
+  await l1.rpc("anvil_mine", [toHex(1)]);
+  const r3 = await A.tick();
+  const s3b = await ex.read<any[]>(book, "segments", [BigInt(A.current.no)]);
+  check(r3.status === "recovered" && r3.segment === 1 && A.current.no === no3 && r3.replayed.length === 1 && A.current.log.length === 6,
+    `segment 1's block (${s3[1].head}) reorged out: recovered inside batch ${no3} from its checkpoint: only the fill that started it is replayed; the orders before it and segment 0 are kept`);
+  check(s3b.length === 2 && s3b[0].hash === s3[0].hash && s3b[1].hash !== s3[1].hash,
+    `the batch now has segment 0 unchanged and segment 1 at the new canonical block ${s3b[1].head}`);
+  await A.seal();
+  await A.propose(BigInt(A.current.no), { label: "propose (after an in-batch recovery)" });
+  check((await l1.read<any>(ch, "pending")).at > 0n, "and L1 accepts the batch");
+
   out.clearing = {
     segments: segs.map((g) => ({ head: String(g.head), priceBlock: String(g.priceBlock), price: String(g.price), firstFill: Number(g.firstFill) })),
     proposeGas: l1.gas["propose (2 segments)"], reusedPriceProposeGas: l1.gas["propose (reused price)"],
