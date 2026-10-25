@@ -23,7 +23,7 @@ import {
 } from "viem";
 import { privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
 import { L1ReadView, type Policy, type Snapshot, type Witness, type Read } from "./l1view.ts";
-import { BatchRuntime, type JournalBatch } from "./batches.ts";
+import { BatchRuntime, type JournalBatch, type RecoveryReport } from "./batches.ts";
 import { Chain, type C } from "./executor.ts";
 import { EvidenceStore } from "./evidence.ts";
 import { levels, multiproof, rootOf } from "./tree.ts";
@@ -181,7 +181,7 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
   readonly evidence: EvidenceStore; readonly bond: bigint;
   fin = new Map<number, Account>(); // finalized leaves (L1's committed state, as this operator knows it)
   /** The pending proposal's new leaves (and its journal batch, if this journal has it). */
-  pendingNext?: { b?: JournalBatch<Action, OpenState>; next: Map<number, Account> };
+  pendingNext?: { b?: JournalBatch<Action, OpenState>; next: Map<number, Account>; finalizedBefore: bigint };
   readonly startBlock: bigint; // the channel's deployment block: no event of it is older
   readonly nextBlock: () => Promise<unknown>;
   scannedTo = 0n; // last L1 block scanned for deposits
@@ -400,7 +400,8 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
       for (const [k, v] of next) merged.set(k, v);
       await this.adopt(merged, true);
       this.fin = fin;
-      this.pendingNext = { b, next }; // also when the leaves came from L1: they become final
+      // Also when the leaves came from L1: they become final.
+      this.pendingNext = { b, next, finalizedBefore: BigInt((await this.l1.read<any[]>(this.channel, "state"))[3]) };
     } else {
       await this.adopt(fin);
     }
@@ -487,31 +488,57 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
       (b.prepared as Prepared).proposed = [...p.next];
       this.markProposed(no, r.transactionHash, r.blockNumber);
     }
-    this.pendingNext = { b, next: p.next };
+    this.pendingNext = { b, next: p.next, finalizedBefore: BigInt((await this.l1.read<any[]>(this.channel, "state"))[3]) };
     return { ...p, receipt: r };
   }
 
   /**
-   * After L1 finalizes (anyone can call finalize): the operator's view of the committed state.
-   * Checked against L1's finalized root; if the proposal was discarded instead (or anything
-   * else differs), the finalized leaves are taken from L1's history.
+   * After L1 settles the pending proposal: the operator's view of the committed state. Returns
+   * true if L1 finalized it (its leaves become final, checked against L1's root), false if a
+   * challenge discarded it (the finalized leaves are taken from L1 again, and the batch goes
+   * back to sealed for `reconcile` to replay). Undefined: nothing pending, or not settled yet.
    */
-  async finalized() {
-    if (!this.pendingNext) return;
+  async finalized(): Promise<boolean | undefined> {
+    const pn = this.pendingNext;
+    if (!pn || (await this.l1.read<any>(this.channel, "pending")).at !== 0n) return undefined;
+    const [root, , , count] = await this.l1.read<any[]>(this.channel, "state");
     const fin = new Map(this.fin);
-    for (const [k, v] of this.pendingNext.next) fin.set(k, v);
-    const [root] = await this.l1.read<any[]>(this.channel, "state");
+    for (const [k, v] of pn.next) fin.set(k, v);
     const n = Number(await this.l1.read(this.channel, "userCount"));
     const mine = rootOf(levels(Array.from({ length: n }, (_, i) => leafHash(fin.get(i) ?? EMPTY))));
-    if (mine === root) {
+    const ok = BigInt(count) > pn.finalizedBefore;
+    if (ok && mine === root) {
       this.fin = fin;
-      if (this.pendingNext.b) this.pendingNext.b.state = "finalized";
+      if (pn.b) pn.b.state = "finalized";
     } else {
       this.fin = await ClearingOperator.recover(this.l1, this.channel, this.startBlock);
-      if (this.pendingNext.b) this.pendingNext.b.state = "discarded";
+      if (pn.b) {
+        pn.b.state = ok ? "finalized" : "sealed"; // finalized but not as we computed: L1's leaves win
+        pn.b.proposal = undefined;
+        delete (pn.b.prepared as Prepared).proposed;
+      }
     }
     this.save();
     this.pendingNext = undefined;
+    return ok;
+  }
+
+  /**
+   * L1 settled the pending proposal (anyone may finalize; a challenge discards). A discarded
+   * batch is replayed, with every later unproposed batch, on the state L1 committed: its
+   * accepted actions run again in a new batch (those that no longer hold are dropped).
+   */
+  async reconcile(): Promise<RecoveryReport<Action> | undefined> {
+    const b = this.pendingNext?.b;
+    const ok = await this.finalized();
+    if (ok !== false || !b) return undefined;
+    return this.recover(b.no, "discarded");
+  }
+
+  /** Reconcile with L1's settlement first, then BatchRuntime's checks (orphaned or aged). */
+  async tick(): Promise<RecoveryReport<Action>> {
+    const r = await this.reconcile();
+    return r ?? super.tick();
   }
 
   /** The pending proposal's new leaves, from its calldata on L1 (the latest Proposed event). */

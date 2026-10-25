@@ -283,27 +283,30 @@ async function run(l1: Chain) {
   await place(A, k5); await place(A, c3);
   await A.seal();
   // (no fill: a batch can also just publish deposits and requests)
-  const snapL1 = await l1.rpc<Hex>("evm_snapshot");
   const bad = await A.propose(3n, { tamper: (m) => { const x = m.get(ib) ?? A.fin.get(ib)!; m.set(ib, { ...x, usd: x.usd + 1n }); } });
   const w = await watch(A, bad, 1);
   check(w.faults.includes(ib), `the watcher finds bob's leaf wrong (faults: ${w.faults.join(",")})`);
   const wb = await l1.read<bigint>(ch, "bondCredit", [watcher.address]);
   await l1.send(ch, "challengeAccount", [ib, A.fin.get(ib)!, siblings(levels(w.finDense), ib), bad.next.get(ib)!, siblings(levels(w.nextDense), ib), bad.fills], watcher, "challengeAccount");
   check((await l1.read<bigint>(ch, "bondCredit", [watcher.address])) === wb + parseEther("1"), "challenge won: the batch is discarded and the bond credited to the watcher");
-  await l1.rpc("evm_revert", [snapL1]);
-  await settle(A, 3n, "#3 (0 fills)");
+  // The runtime notices by itself: tick() reconciles with L1 (the proposal is gone, not finalized),
+  // takes the finalized leaves from L1 again, and replays the discarded batch on that state.
+  const rec = await A.tick();
+  check(rec.status === "recovered" && rec.reason === "discarded" && A.current.state === "sealed",
+    `discarded on L1: the runtime rebuilt from L1's committed state and replayed the batch (${rec.replayed.length} actions) into batch ${A.current.no}, sealed`);
+  await settle(A, BigInt(A.current.no), "#3 (0 fills)");
 
   // ==== a forced order: posted on L1, taken in, filled ========================================
   const cf = await order(carol, USD, usd(210), parseEther("0.1"), 4n); // carol sold her ETH in batch 1
   await l1.send(ch, "forceOrder", [cf.o], carol, "forceOrder"); // an ordinary L1 tx from carol
   await l1.rpc("anvil_mine", [toHex(1)]);
   await A.open();
-  check(await exA.read(A.book, "resting", [cf.h]), "batch 4 took carol's forced order in from L1 (hash checked against L1)");
+  check(await exA.read(A.book, "resting", [cf.h]), "the next batch took carol's forced order in from L1 (hash checked against L1)");
   const aF = await order(alice, ETH, parseEther("0.1"), usd(205), 3n);
   await place(A, aF);
   check((await fill(A, cf, aF)).ok, "and fills it with alice's order");
   await A.seal();
-  const p4 = await settle(A, 4n, "#4 (forced fill)");
+  const p4 = await settle(A, BigInt(A.current.no), "#4 (forced fill)");
   check(p4.statuses === "0x0001", "L1 checked the forced order's status: filled at fill 0, side a");
 
   // ==== runtime recovery (review of 5db7064) =================================================
