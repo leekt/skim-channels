@@ -19,6 +19,7 @@ alloy-primitives.workspace = true
 alloy-rlp.workspace = true
 alloy-consensus = { workspace = true, features = ["k256"] }
 alloy-eips.workspace = true
+alloy-eip7928 = { version = "0.4.10", features = ["rlp"] }
 alloy-sol-types.workspace = true
 # Same revm and features as skim df686b7 (its eth_call engine).
 revm = { version = "43.0.3", default-features = false, features = ["std", "dev", "optional_fee_charge", "secp256k1", "blst", "c-kzg", "asm-keccak"] }

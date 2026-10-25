@@ -299,6 +299,7 @@ pub fn dispatch(ex: &mut Executor, method: &str, p: &Value) -> Result<Value, Rpc
         "executor_sync" => ex.follow_now()?,
         "executor_metrics" => crate::metrics::snapshot(),
         "executor_evidence" => {
+            ex.prove_now()?;
             let pkg = ex.db().evidence().map_err(|e| RpcError {
                 code: -32000,
                 message: e,

@@ -2,6 +2,7 @@
 //! L1 accounts it imports read lazily from L1 (skim) at a pinned block, every value verified
 //! against the pin's state root. See `db` (state layers), `guard` (write rules), `exec`
 //! (transactions and pin moves) and `rpc` (the JSON-RPC surface).
+#![recursion_limit = "256"] // the metrics json! has grown past the default
 
 pub mod db;
 pub mod exec;

@@ -378,6 +378,11 @@ impl Executor {
 
     /// The current head, the working set to prove at the next one (every account and slot
     /// touched, overlay slots included), and the code hashes already held.
+    /// The verified working set at the current head (the follower rolls it forward).
+    pub fn base(&self) -> Base {
+        self.state.db.base.clone()
+    }
+
     pub fn working_set(&self) -> (L1Anchor, BTreeMap<Address, Vec<B256>>, HashSet<B256>) {
         let db = &self.state.db;
         let mut keys = db.base.keys();
@@ -449,6 +454,38 @@ impl Executor {
         crate::metrics::HEADS_ADOPTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.last_error = None;
         Ok(self.pin_json(self.state.db.overlay.len()))
+    }
+
+    /// After heads reached from block access lists, the working set's values are the head's
+    /// but its proofs are older: prove it at the current head again (for evidence). The proven
+    /// values must equal the rolled ones; a difference means an access list and the state root
+    /// disagree, and is an error (nothing changes).
+    pub fn prove_now(&mut self) -> Result<(), ExecError> {
+        if !self.state.db.base.rolled {
+            return Ok(());
+        }
+        let (anchor, keys, known) = self.working_set();
+        let (base, codes) = crate::follow::prove_set(&self.state.db.src, &anchor, &keys, &known)
+            .map_err(ExecError::Unavailable)?;
+        for (a, slots) in &keys {
+            for s in slots {
+                if let (Some(rolled), Some(proven)) =
+                    (self.state.db.base.slot(*a, *s), base.slot(*a, *s))
+                    && rolled != proven
+                {
+                    return Err(ExecError::Unavailable(format!(
+                        "{a} slot {s}: {rolled} from access lists, {proven} proven at block {}",
+                        anchor.blockNumber
+                    )));
+                }
+            }
+        }
+        let db = &mut self.state.db;
+        for (h, c) in codes {
+            db.code.insert(h, c);
+        }
+        db.base = base;
+        Ok(())
     }
 
     /// Move to a given L1 block (a tag, number or hash) now, proving the working set there:

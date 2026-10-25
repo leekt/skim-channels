@@ -54,6 +54,9 @@ impl DBErrorMarker for DbError {}
 pub struct Base {
     accounts: BTreeMap<Address, AccountWitness>,
     slots: BTreeMap<(Address, B256), StorageWitness>,
+    /// Rolled forward from block access lists since it was last proven: the values are the
+    /// head's, but the proofs are an earlier block's (`evidence` proves the set again first).
+    pub rolled: bool,
 }
 
 impl Base {
@@ -86,6 +89,53 @@ impl Base {
     pub fn merge(&mut self, other: Base) {
         self.accounts.extend(other.accounts);
         self.slots.extend(other.slots);
+    }
+
+    /// The working set at the next block, from that block's access list (already checked
+    /// against its header's commitment): every key in the set that the block wrote takes the
+    /// block's final value for it (its last change); every other key keeps its value. Writes
+    /// to keys outside the set are ignored (a key first read later is proven then). New code is
+    /// returned by hash.
+    pub fn roll(&self, bal: &[alloy_eip7928::AccountChanges]) -> (Base, Vec<(B256, Bytecode)>) {
+        let mut next = self.clone();
+        let mut codes = vec![];
+        for ac in bal {
+            let a = ac.address;
+            if let Some(acc) = next.accounts.get_mut(&a) {
+                let mut changed = false;
+                if let Some(c) = ac.balance_changes.last() {
+                    acc.balance = c.post_balance;
+                    changed = true;
+                }
+                if let Some(c) = ac.nonce_changes.last() {
+                    acc.nonce = c.new_nonce;
+                    changed = true;
+                }
+                if let Some(c) = ac.code_changes.last() {
+                    let code = c.new_code.clone();
+                    acc.codeHash = if code.is_empty() {
+                        KECCAK_EMPTY
+                    } else {
+                        keccak256(&code)
+                    };
+                    if !code.is_empty() {
+                        codes.push((acc.codeHash, Bytecode::new_raw(code.to_vec().into())));
+                    }
+                    changed = true;
+                }
+                if changed {
+                    acc.exists = true;
+                }
+            }
+            for sc in &ac.storage_changes {
+                let key = B256::from(sc.slot);
+                if let (Some(w), Some(c)) = (next.slots.get_mut(&(a, key)), sc.changes.last()) {
+                    w.value = c.new_value;
+                }
+            }
+        }
+        next.rolled = true;
+        (next, codes)
     }
 
     pub fn account(&self, a: &Address) -> Option<&AccountWitness> {
@@ -399,5 +449,94 @@ pub fn code_hash(code: &[u8]) -> B256 {
         KECCAK_EMPTY
     } else {
         keccak256(code)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_eip7928::{
+        AccountChanges, BalanceChange, BlockAccessIndex, CodeChange, SlotChanges, StorageChange,
+    };
+
+    fn acct(a: Address) -> AccountWitness {
+        AccountWitness {
+            account: a,
+            exists: true,
+            nonce: 1,
+            balance: U256::from(10),
+            storageRoot: B256::ZERO,
+            codeHash: KECCAK_EMPTY,
+            code: Bytes::new(),
+            proof: vec![],
+        }
+    }
+
+    fn slot(a: Address, s: u64, v: u64) -> StorageWitness {
+        StorageWitness {
+            account: a,
+            slot: B256::from(U256::from(s)),
+            value: U256::from(v),
+            proof: vec![],
+        }
+    }
+
+    #[test]
+    fn rolling_takes_each_tracked_keys_last_write_and_nothing_else() {
+        let (a, b) = (Address::repeat_byte(0xa), Address::repeat_byte(0xb));
+        let mut base = Base::default();
+        base.accounts.insert(a, acct(a));
+        base.slots
+            .insert((a, B256::from(U256::from(1))), slot(a, 1, 7));
+        base.slots
+            .insert((a, B256::from(U256::from(2))), slot(a, 2, 8));
+        let code = Bytes::from_static(&[0x60, 0x00]);
+        let bal = vec![
+            AccountChanges::new(a)
+                .with_balance_change(BalanceChange::new(BlockAccessIndex(1), U256::from(11)))
+                .with_balance_change(BalanceChange::new(BlockAccessIndex(3), U256::from(12)))
+                .with_code_change(CodeChange::new(BlockAccessIndex(2), code.clone()))
+                .with_storage_change(SlotChanges::new(
+                    U256::from(1),
+                    vec![
+                        StorageChange::new(BlockAccessIndex(1), U256::from(70)),
+                        StorageChange::new(BlockAccessIndex(4), U256::from(71)),
+                    ],
+                ))
+                // a slot the app never read: ignored
+                .with_storage_change(SlotChanges::new(
+                    U256::from(9),
+                    vec![StorageChange::new(BlockAccessIndex(1), U256::from(5))],
+                )),
+            // an account outside the working set: ignored
+            AccountChanges::new(b)
+                .with_balance_change(BalanceChange::new(BlockAccessIndex(1), U256::from(99))),
+        ];
+        let (next, codes) = base.roll(&bal);
+        assert!(next.rolled && !base.rolled);
+        let na = next.account(&a).unwrap();
+        assert_eq!(na.balance, U256::from(12), "the last balance change");
+        assert_eq!(na.nonce, 1, "unchanged");
+        assert_eq!(na.codeHash, keccak256(&code));
+        assert_eq!(
+            codes,
+            vec![(keccak256(&code), Bytecode::new_raw(code.to_vec().into()))]
+        );
+        assert_eq!(
+            next.slot(a, B256::from(U256::from(1))),
+            Some(U256::from(71)),
+            "the last write"
+        );
+        assert_eq!(
+            next.slot(a, B256::from(U256::from(2))),
+            Some(U256::from(8)),
+            "not written: unchanged"
+        );
+        assert_eq!(
+            next.slot(a, B256::from(U256::from(9))),
+            None,
+            "outside the working set"
+        );
+        assert!(next.account(&b).is_none());
     }
 }

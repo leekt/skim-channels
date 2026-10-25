@@ -33,4 +33,9 @@ counters!(
     // state-ready changes from the stream, and how many disagreed with the proofs
     STATE_READY_CHANGES,
     STATE_READY_MISMATCHES,
+    // heads reached from authenticated block access lists instead of proofs, their bytes, and
+    // heads that fell back to proving (no list served, a break in the chain, a bad commitment)
+    BAL_ROLLS,
+    BAL_BYTES,
+    BAL_FALLBACKS,
 );
