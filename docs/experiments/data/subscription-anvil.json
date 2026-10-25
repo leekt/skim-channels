@@ -1,18 +1,18 @@
 {
   "note": "anvil L1 (no skim stream: the executor polls the head every 500 ms); app executor crates/app-executor",
   "executor": {
-    "coldReadMs": 4.3,
-    "warmReadMs": 0.78,
-    "followLatencyMs": 383,
+    "coldReadMs": 4.9,
+    "warmReadMs": 1.03,
+    "followLatencyMs": 375,
     "acrossOneUpdate": {
       "code_requests": 0,
       "cold_fetches": 0,
       "header_requests": 1,
       "heads_adopted": 1,
-      "last_refresh_ms": 11,
+      "last_refresh_ms": 1,
       "proof_requests": 1,
       "proof_slots": 1,
-      "refresh_ms": 11,
+      "refresh_ms": 1,
       "state_ready_changes": 0,
       "state_ready_mismatches": 0,
       "stream_apply": 0,
@@ -25,7 +25,7 @@
       "proofSlots": 1,
       "codeRequests": 0,
       "headerRequests": 1,
-      "provingMs": 1
+      "provingMs": 0.8
     }
   },
   "clearing": {
@@ -43,7 +43,7 @@
         "firstFill": 1
       }
     ],
-    "proposeGas": 1507839,
-    "reusedPriceProposeGas": 914473
+    "proposeGas": 1507875,
+    "reusedPriceProposeGas": 914509
   }
 }

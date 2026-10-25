@@ -15,7 +15,7 @@ import { L1ReadView } from "./runtime/l1view.ts";
 import { EvidenceStore } from "./runtime/evidence.ts";
 import { levels, rootOf, siblings } from "./runtime/tree.ts";
 import { watchProposal } from "./runtime/watcher.ts";
-import { ClearingOperator, deploySessionCode, openSession, EMPTY, eip712Order, leafHash, mergeAbi, orderHash, type Account, type Order } from "./runtime/clearing.ts";
+import { AGG_HOT_SLOT, transmissionSlot, ClearingOperator, deploySessionCode, openSession, EMPTY, eip712Order, leafHash, mergeAbi, orderHash, type Account, type Order } from "./runtime/clearing.ts";
 import { Gateway } from "./runtime/gateway.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
@@ -265,6 +265,13 @@ async function run(l1: Chain) {
 
   // ---- the executor's L1 view fails closed and is read-only ----
   const refuses = async (fn: () => Promise<unknown>) => { try { await fn(); return false; } catch { return true; } };
+  /** Reverts, and the decoded error (name or arguments) mentions `what`. */
+  const revertsWith = async (fn: () => Promise<unknown>, what: string) => {
+    try { await fn(); return false; } catch (e: any) {
+      const d = e?.cause?.data ?? e?.cause?.cause?.data;
+      return JSON.stringify([d?.errorName, d?.args ?? []], (_k, v) => (typeof v === "bigint" ? v.toString() : v)).includes(what);
+    }
+  };
   check(await refuses(() => A.exec.rpc("executor_pin", [keccak256("0x01")])), "pinning to a block L1 doesn't have is refused");
   check(await refuses(() => A.exec.send(ch, "requestWithdraw", [ETH, 1n], alice)), "the channel is read-only on the app network: nothing there can write to it");
   check((await A.exec.rpc<any>("executor_status")).overlay.length === 0, "and no overlay was ever written into an imported account");
@@ -314,7 +321,17 @@ async function run(l1: Chain) {
   // R1: two speculative batches, the second spending what the first produced; a reorg
   //     removes both anchors. Recovery starts at the FIRST and replays both.
   A.policy = { kind: "latest" };
+  /** Until the executor has applied L1's head (so a batch opens after everything already on L1). */
+  const caughtUp = async () => {
+    for (let i = 0; i < 200; i++) {
+      if (BigInt((await A.exec.rpc<any>("executor_status")).pin.number) >= (await l1.height())) return;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    throw new Error("FAILED: the executor didn't catch up with L1");
+  };
+  const beforeS1 = await l1.height(); // batch #4's finalize is at or below this block
   await l1.rpc("anvil_mine", [toHex(1)]);
+  await caughtUp();
   await A.open();
   const a5 = await order(alice, ETH, parseEther("0.1"), usd(205), 5n);
   const d1 = await order(dave, USD, usd(210), parseEther("0.1"), 1n);
@@ -322,7 +339,9 @@ async function run(l1: Chain) {
   check((await fill(A, a5, d1)).ok, "speculative batch S1: alice sells 0.1 ETH to dave");
   await A.seal();
   const s1 = A.current;
+  check(s1.snap.number > beforeS1, "S1 opened above every earlier settlement block");
   await l1.rpc("anvil_mine", [toHex(1)]);
+  await caughtUp();
   await A.open();
   const d2 = await order(dave, ETH, parseEther("0.1"), usd(205), 2n);
   const k7 = await order(bob, USD, usd(210), parseEther("0.1"), 7n);
@@ -331,7 +350,9 @@ async function run(l1: Chain) {
   await A.seal();
   // The new chain has alice withdrawing most of her ETH in the replaced block (price unchanged).
   const withdraw = { from: alice.address, to: ch.address, data: encodeFunctionData({ abi: ch.abi, functionName: "requestWithdraw", args: [ETH, parseEther("0.65")] }) };
-  await l1.rpc("anvil_reorg", [2, [[withdraw, 0]]]);
+  // Deep enough to replace S1's block, however many blocks the chain made since (it mines on a timer).
+  const depth = Number((await l1.height()) - s1.snap.number + 1n);
+  await l1.rpc("anvil_reorg", [depth, [[withdraw, 0]]]);
   check((await reader.canonicalStatus(s1.snap)) === "orphaned", "S1's anchor is orphaned (the node has another block at that height)");
   const r1 = await A.tick();
   check(r1.status === "recovered" && r1.from === s1.no, `tick() recovered from the earliest affected batch (#${r1.from}), not just the last`);
@@ -462,6 +483,15 @@ async function run(l1: Chain) {
   ]);
   await l1.send(anchors, "record", [wUp.rawHeader], opA);
   check(await refuses(() => l1.read(adapter, "price", [wUp.package, anchors.address, 256n])), "L1's adapter refuses a price from the new aggregator (unsupported feed)");
+  // The same block, with a witness for the supported aggregator's own slots: its code and round
+  // are fine, but the proxy no longer points at it, which the adapter checks at the anchor.
+  const aggRound = (await reader.value(snapUp, agg.address, AGG_HOT_SLOT)) >> 176n & 0xffffffffn;
+  const wOld = reader.witness(snapUp, [
+    { account: proxy.address, slots: [toHex(2n, { size: 32 })] },
+    { account: agg.address, slots: [AGG_HOT_SLOT, transmissionSlot(aggRound)] },
+  ]);
+  check(await revertsWith(() => l1.read(adapter, "price", [wOld.package, anchors.address, 256n]), "proxy aggregator"),
+    "and a witness for the old aggregator is refused too: the proxy points elsewhere at that block (proxy aggregator)");
   await B.open();
   console.log("ok  opening a batch still works (the price is read per fill, so a broken feed never blocks deposits or withdrawals)");
   const aUp = await order(alice, ETH, parseEther("0.1"), usd(200), 9n);
@@ -470,6 +500,19 @@ async function run(l1: Chain) {
   check(await refuses(() => B.exec.pub.simulateContract({ account: opB, address: B.book.address, abi: B.book.abi, functionName: "fill", args: [aUp.h, kUp.h] })),
     "but the executor can't price a fill from it (the new aggregator isn't imported)");
   await l1.send(proxy, "setAggregator", [agg.address], opA); // back to the supported one
+  // A non-positive answer is refused on L1 (and the executor won't price from it either).
+  await l1.send(agg, "transmit", [0n], opA);
+  await l1.rpc("anvil_mine", [toHex(2)]);
+  const snapZero = await reader.snapshot({ kind: "confirmations", n: 1 });
+  const zr = (await reader.value(snapZero, agg.address, AGG_HOT_SLOT)) >> 176n & 0xffffffffn;
+  const wZero = reader.witness(snapZero, [
+    { account: proxy.address, slots: [toHex(2n, { size: 32 })] },
+    { account: agg.address, slots: [AGG_HOT_SLOT, transmissionSlot(zr)] },
+  ]);
+  await l1.send(anchors, "record", [wZero.rawHeader], opA);
+  check(await revertsWith(() => l1.read(adapter, "price", [wZero.package, anchors.address, 256n]), "NoAnswer"),
+    "a round answered 0 is refused by L1's adapter (NoAnswer)");
+  await l1.send(agg, "transmit", [answer(2100)], opA);
   await l1.rpc("anvil_mine", [toHex(2)]);
   if (B.batches.length && B.current.state === "open") await B.recover(B.current.no, "feed restored");
 
