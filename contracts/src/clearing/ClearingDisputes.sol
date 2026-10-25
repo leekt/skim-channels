@@ -119,6 +119,24 @@ contract ClearingDisputes is ClearingStorage {
         _discard(msg.sender, "fill");
     }
 
+    /// @notice Segment `s` of the pending batch was priced with a feed round that its own head
+    ///         had already replaced: `witness` proves the feed's latest round at that head (a
+    ///         recorded block). L1 can't see at proposal that a reused price went out of date;
+    ///         anyone can prove it here. The heads and rounds are the proposal's.
+    function challengeRound(uint256 s, uint64[] calldata heads, uint256[] calldata rounds, bytes calldata witness)
+        external
+        viaChannel
+    {
+        Pending storage p = _pending;
+        if (p.at == 0 || block.timestamp >= p.at + _cfg.challengeWindow) revert WrongState();
+        if (keccak256(abi.encode(heads, rounds)) != p.rounds) revert BadProof();
+        if (s >= heads.length) revert WrongState();
+        (uint64 at, uint256 round) = _cfg.priceAdapter.roundAt(witness, _cfg.anchors);
+        if (at != heads[s]) revert BadAnchor();
+        if (round == rounds[s]) revert NotWrong();
+        _discard(msg.sender, "round");
+    }
+
     /// @notice Account `idx`'s leaf in the pending root isn't what ClearingLedger gives when
     ///         the finalized leaf is replayed through the batch — or it claims deposits L1
     ///         doesn't have, or skips (or exceeds) the requests before the batch's cursor.

@@ -93,6 +93,9 @@ abstract contract ClearingStorage {
         /// keccak256(abi.encode(firstFills, prices, heads)): the batch's execution segments,
         /// each head recorded and each price verified (and fresh at its head) at proposal.
         bytes32 segments;
+        /// keccak256(abi.encode(heads, rounds)): the feed round each segment was priced with
+        /// (challengeRound checks it against the round at the segment's head).
+        bytes32 rounds;
         uint64 at;
         uint64 reqCursor;
         uint64 forcedCursor;
@@ -136,7 +139,7 @@ abstract contract ClearingStorage {
         uint256 indexed batch, bytes32 root, address proposer, bytes32 segments, uint64 reqCursor, uint64 forcedCursor
     );
     /// A proposal's execution segments: each fill's head and price (challengeFill takes them).
-    event Segments(uint256 indexed batch, uint32[] firstFills, uint256[] prices, uint64[] heads);
+    event Segments(uint256 indexed batch, uint32[] firstFills, uint256[] prices, uint64[] heads, uint256[] rounds);
     event ForcedRested(uint256 indexed pos);
     event Finalized(uint256 indexed batch, bytes32 root);
     event Discarded(uint256 indexed batch, address challenger, string reason);

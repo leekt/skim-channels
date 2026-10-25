@@ -11,10 +11,19 @@ interface IPriceAdapter {
     /// @return value USD per ETH, 6 decimals
     /// @return anchorBlock the witness's anchor (recorded, of this chain, at most `maxAge` old)
     /// @return updatedAt when the price was answered (L1 checks freshness at each fill's head)
+    /// @return round the feed's round the price is from
     function price(bytes calldata witness, AnchorRegistry anchors, uint256 maxAge)
         external
         view
-        returns (uint256 value, uint64 anchorBlock, uint64 updatedAt);
+        returns (uint256 value, uint64 anchorBlock, uint64 updatedAt, uint256 round);
+
+    /// The feed's latest round at a recorded block (any age), from a witness at that block:
+    /// what a challenger proves when a fill's head had a newer round than the one it was priced
+    /// with.
+    function roundAt(bytes calldata witness, AnchorRegistry anchors)
+        external
+        view
+        returns (uint64 anchorBlock, uint256 round);
 
     /// A price is usable at an L1 head at most this long (seconds) after it was answered.
     function maxStaleness() external view returns (uint256);
@@ -74,23 +83,12 @@ contract ChainlinkAdapter is IPriceAdapter {
     function price(bytes calldata witness, AnchorRegistry anchors, uint256 maxAge)
         external
         view
-        returns (uint256 value, uint64 anchorBlock, uint64 updatedAt)
+        returns (uint256 value, uint64 anchorBlock, uint64 updatedAt, uint256 round)
     {
-        WitnessLib.WitnessPackage memory p = WitnessLib.decode(witness);
-        WitnessLib.Read[] memory reads = WitnessLib.verify(p);
-        ChannelTypes.L1Anchor memory a = p.anchor;
-        bytes32 id = ChannelTypes.anchorId(a);
-        if (
-            a.chainId != block.chainid || a.stateRoot == 0 || anchors.stateRootOf(id) != a.stateRoot
-                || block.number > a.blockNumber + maxAge
-        ) revert BadAnchor();
-        _code(p, proxy, proxyCodeHash, "proxy code");
-        _code(p, aggregator, aggregatorCodeHash, "aggregator code");
-        if (address(uint160(WitnessLib.find(reads, proxy, PHASE_SLOT) >> 16)) != aggregator) {
-            revert UnsupportedFeed("proxy aggregator");
-        }
-        uint32 round = uint32(WitnessLib.find(reads, aggregator, HOT_SLOT) >> 176);
-        uint256 t = WitnessLib.find(reads, aggregator, transmissionSlot(round));
+        (WitnessLib.Read[] memory reads, ChannelTypes.L1Anchor memory a, bytes32 id) = _feed(witness, anchors);
+        if (block.number > a.blockNumber + maxAge) revert BadAnchor();
+        round = uint32(WitnessLib.find(reads, aggregator, HOT_SLOT) >> 176);
+        uint256 t = WitnessLib.find(reads, aggregator, transmissionSlot(uint32(round)));
         int192 answer = int192(uint192(t));
         if (answer <= 0) revert NoAnswer();
         updatedAt = uint64(t >> 192);
@@ -98,6 +96,36 @@ contract ChainlinkAdapter is IPriceAdapter {
         if (updatedAt > at || at > updatedAt + maxStaleness) revert StalePrice(updatedAt, at);
         value = uint256(uint192(answer)) * 1e6 / 10 ** decimals;
         anchorBlock = a.blockNumber;
+    }
+
+    function roundAt(bytes calldata witness, AnchorRegistry anchors)
+        external
+        view
+        returns (uint64 anchorBlock, uint256 round)
+    {
+        (WitnessLib.Read[] memory reads, ChannelTypes.L1Anchor memory a,) = _feed(witness, anchors);
+        return (a.blockNumber, uint32(WitnessLib.find(reads, aggregator, HOT_SLOT) >> 176));
+    }
+
+    /// The witness, verified against a recorded anchor of this chain, with the pinned proxy and
+    /// aggregator code and the proxy pointing at that aggregator.
+    function _feed(bytes calldata witness, AnchorRegistry anchors)
+        internal
+        view
+        returns (WitnessLib.Read[] memory reads, ChannelTypes.L1Anchor memory a, bytes32 id)
+    {
+        WitnessLib.WitnessPackage memory p = WitnessLib.decode(witness);
+        reads = WitnessLib.verify(p);
+        a = p.anchor;
+        id = ChannelTypes.anchorId(a);
+        if (a.chainId != block.chainid || a.stateRoot == 0 || anchors.stateRootOf(id) != a.stateRoot) {
+            revert BadAnchor();
+        }
+        _code(p, proxy, proxyCodeHash, "proxy code");
+        _code(p, aggregator, aggregatorCodeHash, "aggregator code");
+        if (address(uint160(WitnessLib.find(reads, proxy, PHASE_SLOT) >> 16)) != aggregator) {
+            revert UnsupportedFeed("proxy aggregator");
+        }
     }
 
     function _code(WitnessLib.WitnessPackage memory p, address who, bytes32 want, string memory what) internal pure {

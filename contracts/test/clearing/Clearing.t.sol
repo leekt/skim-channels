@@ -49,18 +49,49 @@ contract SlotPriceAdapter is IPriceAdapter {
     function price(bytes calldata witness, AnchorRegistry anchors, uint256 maxAge)
         external
         view
-        returns (uint256 value, uint64 anchorBlock, uint64 updatedAt)
+        returns (uint256 value, uint64 anchorBlock, uint64 updatedAt, uint256 round)
+    {
+        (WitnessLib.Read[] memory reads, ChannelTypes.L1Anchor memory a) = _verified(witness, anchors);
+        if (block.number > a.blockNumber + maxAge) revert ChainlinkAdapter.BadAnchor();
+        // The fixture slot has no answer time or round: the anchor's own time, a set round.
+        return (
+            WitnessLib.find(reads, feed, slot),
+            a.blockNumber,
+            uint64(anchors.timestampOf(ChannelTypes.anchorId(a))),
+            roundOf[a.blockNumber]
+        );
+    }
+
+    function roundAt(bytes calldata witness, AnchorRegistry anchors)
+        external
+        view
+        returns (uint64 anchorBlock, uint256 round)
+    {
+        (, ChannelTypes.L1Anchor memory a) = _verified(witness, anchors);
+        return (a.blockNumber, roundOf[a.blockNumber]);
+    }
+
+    function _verified(bytes calldata witness, AnchorRegistry anchors)
+        internal
+        view
+        returns (WitnessLib.Read[] memory reads, ChannelTypes.L1Anchor memory a)
     {
         WitnessLib.WitnessPackage memory p = WitnessLib.decode(witness);
-        WitnessLib.Read[] memory reads = WitnessLib.verify(p);
-        ChannelTypes.L1Anchor memory a = p.anchor;
+        reads = WitnessLib.verify(p);
+        a = p.anchor;
         if (
             a.chainId != block.chainid || a.stateRoot == 0
-                || anchors.stateRootOf(ChannelTypes.anchorId(a)) != a.stateRoot || block.number > a.blockNumber + maxAge
-        ) revert ChainlinkAdapter.BadAnchor();
-        // The fixture slot has no answer time: the anchor's own time.
-        return
-            (WitnessLib.find(reads, feed, slot), a.blockNumber, uint64(anchors.timestampOf(ChannelTypes.anchorId(a))));
+                || anchors.stateRootOf(ChannelTypes.anchorId(a)) != a.stateRoot
+        ) {
+            revert ChainlinkAdapter.BadAnchor();
+        }
+    }
+
+    /// The feed round at each block (tests set it).
+    mapping(uint256 => uint256) public roundOf;
+
+    function setRound(uint256 blockNumber, uint256 round) external {
+        roundOf[blockNumber] = round;
     }
 
     uint256 public maxStaleness = 3650 days;

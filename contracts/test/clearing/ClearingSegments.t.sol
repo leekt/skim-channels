@@ -209,4 +209,33 @@ contract ClearingSegmentsTest is ClearingChannelBase {
             abi.encodeWithSelector(ClearingStorage.BadAnchor.selector)
         ); // too old
     }
+
+    function _rounds(uint256 r0, uint256 r1) internal pure returns (uint64[] memory h, uint256[] memory r) {
+        h = new uint64[](2);
+        (h[0], h[1]) = (100, 101);
+        r = new uint256[](2);
+        (r[0], r[1]) = (r0, r1);
+    }
+
+    /// The price read at block 100 (round 5) is reused at head 101. If the feed's round at 101
+    /// is still 5, nothing is wrong; if 101 already had round 6, anyone proves it.
+    function test_aReusedRoundIsChallengeableAtItsHead() public {
+        (bytes memory fills, L.Account[] memory n) = _two6000(1000);
+        priceAdapter.setRound(100, 5);
+        _proposeWith(fills, n, _w(pkg0), _segs(_seg(0, 0, 100), _seg(1, 0, 101)));
+        (uint64[] memory h, uint256[] memory r) = _rounds(5, 5);
+        priceAdapter.setRound(101, 5);
+        vm.startPrank(watcher);
+        vm.expectRevert(ClearingStorage.NotWrong.selector);
+        D.challengeRound(1, h, r, pkg1); // still round 5 at 101
+        vm.expectRevert(ClearingStorage.BadAnchor.selector);
+        D.challengeRound(1, h, r, pkg0); // a witness for another block than the head
+        (uint64[] memory h2, uint256[] memory r2) = _rounds(5, 6);
+        vm.expectRevert(ClearingStorage.BadProof.selector);
+        D.challengeRound(1, h2, r2, pkg1); // not the proposal's rounds
+        priceAdapter.setRound(101, 6); // 101 had a newer round: fill 1 used a replaced price
+        D.challengeRound(1, h, r, pkg1);
+        vm.stopPrank();
+        assertEq(D.pending().at, 0, "discarded");
+    }
 }

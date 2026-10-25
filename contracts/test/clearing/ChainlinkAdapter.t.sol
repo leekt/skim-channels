@@ -43,11 +43,17 @@ contract ChainlinkAdapterTest is Test {
     function test_thePriceTheProxyReturnsAtTheAnchor() public {
         ChainlinkAdapter ad = _adapter(agg, aggHash, proxyHash, 3 hours);
         uint256 g = gasleft();
-        (uint256 p, uint64 at,) = ad.price(pkg, anchors, 256);
+        (uint256 p, uint64 at,, uint256 round) = ad.price(pkg, anchors, 256);
         emit log_named_uint("adapter.price gas (execution)", g - gasleft());
         emit log_named_uint("witness bytes", pkg.length);
         assertEq(p, answer / 100, "8 decimals to 6");
         assertEq(at, number);
+        // The round a challenger proves at a head: the same latest round, at any age.
+        vm.roll(block.number + 10_000);
+        (uint64 at2, uint256 round2) = ad.roundAt(pkg, anchors);
+        assertEq(at2, number);
+        assertEq(round2, round, "roundAt reads the same latest round");
+        assertGt(round, 0);
     }
 
     /// Configured for an aggregator the proxy doesn't point at (and the witness doesn't cover):
@@ -97,7 +103,7 @@ contract ChainlinkAdapterTest is Test {
         for (uint256 i = 300; i < pkg.length; i += 1499) {
             bytes memory p = bytes.concat(pkg);
             p[i] = p[i] ^ 0x01;
-            try ad.price(p, anchors, 256) returns (uint256 v, uint64, uint64) {
+            try ad.price(p, anchors, 256) returns (uint256 v, uint64, uint64, uint256) {
                 assertEq(v, answer / 100, "a flip that verifies must not change the price");
                 revert("tampered witness accepted");
             } catch {}
