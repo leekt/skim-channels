@@ -14,6 +14,7 @@ import { Chain, type C } from "./runtime/executor.ts";
 import { L1ReadView } from "./runtime/l1view.ts";
 import { EvidenceStore } from "./runtime/evidence.ts";
 import { levels, rootOf, siblings } from "./runtime/tree.ts";
+import { watchProposal } from "./runtime/watcher.ts";
 import { ClearingOperator, deploySessionCode, openSession, EMPTY, eip712Order, leafHash, mergeAbi, orderHash, type Account, type Order } from "./runtime/clearing.ts";
 import { Gateway } from "./runtime/gateway.ts";
 
@@ -141,30 +142,12 @@ async function run(l1: Chain) {
   const idxOf = async (a: Address) => Number(await l1.read(ch, "indexPlusOne", [a])) - 1;
   const [ia, ib, ic, id] = [await idxOf(alice.address), await idxOf(bob.address), await idxOf(carol.address), await idxOf(dave.address)];
 
-  /** A watcher's view: challenge every fill and every touched account; all must fail. */
+  /** A watcher's view: every challenge L1 offers (accounts, fills, rounds); all must answer NotWrong. */
   async function watch(op: ClearingOperator, p: Awaited<ReturnType<ClearingOperator["proposal"]>>, expectFault?: number) {
-    const n = Number(await l1.read(ch, "userCount"));
-    const finDense = Array.from({ length: n }, (_, i) => leafHash(op.fin.get(i) ?? EMPTY));
-    const nextDense = finDense.map((h, i) => (p.next.has(i) ? leafHash(p.next.get(i)!) : h));
-    let faults: number[] = [];
-    for (let i = 0; i < n; i++) {
-      try {
-        await l1.pub.simulateContract({
-          account: watcher, address: ch.address, abi: ch.abi, functionName: "challengeAccount",
-          args: [i, op.fin.get(i) ?? EMPTY, siblings(levels(finDense), i), p.next.get(i) ?? op.fin.get(i) ?? EMPTY, siblings(levels(nextDense), i), p.fills],
-        });
-        faults.push(i);
-      } catch { /* NotWrong */ }
-    }
-    const nFills = (p.fills.length - 2) / 2 / 236;
-    for (let f = 0; f < nFills; f++) {
-      try {
-        await l1.pub.simulateContract({ account: watcher, address: ch.address, abi: ch.abi, functionName: "challengeFill", args: [p.fills, BigInt(f)] });
-        faults.push(1000 + f);
-      } catch { /* NotWrong */ }
-    }
-    if (expectFault === undefined) check(faults.length === 0, `watcher checked ${n} accounts and ${nFills} fills: nothing to challenge`);
-    return { faults, finDense, nextDense };
+    const r = await watchProposal({ l1, channel: ch, view: op.view, feed, from: watcher.address, fin: op.fin, next: p.next, fills: p.fills });
+    const faults = r.faults.map((f) => (f.kind === "account" ? f.at : f.kind === "fill" ? 1000 + f.at : 2000 + f.at));
+    if (expectFault === undefined) check(faults.length === 0, `watcher checked ${r.checked.accounts} accounts, ${r.checked.fills} fills and ${r.checked.rounds} segment rounds: nothing to challenge`);
+    return { faults, finDense: r.finDense, nextDense: r.nextDense };
   }
   /** What an operator's loop does: tick() (re-pin orphaned or aged batches), then propose. */
   async function settle(op: ClearingOperator, no: bigint, label: string) {
