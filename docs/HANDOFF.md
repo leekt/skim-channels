@@ -52,7 +52,7 @@ governance, forced inclusion). Read first: [PROJECT](../PROJECT.md) (spec v0.1),
   - canonical / orphaned / unknown, with skim rewinds consumed by `tick()`;
   - aged batches reopened at a recent head;
   - a lost executor rebuilt from L1 plus the journal.
-- **Verified:** 63 clearing forge tests, runtime control-flow tests (`test-runtime`) (40 mutants caught before sessions and segments, one equivalent); e2e runs covering reorg, recovery, handover, freeze, sessions and following; live reads and following through skim on Sepolia; the Sepolia devnet proposes batches through skim. Results and costs: [clearing](experiments/clearing.md).
+- **Verified:** 70 clearing forge tests and runtime control-flow tests (`test-runtime`); 71 mutants, all caught but one equivalent (two by the e2e); e2e runs covering reorg, recovery, handover, freeze, sessions and following; live reads and following through skim on Sepolia; the Sepolia devnet proposes batches through skim. Results and costs: [clearing](experiments/clearing.md).
 - **Cost:** 14.6k gas per fill dense vs 45.5k for the same batch fully verified at once vs 67.4k as one L1 transaction per fill. When every account trades once per batch, about break-even with per-transaction L1.
 - **Open:**
   - matching isn't forced;

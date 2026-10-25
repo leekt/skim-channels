@@ -73,8 +73,10 @@ The final state diff is re-checked before commit as well.
 | | |
 |---|---|
 | Stream | `skim_streamNext`, subscribed to the imported accounts. It wakes the follower when skim applies a block and reports `rewind` and `gap`. Its cursor is kept on disk (`--state-dir`), so a restart continues the stream. Without skim (another node), the follower polls the head |
-| State-ready vs proof-ready | The stream's state changes are skim's word. This process can't authenticate them, because skim doesn't serve the full block access list to check against the header. So they are only cross-checked against proofs and counted (`state_ready_mismatches`), never executed on. Execution reads only **proof-ready** values |
-| Warm working set | Every account and slot the app has touched. At each new head the follower proves the whole set in the background, against that head's state root: one `eth_getProof` per account, all its slots. Code is fetched once per code hash |
+| State-ready vs proof-ready | The stream's decoded state changes are skim's word, so they're only cross-checked and counted (`state_ready_mismatches`), never executed on. Execution reads only values the follower authenticated itself: proven against the head's state root, or rolled forward from access lists it checked against the headers |
+| Warm working set | Every account and slot the app has touched, kept current at each head in the background, by one of two paths |
+| From access lists | When the node serves raw block access lists (skim's `skim_getBlockAccessList`, on skim branch `feat/raw-bal-rpc`) and the new head continues the current one, through at most 16 hash-linked blocks. Each block's list must match its header's `blockAccessListHash`, and the working set takes the block's writes. No proof per block; keys a block didn't write keep their values. Evidence proves the set at the head again on request, and the proven values must equal the rolled ones (`bal_rolls`, `bal_bytes`, `bal_fallbacks`) |
+| By proofs | Otherwise: no list served, an unlinked chain, or a list that doesn't match. The follower proves the whole set against the head's state root: one `eth_getProof` per account, all its slots. Code is fetched once per code hash |
 | Adoption | The proven head replaces the previous one between executions, atomically: an execution always runs against one head, never mixed roots. A dependency touched for the first time is proven at that execution's head on the spot and joins the working set. Overlay slots are always proven at the new head; an unproven slot is never taken as zero |
 | App state | Kept across heads; nothing is replayed or erased by ordinary head advancement. If L1 now holds a value at an overlay slot, following stops with the previous head and all state kept, and the conflict is reported (a later explicit rebase or termination policy can resolve it) |
 | Which head ran | Each transaction's receipt has `l1BlockNumber` / `l1BlockHash`. Contracts can read the head with a call to the L1 head account `0x…4C31`, which returns `(number, hash, timestamp)` |
@@ -122,7 +124,9 @@ A batch doesn't hold one L1 block or one price. `ClearingBook` keeps **segments*
 - **Disputes:** `challengeFill` judges each fill's band, limits and **expiry at its own head**.
 - **Cost of a new head:** one header record (~100k gas). A new price adds one witness.
 
-**The limit of what L1 can check.** The operator names each fill's head. L1 confirms the head is a real, recent block, and that the price was read at or before it and is fresh there. A dishonest operator could still claim an earlier recorded head, down to the head its price was read at, to pass an expiry. It could also price a fill with a round the feed had replaced by its real head, within `maxStaleness`. The honest executor does neither.
+**A replaced round is provable: `challengeRound`.** At proposal, L1 checks that a reused price is fresh at each head. It can't see whether the feed still had the same round there. So the proposal also commits `keccak(heads, rounds)`, using the round the adapter read with each witness. Anyone can then prove, with a witness at a segment's head (`ChainlinkAdapter.roundAt`), that the feed's latest round there was a different one. The batch is discarded and the bond goes to the challenger. The runtime's watcher (`ts/runtime/watcher.ts`) tries this for every segment, along with every account and fill challenge.
+
+**The limit of what L1 can check.** The operator names each fill's head. L1 confirms the head is a real, recent block, that the price was read at or before it and is fresh there, and, through `challengeRound`, that the round was still current there. A dishonest operator could still claim an earlier recorded head, down to the head its price was read at, to pass an expiry. Nothing on L1 shows when a fill really ran. The honest executor never does this.
 
 
 ## The price on L1: `ChainlinkAdapter`
@@ -155,7 +159,12 @@ The verified prices are committed with the pending batch, and `challengeFill` ju
   - Each batch records the L1 proposal tx and block, its opening state, its prepared proofs, and every action with its outcome.
   - All of it lives in a journal written atomically to disk.
 - **`tick()`** checks every unproposed batch, as an operator loop would:
-  - **Orphaned:** any of those blocks left the chain (skim's `skim_streamNext` reports a rewind, or the node has another block at that height). → recover from that batch: it and every later batch are replayed at a new head, so nothing that ran against the orphaned block survives. An ordinary head advance is not a change.
+  - **Discarded:** L1 dropped the pending proposal after a challenge (`ClearingOperator.tick` reconciles first). The finalized leaves are taken from L1 again, and the batch is replayed with every later unproposed batch. Finalized and discarded are told apart by L1's finalized-batch count, not by the root alone.
+  - **Orphaned:** any of those blocks left the chain (skim's `skim_streamNext` reports a rewind, or the node has another block at that height).
+    - If only a segment's head is orphaned, and that segment has a checkpoint, recovery happens **inside the batch** (`recoverWithin`). The runtime checkpoints the executor just before a fill that starts a new segment. Recovery returns there, syncs the executor to the current head, keeps the batch's log and segments before it, and replays only the rest.
+    - Otherwise it recovers from the whole batch: it and every later batch are replayed at a new head.
+    
+    Either way, nothing that ran against the orphaned block survives. An ordinary head advance is not a change.
   - **Aged:** the oldest of them would be too old to propose (`maxAnchorAge` is in blocks). → recover.
   - **Unknown:** the node has no block at one of those heights. This is *not* treated as a reorg; proposing pauses.
   - `propose` makes the same check over every segment head first.
@@ -257,8 +266,8 @@ The typed signature is what L1 checks in a dispute.
 
 - **Matching guarantees:** a forced order must be published, but nothing forces it to be matched.
 - **Resting orders that were never published** are lost when the operator changes.
-- **Partial fills, more than two assets, blob DA.**
-- **Authenticated state-ready updates.** The follower re-proves its working set at every head (one `eth_getProof` per account), because skim doesn't serve full block access lists to check the stream's changes against ([subscription](../experiments/subscription.md)).
+- **Partial fills, more than two assets, blob DA.** Options for these and the two above: [open design choices](../experiments/clearing-open-choices.md).
+- **Access lists from the deployed node.** The follower rolls forward from authenticated access lists, but the skim node it runs against needs the `skim_getBlockAccessList` method (skim branch `feat/raw-bal-rpc`, not merged or deployed). Until then it proves each head ([subscription](../experiments/subscription.md)).
 - **A general L1 check of imported calls.** Only Chainlink's `latestRoundData` has an L1 adapter.
 
 ## Run it
@@ -270,6 +279,7 @@ $ cd ts && npm run e2e-clearing                          # deterministic: anvil 
 $ cd ts && npm run e2e-sessions                          # close a session, delete everything, start the next
 $ cd ts && npm run e2e-executor                          # the executor's write rules and following
 $ cd ts && npm run e2e-subscription                      # act at H, change L1, act at H+1 with no pin
+$ cd ts && npm run test-runtime                          # batch runtime control flow (reorgs, crashes)
 $ SKIM_RPC=http://127.0.0.1:18545 npm run live-executor  # live: the real Sepolia feed through skim
 ```
 
@@ -295,7 +305,8 @@ One server on `:8787` runs:
 | L1 | anvil (chain 900) | Sepolia, every read and write through skim |
 | Price | A feed with Chainlink's layout (an aggregator behind a proxy), priced from the page; it re-transmits hourly like a heartbeat | Chainlink's real ETH/USD feed on Sepolia |
 | Settlement | On the local chain; “+1 hour” skips challenge windows | On Sepolia, in real time |
-| Sessions | One per run (chains reset) | The vault, the session code and the infrastructure are deployed once (`~/.skim-devnet/sepolia.json`). A restart resumes the active session from its journal on a fresh executor. `NEW_SESSION=1` opens a new proxy session (~0.5M gas) and closes the previous one; its users redeem or roll over |
+| Sessions | One per run (chains reset) | The vault and the infrastructure are deployed once (`~/.skim-devnet/sepolia.json`). The session code and its adapter are deployed again only when their bytecode changes (`codeId`), and the next session opens on them. A restart resumes the active session from its journal on a fresh executor. `NEW_SESSION=1` opens a new proxy session (~0.5M gas) and closes the previous one; its users redeem or roll over |
+| Fees and finality | — | Transactions tip 0.01 gwei: viem's default 1 gwei is far above Sepolia's base fee, and session code is costly under Amsterdam's code pricing. Batches snapshot at the node's safe head, or at 3 confirmations when the node serves none |
 
 The page says which one it is. It shows the path from the feed to each fill:
 - the L1 head the executor is at;
@@ -303,4 +314,4 @@ The page says which one it is. It shows the path from the feed to each fill:
 - each batch's oracle segments and the witnesses L1's adapter checks;
 - every fill's distance from that price.
 
-`npm run devnet-smoke [URL]` runs a fresh wallet through faucet, deposit, a fill, a withdrawal and a claim.
+`npm run devnet-smoke [URL]` runs a fresh wallet through faucet, deposit, a fill, a withdrawal and a claim. With `SMOKE_KEY`, a wallet that already deposited or filled in this session continues from there.

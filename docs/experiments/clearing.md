@@ -24,18 +24,22 @@
 ## Verification
 
 - **forge** (`contracts/test/clearing`):
-  - 33 channel tests: honest batches survive every challenge; a forged signature, an out-of-band fill, an overpaid account, an omitted trader, nonce reuse across batches, collateral used twice, the request rules, a partial replay, false evidence, an unknown trader index, forced orders (resting, filled, ignored then freeze), takeover, the policy floors and bounds.
+  - 35 channel tests: honest batches survive every challenge; a forged signature, an out-of-band fill, an overpaid account, an omitted trader, nonce reuse across batches, collateral used twice, the request rules, a partial replay, false evidence, an unknown trader index, forced orders (resting, filled, ignored then freeze), takeover, the policy floors and bounds.
   - 6 `ChainlinkAdapter` tests on a recorded Sepolia witness: the price `latestRoundData()` returns at the anchor; an aggregator the proxy doesn't point at, unpinned proxy or aggregator code, a stale answer (judged at the anchor's time), an unrecorded or old anchor, and tampered proofs are all refused.
-  - 6 segment tests (`ClearingSegments.t.sol`):
+  - 9 segment tests (`ClearingSegments.t.sol`):
     - each fill against its own segment;
     - a fill provable against a wrong single price;
     - neither prices nor heads can be substituted;
     - a reused price doesn't stop the clock: expiry is judged at the later head;
     - a reused price must be fresh at the later head;
     - the shape is checked: no empty `[0, 0]` segment, heads increasing and recorded, every witness used, each price read no later than its head, none without fills.
-  - 12 session tests (`ClearingSession.t.sol`): the vault opens proxy sessions, Active → Closing → Closed, redeem and rollover with one payout record, pull bonds, chunked `publishFinal`.
+  - 14 session tests (`ClearingSession.t.sol`): the vault opens proxy sessions, Active → Closing → Closed, redeem and rollover with one payout record (only after close, only a final leaf), pull bonds, `depositFor` only from the vault and `fund` only into its sessions, chunked `publishFinal`.
+  - Segment tests include `challengeRound`: a reused price whose head had a newer round is a provable fault, and the challenge ends with the window.
   - 6 cost runs (including opening a session: ~0.5M gas, and publication).
-- **Mutation:** 40 mutants of the clearing contracts before sessions and segments, all caught except one equivalent: `finalize`'s frozen check, already unreachable because a freeze clears the pending batch. Not re-run since.
+- **Mutation (2026-10-25):** 71 mutants over the rules, ledger, codec, disputes (including `challengeRound`), sessions, vault, segments and the adapter.
+  - The first run left 11 alive. Tests now catch 10 of them: same-side and below-limit fills, a lone segment not starting at fill 0, `challengeRound` after the window, `redeem` before close or with a forged leaf, `depositFor` from a non-vault caller, `fund` into a contract the vault didn't open. The two adapter mutants (the proxy pointing elsewhere, a zero answer) are caught by `e2e-clearing` on live witnesses.
+  - One is equivalent: the segment-head age check, since a head is never older than the price it uses, whose age the adapter already bounds.
+  - The earlier run, 40 mutants before sessions and segments, had one equivalent too (`finalize`'s frozen check).
 - **Deterministic e2e** (`npm run e2e-clearing`: anvil L1 with only its last 512 states kept, so old proofs really are refused, and blocks advance with time; operators A and B on local executors):
 
 | Area | What happened |

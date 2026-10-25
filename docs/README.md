@@ -49,6 +49,7 @@ Measurements of the builds named in each log. Use the guides for current behavio
 | [Prediction round cost](experiments/prediction-round-cost.md) | optimistic prediction rounds: safety tests, dispute gas, cost vs. the same game on L1 |
 | [Prediction review fixes](experiments/prediction-review-fixes.md) | f4aab62 review: challenge-period floors, request coverage, request queue deadlines, exits without a witness |
 | [Clearing](experiments/clearing.md) | skim → stateful Solidity → optimistic L1 settlement: recovery, handover, forced orders, live skim reads; cost against batched and per-transaction controls |
+| [Clearing: open choices](experiments/clearing-open-choices.md) | Forced-order matching, resting orders on handover, partial fills, more assets, blob DA: options and recommendations |
 | [Sessions](experiments/sessions.md) | Disposable sessions over a stable vault: close, delete the operator's state, restart from a passive recovery package without historical RPC; lifetime costs |
 | [Chainlink rounds](experiments/chainlink-rounds.md) | Evaluation: checking the batch price with `getRoundData(roundId)` and an explicit round-selection rule instead of proofs |
 | [Subscription](experiments/subscription.md) | The executor follows L1 (skim's stream, proof-ready working set, durable cursor); act at H, change L1, act at H+1 with no pin; oracle segments in one batch; latency and requests per block |

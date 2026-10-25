@@ -9,13 +9,8 @@
      - batching beyond ~1,800 users per commit or proposal transaction.
    - **Stateful clearing: built** (optimistic settlement, account root on L1, handover, forced orders, runtime recovery, an executor that follows L1, oracle segments, proxy sessions; [log](experiments/clearing.md)).
    - **Next for clearing:**
-     - matching guarantees for forced orders (they must be published, not yet matched);
-     - automatic rebuild after a discarded proposal;
-     - partial fills;
-     - more assets;
-     - blob DA for fills;
+     - decide the [open choices](experiments/clearing-open-choices.md): forced-order matching, resting orders on handover, then blob DA and partial fills;
      - authenticated state-ready updates (skim serving raw block access lists), so the follower stops re-proving each block;
-     - re-run mutation testing over sessions and segments;
 
 
 1. **EIP-8288 proof dependencies** (blocked; owner accepted 2026-10-22): when EIP-8288 defines

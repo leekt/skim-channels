@@ -51,8 +51,10 @@ The book holds two segments: 2000 at block 20 and 2100 at block 21, from fill 1.
   - Executions read only proof-ready values at one head.
   - App state and overlays survive, and the stream cursor survives restarts.
   - A newer oracle context costs one more witness in the next proposal: no new session, re-pin or L1 keep-alive.
-- **State-ready isn't trusted.** skim doesn't serve full block access lists over JSON-RPC, so this process can't check the stream's changes against the header's access-list hash. Two things would let the working set roll forward from authenticated access lists instead of re-proving each block:
-  - a raw-access-list RPC in skim;
-  - or running the follower inside skim, which already verifies access lists.
+- **State-ready isn't trusted; authenticated access lists are.** The stream's decoded changes stay a cross-check.
+  - **The fix for re-proving every block:** skim gains `skim_getBlockAccessList` (branch `feat/raw-bal-rpc`), which serves a block's raw access list.
+  - **The follower** checks each list against its header's `blockAccessListHash` and rolls its working set forward from the block's writes, with no proof per block. It proves the set again only for evidence, or when anything doesn't link or match.
+  - **Tested:** against a fake node serving an Amsterdam chain (linked roll, no-list fallback, tampered list, unlinked head).
+  - **Not yet measured live:** the deployed skim node doesn't have the method. Measuring needs that branch running.
 - **Header requests.** The follower re-reads the head after each stream wait: 6 header requests per Sepolia block here. It could use the head the stream reports.
-- **Proving cost grows with the working set.** It's one `eth_getProof` per account per block. Clearing's set is 4 accounts (the channel's two halves, the feed's proxy and aggregator).
+- **Proving cost grows with the working set.** On the proving path, it's one `eth_getProof` per account per block. Clearing's set is 4 accounts (the channel's two halves, the feed's proxy and aggregator). On the access-list path, the cost per block is one header and one list (the whole block's, not filtered).
