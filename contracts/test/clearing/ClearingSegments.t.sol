@@ -238,4 +238,23 @@ contract ClearingSegmentsTest is ClearingChannelBase {
         vm.stopPrank();
         assertEq(D.pending().at, 0, "discarded");
     }
+
+    function test_theOnlySegmentMustStartAtFillZero() public {
+        (bytes memory fills, L.Account[] memory n) = _two6000(1000);
+        ClearingStorage.SegmentRef[] memory s = new ClearingStorage.SegmentRef[](1);
+        s[0] = _seg(1, 0, 100);
+        _rejects(fills, n, _w(pkg0), s, abi.encodeWithSelector(ClearingStorage.BadBatch.selector, "segments"));
+    }
+
+    function test_challengeRoundEndsWithTheWindow() public {
+        (bytes memory fills, L.Account[] memory n) = _two6000(1000);
+        priceAdapter.setRound(100, 5);
+        _proposeWith(fills, n, _w(pkg0), _segs(_seg(0, 0, 100), _seg(1, 0, 101)));
+        (uint64[] memory h, uint256[] memory r) = _rounds(5, 5);
+        priceAdapter.setRound(101, 6);
+        vm.warp(block.timestamp + 1 hours);
+        vm.prank(watcher);
+        vm.expectRevert(ClearingStorage.WrongState.selector);
+        D.challengeRound(1, h, r, pkg1);
+    }
 }

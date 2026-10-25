@@ -275,6 +275,26 @@ abstract contract ClearingChannelBase is Test {
 }
 
 contract ClearingChannelTest is ClearingChannelBase {
+    // ---- mutation gaps (2026-10-25): every rule is a fault on L1 ----------------------------------
+
+    /// A fill whose orders both sell ETH (in band, "crossing" by amounts) is a fault: SameSide.
+    function test_aSameSideFillIsAFault() public {
+        bytes memory fills = _fill(_order(0, R.ETH, uint128(ETH1), 7000, 1), _order(2, R.ETH, 7000, uint128(ETH1), 1));
+        _propose(fills, _copyFin(), 0, 0, "");
+        vm.prank(watcher);
+        D.challengeFill(fills, 0, _f0(), _p0(), _b0());
+        assertEq(D.pending().at, 0, "discarded");
+    }
+
+    /// In band (6990 vs 7000), but bob gives less than alice's limit: a fault, NotCrossing.
+    function test_aFillBelowALimitIsAFault() public {
+        bytes memory fills = _fill(_order(0, R.ETH, uint128(ETH1), 7000, 1), _order(1, R.USD, 6990, uint128(ETH1), 1));
+        _propose(fills, _copyFin(), 0, 0, "");
+        vm.prank(watcher);
+        D.challengeFill(fills, 0, _f0(), _p0(), _b0());
+        assertEq(D.pending().at, 0, "discarded");
+    }
+
     // ---- the normal path ----------------------------------------------------------------------
 
     function test_honestBatchSurvivesEveryChallengeAndSettles() public {

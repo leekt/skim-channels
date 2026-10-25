@@ -12,6 +12,11 @@ import {ClearingVault} from "../../src/clearing/ClearingVault.sol";
 
 /// Session lifecycle (Active → Closing → Closed), redemption, the vault, rollover between
 /// sessions, and signatures bound to their session.
+/// Accepts any depositFor (not a session).
+contract AcceptsAnything {
+    function depositFor(address, uint8, uint128) external payable {}
+}
+
 contract ClearingSessionTest is ClearingChannelBase {
     ClearingVault vault;
 
@@ -378,6 +383,37 @@ contract ClearingSessionTest is ClearingChannelBase {
         D.publishFinal(2, next2, q2);
         vm.expectRevert(abi.encodeWithSignature("BadProof()")); // a chunk must be aligned
         D.publishFinal(1, first2, p2);
+    }
+
+    // ---- mutation gaps (2026-10-25) --------------------------------------------------------------
+
+    function test_redeemOnlyAfterCloseAndOnlyAFinalLeaf() public {
+        bytes32[16] memory sib = _sib(_copyFin(), 0);
+        vm.expectRevert(ClearingStorage.WrongState.selector);
+        D.redeem(0, fin[0], sib, false); // still active
+        _closeNow();
+        L.Account memory forged = fin[0];
+        forged.eth += 1 ether;
+        vm.expectRevert(ClearingStorage.BadProof.selector);
+        D.redeem(0, forged, sib, false); // not the final leaf
+        D.redeem(0, fin[0], sib, false);
+    }
+
+    function test_onlyTheVaultDepositsForAUserAndOnlyIntoItsSessions() public {
+        vm.deal(op, 1 ether);
+        vm.prank(op);
+        vm.expectRevert(ClearingStorage.WrongState.selector);
+        ch.depositFor{value: 1 ether}(who[0], R.ETH, 1 ether); // not the vault
+        _closeNow();
+        vm.prank(who[0]);
+        D.redeem(0, fin[0], _sib(_copyFin(), 0), true); // alice has free balance in the vault now
+        // A contract that takes any deposit (what a phished user might be pointed at): the vault
+        // only funds sessions it opened.
+        AcceptsAnything sink = new AcceptsAnything();
+        vm.prank(who[0]);
+        vm.expectRevert(ClearingVault.WrongState.selector);
+        vault.fund(address(sink), R.ETH, 1 ether);
+        assertEq(address(sink).balance, 0);
     }
 }
 
