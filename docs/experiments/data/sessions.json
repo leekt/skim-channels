@@ -2,7 +2,7 @@
   "note": "anvil L1 (chain 900) and anvil executors (chain 7001). Gas = L1 receipt gasUsed, summed per label; txs = count per label.",
   "users": 4,
   "appSetup": {
-    "gas": 10966851,
+    "gas": 11188901,
     "txs": 6,
     "what": "AnchorRegistry, ChainlinkAdapter, ClearingCodec, ClearingVault, and the session code (ClearingDisputes + ClearingChannel): once per app"
   },
@@ -12,7 +12,7 @@
     "what": "vault.openSession: a 45-byte proxy of the session code plus its config, per session"
   },
   "perBatch": {
-    "proposeGas": 1312810,
+    "proposeGas": 1318705,
     "finalizeGas": 93359
   },
   "idle": "no L1 transactions while idle (no batch, no proposal). An Active session must still be watched: after takeoverDelay anyone may propose",
@@ -23,51 +23,51 @@
   },
   "monitoring": {
     "lastProposalToClosedSeconds": 3601,
-    "beginCloseToClosedSeconds": 0,
+    "beginCloseToClosedSeconds": 1,
     "rule": "Active (even idle): watch, proposals stay possible. Closing: watch until nothing is pending. Closed: nothing to watch once the close transaction is final on L1"
   },
   "recovery": {
-    "packageBytes": 1341,
-    "claimFileBytes": 1545,
-    "publishFinalGas": 114139,
+    "packageBytes": 1484,
+    "claimFileBytes": 1558,
+    "publishFinalGas": 115927,
     "publishChunks": 2,
-    "publishedLeafBytes": 432,
+    "publishedLeafBytes": 496,
     "bySize": "contracts/test/clearing/ClearingSession.t.sol test_publishFinalCost: ~5k execution gas + 108 calldata bytes per user, linear; 1024 users in one chunk = 5.1M execution gas + 110 KB"
   },
   "restart": {
-    "ms": 181,
+    "ms": 189,
     "l1Txs": 1,
-    "executorSetupMs": 120,
+    "executorSetupMs": 129,
     "what": "open session 2 (one transaction), start an empty executor; no replay of session 1"
   },
   "users_": {
-    "claimWhileActiveGas": 91699,
-    "redeemToWalletGas": 130588,
-    "redeemToVaultGas": 169366,
+    "claimWhileActiveGas": 92459,
+    "redeemToWalletGas": 131157,
+    "redeemToVaultGas": 169932,
     "vaultFundGas": 133114
   },
   "gas": {
     "app: ChainlinkAdapter": 1980980,
     "app: AnchorRegistry": 669126,
-    "app: ClearingCodec": 1644905,
+    "app: ClearingCodec": 1798568,
     "app: ClearingVault": 951495,
-    "session code: ClearingDisputes": 2913068,
-    "session code: ClearingChannel": 2807277,
+    "session code: ClearingDisputes": 2980759,
+    "session code: ClearingChannel": 2807973,
     "session 1: open": 499156,
     "user: deposit": 717417,
-    "AnchorRegistry.record": 469581,
-    "operator: propose": 2625619,
+    "AnchorRegistry.record": 469593,
+    "operator: propose": 2637410,
     "operator: finalize": 280076,
     "user: requestWithdraw": 255315,
-    "user: claim (active)": 91699,
+    "user: claim (active)": 92459,
     "operator: beginClose": 54787,
     "operator: close": 39222,
-    "optional: publishFinal": 114139,
+    "optional: publishFinal": 115927,
     "session 2: open": 482056,
     "operator: withdrawBond": 31425,
-    "user: redeem → vault": 169366,
+    "user: redeem → vault": 169932,
     "user: vault.fund": 266228,
-    "user: redeem → wallet": 391765
+    "user: redeem → wallet": 393472
   },
   "txs": {
     "app: session code": 2,

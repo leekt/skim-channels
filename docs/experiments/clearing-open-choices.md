@@ -32,11 +32,11 @@
 
 | Feature | What changes | Effort |
 |---|---|---|
-| Partial fills | Order state goes from "consumed" (a nonce) to "filled amount" per order hash. `ClearingLedger.applySide` takes a fill amount, and disputes replay per-order fill state | Medium: the leaf, codec and dispute replay all change; new mutation tests |
+| Partial fills | **Built (2026-10-26).** Fills carry their amounts; the leaf tracks the trader's latest order and how much of it is filled ([stateful runtime](../guide/stateful-runtime.md#partial-fills)) | — |
 | More than two assets | Leaves carry a balance vector (or a per-asset subtree), and fills name both tokens | Large: the leaf format, multiproofs and DA cost per changed account all grow |
-| Blob DA | Fills and changed leaves go in a blob; `propose` binds the versioned hash; disputes use point-evaluation proofs over the blob | Medium on L1 (KZG precompile); fills are 236 B and leaves 220 B, so DA dominates at scale |
+| Blob DA | Fills and changed leaves go in a blob; `propose` binds the versioned hash; disputes use point-evaluation proofs over the blob | Medium on L1 (KZG precompile); fills are 268 B and updates 252 B, so DA dominates at scale |
 
-**Recommendation:** blob DA first, since it's the cost driver at volume. Then partial fills, a common need for a clearing venue. More assets only with a concrete market.
+**Recommendation:** blob DA next, since it's the cost driver at volume. More assets only with a concrete market.
 
 ## Not decisions, but limits
 

@@ -99,6 +99,20 @@ Tests:
 - `SKIM_RPC=… npm run live-executor`: an app contract reads Chainlink's ETH/USD through its Sepolia proxy, with the proxy and its aggregator imported. It matches Sepolia at the executor's head, and so do the slots the L1 adapter verifies at that block. With only the proxy imported, the read reverts.
 - `npm run e2e-subscription` and `SKIM_RPC=… SEPOLIA_OPERATOR_KEY=… npm run live-subscription`: act at H, change the L1 dependency, act again. The executor is at the new block by itself, with no pin, sync or restart. The second action sees the new value, app state is kept, and in clearing, the batch gains a second oracle segment that L1 verifies. Results: [subscription](../experiments/subscription.md).
 
+## Partial fills
+
+An order sells **up to** its `sellAmount`, at a limit price of `buyAmount / sellAmount`. A fill names the amounts it exchanges, `ethAmount` ETH for `usdAmount` USD, which may be part of either order.
+
+| | Rule |
+|---|---|
+| Prices | Each order's limit price is met (the ETH seller gets at least its price per ETH, the USD seller pays at most its). The fill's own price, `usdAmount / ethAmount`, is within the band of its segment's L1 price |
+| What's left | Account state, in the leaf: `nonce` is the trader's latest order, `filled` how much of it is sold while it's partly filled (0 once complete). One partly filled order per trader: a newer nonce ends the rest of the older one. The same nonce continues it, never past its `sellAmount` |
+| On the executor | `fill(a, b, ethAmount, usdAmount)`. An order rests while its trader's account shows it partly filled. `fill(a, b)` is the full fill: each order's whole `sellAmount` |
+| On L1 | Fills carry their amounts (268 B). `challengeFill` judges the limit prices and the band from them. `challengeAccount` replays `filled` with the rest of the account, so an overfill is a provable fault |
+| Runtime | `{ kind: "fill", a, b, eth, usd }` in the journal (no amounts: a full fill, as before) |
+
+Sessions report their leaf format (`leafFormat()`: 1). A session without that view predates partial fills (format 0: 108-byte leaves). The runtime reads, recovers and redeems either.
+
 ## Execution segments: each fill is judged at the head it ran
 
 A batch doesn't hold one L1 block or one price. `ClearingBook` keeps **segments**, one per L1 head fills ran at, each recording:
@@ -266,7 +280,7 @@ The typed signature is what L1 checks in a dispute.
 
 - **Matching guarantees:** a forced order must be published, but nothing forces it to be matched.
 - **Resting orders that were never published** are lost when the operator changes.
-- **Partial fills, more than two assets, blob DA.** Options for these and the two above: [open design choices](../experiments/clearing-open-choices.md).
+- **More than two assets, blob DA.** Options for these and the two above: [open design choices](../experiments/clearing-open-choices.md).
 - **Access lists from the deployed node.** The follower rolls forward from authenticated access lists, but the skim node it runs against needs the `skim_getBlockAccessList` method (skim branch `feat/raw-bal-rpc`, not merged or deployed). Until then it proves each head ([subscription](../experiments/subscription.md)).
 - **A general L1 check of imported calls.** Only Chainlink's `latestRoundData` has an L1 adapter.
 

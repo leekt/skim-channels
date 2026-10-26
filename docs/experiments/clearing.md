@@ -12,7 +12,7 @@
 
 | | |
 |---|---|
-| What a batch publishes | Packed fills (236 B each: both orders and signatures), changed account leaves (220 B each) with a multiproof, its execution segments (each fill's L1 head, recorded on L1) with one price witness per new price, queue cursors, forced-order statuses, and a bond |
+| What a batch publishes | Packed fills (268 B each: both orders and signatures, and the ETH and USD amounts exchanged), changed account leaves (252 B each: old and new, 124 B per leaf) with a multiproof, its execution segments (each fill's L1 head, recorded on L1) with one price witness per new price, queue cursors, forced-order statuses, and a bond |
 | What L1 checks at proposal | Each price at the recorded, recent block it was read (`ChainlinkAdapter`: the pinned proxy and aggregator code, the latest round there); each segment head recorded and recent, read no earlier than its price, the price fresh at the head's time; all committed with the batch; that the old leaves are in the finalized root (L1 computes the new root itself); queue cursors; forced-order statuses. **Nothing per fill** |
 | What a watcher can prove (one transaction each) | `challengeFill`: a bad signature, band (against the fill's own segment), limit, expiry (at the fill's own head), same side, or unknown trader. `challengeAccount`: L1 replays one account (deposits → requests → fills) with `ClearingLedger` and compares it to the published leaf. This catches a wrong balance, a stale nonce, an uncovered sale, an omitted trader, or a request skipped, applied early, or consumed without its deposits |
 | Who proposes | The operator. After `takeoverDelay` without a proposal, anyone with a bond |
@@ -73,21 +73,22 @@
 
 | Gas per fill | Channel (propose + finalize) | Direct batch (same fills, all verified at once) | One L1 tx per fill |
 |---|---|---|---|
-| Dense: 128 fills, 16 users | **14,600** | 45,489 | 67,404 |
-| Sparse: 32 fills, 64 users (each trades once) | 60,037 | 90,455 | 67,399 |
-| 256 fills, 32 users | **11,552** | — | 67,403 |
+| Dense: 128 fills, 16 users | **15,731** | 46,405 | 68,314 |
+| Sparse: 32 fills, 64 users (each trades once) | 64,648 | 91,373 | 68,312 |
+| 256 fills, 32 users | **12,345** | — | 68,313 |
 
 | Category | Step | Gas | Source |
 |---|---|---|---|
 | Entry | first deposit ETH / USD | ~92k / ~111k | anvil receipts ([`data/clearing-e2e.json`](data/clearing-e2e.json)) |
 | Exit | `requestWithdraw`; `claim`; `exit` after a freeze | ~121k; ~92k; ~90k per user | anvil |
 | Batch, fixed | price witness + record, per new price; header record per further fill head | Chainlink adapter: ~2.18M execution + 15.2 KB witness (Sepolia, `ChainlinkAdapter.t.sol`); + ~100k record. A `getRoundData` check would be tens of thousands ([evaluation](chainlink-rounds.md)) | forge |
-| DA | fills 236 B each; changed accounts 220 B each plus multiproof nodes | 34 KB for 128 fills / 16 users | forge |
-| Dispute | `challengeAccount` (an account in 16 of 256 fills) / `challengeFill` (last of 256) | 2.71M / 2.49M, mostly resubmitting the batch's calldata | forge |
+| DA | fills 268 B each; changed accounts 252 B each plus multiproof nodes | 38.7 KB for 128 fills / 16 users | forge |
+| Dispute | `challengeAccount` (an account in 16 of 256 fills) / `challengeFill` (last of 256) | 3.02M / 2.67M, mostly resubmitting the batch's calldata | forge |
 
 **What this says:**
-- **The channel is 3–5× cheaper than verifying the same batch at once, and 4.6–5.8× cheaper than per-transaction L1, when accounts trade several times per batch.** Its cost is per changed account (a leaf plus multiproof hashing), not per fill.
-- **When every account trades once per batch,** it's close to break-even with per-transaction L1 (60k vs 67k).
+- **The channel is about 3× cheaper than verifying the same batch at once, and 4.3–5.5× cheaper than per-transaction L1, when accounts trade several times per batch.** Its cost is per changed account (a leaf plus multiproof hashing), not per fill.
+- **When every account trades once per batch,** it's close to break-even with per-transaction L1 (65k vs 68k).
+- **Partial fills cost 32 bytes per fill and 16 per leaf** (their amounts, and each account's `filled`): about 7% per fill against the full-fill-only format.
 - **Every design pays a price witness and its anchor once per price used** (one per batch unless the feed's round changes mid-batch), plus a header record (~100k) per further L1 head fills ran at.
 
 ## Open
@@ -98,4 +99,4 @@
 - **Unpublished resting orders** don't survive a handover.
 - **A discarded proposal:** the runtime should rebuild from L1 automatically. Today the operator calls `recover`.
 - **Finalization and claims on Sepolia** wait out real challenge windows; see the devnet.
-- **Partial fills, more assets, blob DA.**
+- **More assets, blob DA** ([open choices](clearing-open-choices.md)).

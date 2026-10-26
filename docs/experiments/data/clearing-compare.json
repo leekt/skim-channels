@@ -1,28 +1,28 @@
 {
-  "note": "forge model (contracts/test/clearing/ClearingCompare.t.sol): one measured batch in steady state (accounts exist, deposits applied), priced as L1 transactions. channel = ClearingChannel (propose + finalize); direct = ClearingDirectBatch.settle (the same fills, everything verified at once, no window); l1 = ClearingL1, one fill transaction each. Witness: fixture h1 (6.2 KB). channel.calldata in bytes.",
+  "note": "forge model (contracts/test/clearing/ClearingCompare.t.sol): one measured batch in steady state (accounts exist, deposits applied), priced as L1 transactions. channel = ClearingChannel (propose + finalize); direct = ClearingDirectBatch.settle (the same fills, everything verified at once, no window); l1 = ClearingL1, one fill transaction each. Fills are 268 B (with their ETH/USD amounts, for partial fills); leaves 124 B. Witness: fixture h1 (6.2 KB). channel.calldata in bytes.",
   "cases": {
     "big: 256 fills, 32 users": {
-      "channel": 2957422,
-      "channel.calldata": 67808,
-      "l1": 17255616
+      "channel": 3160446,
+      "channel.calldata": 77024,
+      "l1": 17488218
     },
     "dense: 128 fills, 16 users": {
-      "channel": 1868854,
-      "channel.calldata": 34112,
-      "direct": 5822586,
-      "l1": 8627678
+      "channel": 2013585,
+      "channel.calldata": 38720,
+      "direct": 5939884,
+      "l1": 8744264
     },
     "sparse: 32 fills, 64 users": {
-      "channel": 1921215,
-      "channel.calldata": 21952,
-      "direct": 2894564,
-      "l1": 2156780
+      "channel": 2068748,
+      "channel.calldata": 25024,
+      "direct": 2923940,
+      "l1": 2185992
     },
     "16-fills-of-256: 256 fills, 32 users": {
-      "channel.challengeAccount": 2711848
+      "channel.challengeAccount": 3015223
     },
     "last-of-256: 256 fills, 32 users": {
-      "channel.challengeFill": 2485350
+      "channel.challengeFill": 2669548
     }
   }
 }

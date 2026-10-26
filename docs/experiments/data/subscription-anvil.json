@@ -1,9 +1,9 @@
 {
   "note": "anvil L1 (no skim stream: the executor polls the head every 500 ms); app executor crates/app-executor",
   "executor": {
-    "coldReadMs": 4.6,
-    "warmReadMs": 0.79,
-    "followLatencyMs": 349,
+    "coldReadMs": 4.9,
+    "warmReadMs": 0.68,
+    "followLatencyMs": 371,
     "acrossOneUpdate": {
       "bal_bytes": 0,
       "bal_fallbacks": 0,
@@ -28,7 +28,7 @@
       "proofSlots": 1,
       "codeRequests": 0,
       "headerRequests": 1,
-      "provingMs": 1.6
+      "provingMs": 3
     }
   },
   "clearing": {
@@ -46,7 +46,7 @@
         "firstFill": 1
       }
     ],
-    "proposeGas": 1507875,
-    "reusedPriceProposeGas": 914509
+    "proposeGas": 1510614,
+    "reusedPriceProposeGas": 917550
   }
 }
