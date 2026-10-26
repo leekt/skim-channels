@@ -28,14 +28,23 @@ import { Chain, type C } from "./executor.ts";
 import { EvidenceStore } from "./evidence.ts";
 import { levels, multiproof, rootOf } from "./tree.ts";
 
+/** An account leaf. `filled`: how much of order `nonce` is sold while it's partly filled (0 when complete). */
 export type Account = {
-  eth: bigint; usd: bigint; ethIn: bigint; usdIn: bigint; ethOut: bigint; usdOut: bigint; nonce: bigint; requests: number;
+  eth: bigint; usd: bigint; ethIn: bigint; usdIn: bigint; ethOut: bigint; usdOut: bigint; nonce: bigint; requests: number; filled: bigint;
 };
-export const EMPTY: Account = { eth: 0n, usd: 0n, ethIn: 0n, usdIn: 0n, ethOut: 0n, usdOut: 0n, nonce: 0n, requests: 0 };
+export const EMPTY: Account = { eth: 0n, usd: 0n, ethIn: 0n, usdIn: 0n, ethOut: 0n, usdOut: 0n, nonce: 0n, requests: 0, filled: 0n };
+/**
+ * Leaf formats sessions have used: 1 (current: partial fills, 124-byte leaves) and 0 (before:
+ * 108-byte leaves, no `filled`). A session reports its own with `leafFormat()`; one without that
+ * view is format 0.
+ */
+export type LeafFormat = 0 | 1;
+/** A packed fill: both orders and signatures, then the ETH and USD amounts exchanged (ClearingLedger). */
+export const FILL_BYTES = 268;
+export const leafBytes = (f: LeafFormat = 1) => (f === 1 ? 124 : 108);
 export type Order = { trader: Address; sellToken: number; sellAmount: bigint; buyAmount: bigint; nonce: bigint; expiry: bigint };
 
-const LEAF_TAG = keccak256(toHex("skim-clearing/account-leaf/v0"));
-const accountT = {
+const accountT0 = {
   type: "tuple",
   components: [
     { name: "eth", type: "uint128" }, { name: "usd", type: "uint128" }, { name: "ethIn", type: "uint128" },
@@ -43,6 +52,13 @@ const accountT = {
     { name: "nonce", type: "uint64" }, { name: "requests", type: "uint32" },
   ],
 } as const;
+const accountT = { type: "tuple", components: [...accountT0.components, { name: "filled", type: "uint128" }] } as const;
+const LEAF_TAG = { 0: keccak256(toHex("skim-clearing/account-leaf/v0")), 1: keccak256(toHex("skim-clearing/account-leaf/v1")) };
+/** A format-0 session's leaf as its `redeem`/`claim` take it (8 fields). */
+export const legacyLeaf = (a: Account) => {
+  const { filled: _, ...rest } = a;
+  return rest;
+};
 export const orderT = {
   type: "tuple",
   components: [
@@ -53,24 +69,35 @@ export const orderT = {
 export const eip712Order = { Order: orderT.components.map((c) => ({ name: c.name, type: c.type })) };
 export const orderHash = (o: Order) => keccak256(encodeAbiParameters([orderT], [o as any]));
 
-export function leafHash(a: Account): Hex {
-  if (!a.eth && !a.usd && !a.ethIn && !a.usdIn && !a.ethOut && !a.usdOut && !a.nonce && !a.requests) return zeroHash;
-  return keccak256(encodeAbiParameters([{ type: "bytes32" }, accountT], [LEAF_TAG, a as any]));
+export function leafHash(a: Account, f: LeafFormat = 1): Hex {
+  if (!a.eth && !a.usd && !a.ethIn && !a.usdIn && !a.ethOut && !a.usdOut && !a.nonce && !a.requests && !a.filled) return zeroHash;
+  return f === 1
+    ? keccak256(encodeAbiParameters([{ type: "bytes32" }, accountT], [LEAF_TAG[1], a as any]))
+    : keccak256(encodeAbiParameters([{ type: "bytes32" }, accountT0], [LEAF_TAG[0], legacyLeaf(a) as any]));
 }
-export const packLeaf = (a: Account) => encodePacked(
-  ["uint128", "uint128", "uint128", "uint128", "uint128", "uint128", "uint64", "uint32"],
-  [a.eth, a.usd, a.ethIn, a.usdIn, a.ethOut, a.usdOut, a.nonce, a.requests]);
-export function unpackLeaf(h: Hex): Account {
+export const packLeaf = (a: Account, f: LeafFormat = 1) => f === 1
+  ? encodePacked(
+    ["uint128", "uint128", "uint128", "uint128", "uint128", "uint128", "uint64", "uint32", "uint128"],
+    [a.eth, a.usd, a.ethIn, a.usdIn, a.ethOut, a.usdOut, a.nonce, a.requests, a.filled])
+  : encodePacked(
+    ["uint128", "uint128", "uint128", "uint128", "uint128", "uint128", "uint64", "uint32"],
+    [a.eth, a.usd, a.ethIn, a.usdIn, a.ethOut, a.usdOut, a.nonce, a.requests]);
+export function unpackLeaf(h: Hex, f: LeafFormat = 1): Account {
   const b = h.slice(2);
   const n = (from: number, len: number) => BigInt(`0x${b.slice(from * 2, (from + len) * 2)}`);
   return {
     eth: n(0, 16), usd: n(16, 16), ethIn: n(32, 16), usdIn: n(48, 16), ethOut: n(64, 16), usdOut: n(80, 16),
-    nonce: n(96, 8), requests: Number(n(104, 4)),
+    nonce: n(96, 8), requests: Number(n(104, 4)), filled: f === 1 ? n(108, 16) : 0n,
   };
+}
+/** The leaf format a session's code commits to. */
+export async function leafFormatOf(l1: Chain, channel: Address): Promise<LeafFormat> {
+  const r = await l1.pub.call({ to: channel, data: "0x27cb6876" }).catch(() => undefined); // leafFormat()
+  return r?.data && BigInt(r.data) === 1n ? 1 : 0;
 }
 const norm = (a: any): Account => ({
   eth: BigInt(a.eth), usd: BigInt(a.usd), ethIn: BigInt(a.ethIn), usdIn: BigInt(a.usdIn), ethOut: BigInt(a.ethOut),
-  usdOut: BigInt(a.usdOut), nonce: BigInt(a.nonce), requests: Number(a.requests),
+  usdOut: BigInt(a.usdOut), nonce: BigInt(a.nonce), requests: Number(a.requests), filled: BigInt(a.filled ?? 0),
 });
 
 const word = (x: bigint): Hex => toHex(x, { size: 32 });
@@ -86,7 +113,7 @@ export const transmissionSlot = (round: bigint): Hex => keccak256(encodeAbiParam
  */
 export type Action =
   | { kind: "order"; order: Order; sig: Hex }
-  | { kind: "fill"; a: Hex; b: Hex }
+  | { kind: "fill"; a: Hex; b: Hex; eth?: bigint; usd?: bigint } // amounts: a partial fill (absent: full)
   | { kind: "raw"; tx: Hex };
 /** Executor state a batch opens from (plans and recoveries start here). */
 export type OpenState = { users: number; reqCursor: number; forcedCursor: number; scannedTo: bigint };
@@ -134,6 +161,18 @@ const LEGACY_PROPOSED = [{
 }] as const;
 /** A channel's events, in any layout its session code has used. */
 const historyAbi = (channel: C) => [...channel.abi, ...LEGACY_PROPOSED] as any;
+
+/** Each update's index and new leaf: `index (4) ‖ old leaf ‖ new leaf`, in the session's leaf format. */
+function newLeaves(updates: Hex, f: LeafFormat): [number, Account][] {
+  const raw = updates.slice(2);
+  const w = (4 + 2 * leafBytes(f)) * 2;
+  const out: [number, Account][] = [];
+  for (let o = 0; o < raw.length; o += w) {
+    const u = raw.slice(o, o + w);
+    out.push([Number(BigInt(`0x${u.slice(0, 8)}`)), unpackLeaf(`0x${u.slice((4 + leafBytes(f)) * 2)}`, f)]);
+  }
+  return out;
+}
 
 /** The packed account updates of a `propose` call, in any layout a session's code has used. */
 function proposalUpdates(channel: C, input: Hex): Hex {
@@ -364,7 +403,9 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
       const head = (await this.exec.rpc<any>("executor_status")).pin;
       const checkpoint = (p.segments ?? []).at(-1)?.hash !== head.hash ? await this.exec.checkpoint() : undefined;
       const logIndex = this.current.log.length;
-      const r = await this.exec.send(this.book, "fill", [action.a, action.b], this.op);
+      const r = action.eth !== undefined && action.usd !== undefined
+        ? await this.exec.send(this.book, "fill", [action.a, action.b, action.eth, action.usd], this.op)
+        : await this.exec.send(this.book, "fill", [action.a, action.b], this.op);
       // Record the segment's head (and witness a new price) now.
       for (const l of r.logs) {
         let ev: any;
@@ -581,11 +622,7 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
     const out = new Map<number, Account>();
     if (!tx) return out;
     const t = await l1.pub.getTransaction({ hash: tx });
-    const raw = proposalUpdates(channel, t.input).slice(2);
-    for (let o = 0; o < raw.length; o += 440) {
-      const u = raw.slice(o, o + 440);
-      out.set(Number(BigInt(`0x${u.slice(0, 8)}`)), unpackLeaf(`0x${u.slice(224)}`));
-    }
+    for (const [k, v] of newLeaves(proposalUpdates(channel, t.input), await leafFormatOf(l1, channel.address))) out.set(k, v);
     return out;
   }
 
@@ -606,14 +643,10 @@ export class ClearingOperator extends BatchRuntime<Action, OpenState> {
       } catch { /* other */ }
     }
     const fin = new Map<number, Account>();
+    const fmt = await leafFormatOf(l1, channel.address);
     for (const b of finalizedBatches) {
       const tx = await l1.pub.getTransaction({ hash: proposed.get(b)! });
-      const updates = proposalUpdates(channel, tx.input);
-      const raw = updates.slice(2);
-      for (let o = 0; o < raw.length; o += 440) {
-        const u = raw.slice(o, o + 440);
-        fin.set(Number(BigInt(`0x${u.slice(0, 8)}`)), unpackLeaf(`0x${u.slice(224)}`));
-      }
+      for (const [k, v] of newLeaves(proposalUpdates(channel, tx.input), fmt)) fin.set(k, v);
     }
     return fin;
   }

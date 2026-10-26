@@ -188,7 +188,15 @@ contract ClearingCompareTest is Test {
         for (uint256 k; k < p.length; ++k) {
             (R.Order memory a, bytes memory sa) = _signed(p[k].s, R.ETH, 0.01 ether, 69, p[k].ns, dom);
             (R.Order memory b, bytes memory sb) = _signed(p[k].b, R.USD, 70, 0.01 ether, p[k].nb, dom);
-            fills = bytes.concat(fills, L.encodeOrder(uint32(p[k].s), a), sa, L.encodeOrder(uint32(p[k].b), b), sb);
+            (uint128 ethAmt, uint128 usdAmt) = R.fullAmounts(a, b);
+            fills = bytes.concat(
+                fills,
+                L.encodeOrder(uint32(p[k].s), a),
+                sa,
+                L.encodeOrder(uint32(p[k].b), b),
+                sb,
+                abi.encodePacked(ethAmt, usdAmt)
+            );
             for (uint256 side; side < 2; ++side) {
                 uint256 i = side == 0 ? p[k].s : p[k].b;
                 if (!touched[i]) {
@@ -196,8 +204,8 @@ contract ClearingCompareTest is Test {
                     L.applyDeposits(next[i], 100 ether, 1_000_000);
                 }
             }
-            require(L.applySide(next[p[k].s], R.ETH, 0.01 ether, 70, p[k].ns));
-            require(L.applySide(next[p[k].b], R.USD, 70, 0.01 ether, p[k].nb));
+            require(L.applySide(next[p[k].s], R.ETH, 0.01 ether, p[k].ns, 0.01 ether, 70));
+            require(L.applySide(next[p[k].b], R.USD, 70, p[k].nb, 70, 0.01 ether));
         }
         bytes32[] memory h = new bytes32[](fin.length);
         uint256 n;
@@ -361,7 +369,7 @@ contract ClearingCompareTest is Test {
         _log("channel.challengeAccount", "16-fills-of-256", 256, g);
         vm.revertToState(snap);
         // A forged last signature, measured the same way.
-        fills[fills.length - 1] = bytes1(uint8(fills[fills.length - 1]) ^ 1);
+        fills[fills.length - 33] = bytes1(uint8(fills[fills.length - 33]) ^ 1); // the last signature's last byte
         vm.store(address(chn), bytes32(uint256(_pendingSlot()) + 1), keccak256(fills)); // fillsHash
         uint256[] memory prices = new uint256[](1);
         prices[0] = 7000; // the fixture's price at its anchor (block 101): one segment

@@ -76,8 +76,8 @@ contract ClearingSessionTest is ClearingChannelBase {
         // The operator settles what it executed before the cutoff, request included.
         (bytes memory fills,) = _batch1();
         L.Account[] memory n = _copyFin();
-        n[0] = L.Account(1 ether, 7000, 3 ether, 0, 1 ether, 0, 1, 1);
-        n[1] = L.Account(uint128(ETH1), 13_000, 0, 20_000, 0, 0, 1, 0);
+        n[0] = L.Account(1 ether, 7000, 3 ether, 0, 1 ether, 0, 1, 1, 0);
+        n[1] = L.Account(uint128(ETH1), 13_000, 0, 20_000, 0, 0, 1, 0, 0);
         _propose(fills, n, 1, 0, "");
         vm.prank(op);
         vm.expectRevert(ClearingStorage.WrongState.selector); // something is pending
@@ -183,7 +183,7 @@ contract ClearingSessionTest is ClearingChannelBase {
         vm.prank(who[0]);
         ch.requestWithdraw(R.ETH, 2 ether);
         L.Account[] memory n = _copyFin();
-        n[0] = L.Account(1 ether, 0, 3 ether, 0, 2 ether, 0, 0, 1);
+        n[0] = L.Account(1 ether, 0, 3 ether, 0, 2 ether, 0, 0, 1, 0);
         _propose("", n, 1, 0, "");
         _finalize(n);
         D.claim(0, fin[0], _sib(_copyFin(), 0));
@@ -303,8 +303,8 @@ contract ClearingSessionTest is ClearingChannelBase {
         ClearingDisputes d2 = ClearingDisputes(address(s2));
         L.Account[] memory empty = new L.Account[](3);
         L.Account[] memory n = new L.Account[](3);
-        n[0] = L.Account(0, 7000, 1 ether, 0, 0, 0, 1, 0);
-        n[1] = L.Account(2 ether, 0, 1 ether, 0, 0, 0, 1, 0);
+        n[0] = L.Account(0, 7000, 1 ether, 0, 0, 0, 1, 0, 0);
+        n[1] = L.Account(2 ether, 0, 1 ether, 0, 0, 0, 1, 0, 0);
         bytes memory u = bytes.concat(
             abi.encodePacked(uint32(0)),
             L.encodeLeaf(empty[0]),
@@ -353,7 +353,7 @@ contract ClearingSessionTest is ClearingChannelBase {
         returns (bytes memory leaves, bytes32[] memory path)
     {
         for (uint256 i = start; i < start + size; ++i) {
-            leaves = bytes.concat(leaves, L.encodeLeaf(i < ls.length ? ls[i] : L.Account(0, 0, 0, 0, 0, 0, 0, 0)));
+            leaves = bytes.concat(leaves, L.encodeLeaf(i < ls.length ? ls[i] : L.Account(0, 0, 0, 0, 0, 0, 0, 0, 0)));
         }
         bytes32[16] memory sib = Tree.siblings(_hashes(ls), start);
         uint256 k;

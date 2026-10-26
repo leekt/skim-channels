@@ -29,8 +29,8 @@ contract ClearingSegmentsTest is ClearingChannelBase {
             _fill(_order(0, R.ETH, uint128(ETH1), 6990, 2, expiry1), _order(1, R.USD, 7000, uint128(ETH1), 2, expiry1))
         );
         n = _copyFin();
-        n[0] = L.Account(1 ether, 13_000, 3 ether, 0, 0, 0, 2, 0);
-        n[1] = L.Account(2 ether, 7000, 0, 20_000, 0, 0, 2, 0);
+        n[0] = L.Account(1 ether, 13_000, 3 ether, 0, 0, 0, 2, 0, 0);
+        n[1] = L.Account(2 ether, 7000, 0, 20_000, 0, 0, 2, 0, 0);
     }
 
     function _seg(uint32 f, uint32 w, uint64 head) internal pure returns (ClearingStorage.SegmentRef memory) {
@@ -138,8 +138,8 @@ contract ClearingSegmentsTest is ClearingChannelBase {
             _fill(_order(0, R.ETH, uint128(ETH1), 5990, 2, expiry1), _order(1, R.USD, 6000, uint128(ETH1), 2, expiry1))
         );
         n = _copyFin();
-        n[0] = L.Account(1 ether, 12_000, 3 ether, 0, 0, 0, 2, 0);
-        n[1] = L.Account(2 ether, 8000, 0, 20_000, 0, 0, 2, 0);
+        n[0] = L.Account(1 ether, 12_000, 3 ether, 0, 0, 0, 2, 0, 0);
+        n[1] = L.Account(2 ether, 8000, 0, 20_000, 0, 0, 2, 0, 0);
     }
 
     /// Regression (review of 174ecfc, #2): the feed's round didn't change, so the price read at

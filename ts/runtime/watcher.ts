@@ -7,7 +7,7 @@ import type { Address, Hex } from "viem";
 import type { Chain, C } from "./executor.ts";
 import type { L1ReadView, Snapshot } from "./l1view.ts";
 import { levels, siblings } from "./tree.ts";
-import { AGG_HOT_SLOT, EMPTY, PROXY_PHASE_SLOT, leafHash, type Account, type Feed } from "./clearing.ts";
+import { AGG_HOT_SLOT, EMPTY, FILL_BYTES, PROXY_PHASE_SLOT, leafHash, type Account, type Feed } from "./clearing.ts";
 
 export type Fault = { kind: "account" | "fill" | "round"; at: number };
 
@@ -36,7 +36,7 @@ export async function watchProposal(o: {
     ]);
   }
   // Fills and rounds: the proposal's segments, as L1 emitted them.
-  const nFills = (o.fills.length - 2) / 2 / 236;
+  const nFills = (o.fills.length - 2) / 2 / FILL_BYTES;
   let segs = { firstFills: [] as number[], prices: [] as bigint[], heads: [] as bigint[], rounds: [] as bigint[] };
   if (nFills > 0) {
     const evs = await l1.pub.getContractEvents({ address: ch.address, abi: ch.abi, eventName: "Segments", fromBlock: o.fromBlock ?? 0n }) as any[];

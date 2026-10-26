@@ -12,7 +12,7 @@
 // old session's order book, executor state or overlay.
 import type { Address, Hex } from "viem";
 import type { C, Chain } from "./executor.ts";
-import { EMPTY, leafHash, packLeaf, unpackLeaf, type Account } from "./clearing.ts";
+import { EMPTY, leafBytes, leafFormatOf, leafHash, packLeaf, unpackLeaf, type Account, type LeafFormat } from "./clearing.ts";
 import { levels, rootOf, siblings } from "./tree.ts";
 
 export type SessionPackage = {
@@ -24,7 +24,8 @@ export type SessionPackage = {
   sessionId: string;
   finalRoot: Hex;
   users: Address[];
-  leaves: Hex; // LEAF_BYTES (108) per user, in index order
+  leaves: Hex; // leafBytes(leafFormat) per user, in index order
+  leafFormat?: LeafFormat; // the session's leaf format (absent: 0, before partial fills)
 };
 
 export type ClaimPackage = {
@@ -39,16 +40,17 @@ export type ClaimPackage = {
   siblings: Hex[];
 };
 
-const LEAF_HEX = 108 * 2;
 const PHASE_CLOSED = 2;
 
 export function leavesOf(p: SessionPackage): Account[] {
   const raw = p.leaves.slice(2);
-  if (raw.length !== p.users.length * LEAF_HEX) throw new Error("package: leaves don't match users");
-  return p.users.map((_, i) => unpackLeaf(`0x${raw.slice(i * LEAF_HEX, (i + 1) * LEAF_HEX)}`));
+  const f = p.leafFormat ?? 0;
+  const w = leafBytes(f) * 2;
+  if (raw.length !== p.users.length * w) throw new Error("package: leaves don't match users");
+  return p.users.map((_, i) => unpackLeaf(`0x${raw.slice(i * w, (i + 1) * w)}`, f));
 }
 
-const rootOfLeaves = (ls: Account[]) => rootOf(levels(ls.map(leafHash)));
+const rootOfLeaves = (ls: Account[], f: LeafFormat) => rootOf(levels(ls.map((l) => leafHash(l, f))));
 
 /** At close, from the operator's finalized leaves; refuses unless they rebuild the final root. */
 export async function buildSessionPackage(l1: Chain, channel: C, fin: Map<number, Account>): Promise<SessionPackage> {
@@ -59,10 +61,11 @@ export async function buildSessionPackage(l1: Chain, channel: C, fin: Map<number
   const users: Address[] = [];
   for (let i = 0; i < n; i++) users.push(await l1.read<Address>(channel, "users", [BigInt(i)]));
   const leaves = users.map((_, i) => fin.get(i) ?? EMPTY);
-  if (rootOfLeaves(leaves) !== st[0]) throw new Error("these leaves don't rebuild the session's final root");
+  const f = await leafFormatOf(l1, channel.address);
+  if (rootOfLeaves(leaves, f) !== st[0]) throw new Error("these leaves don't rebuild the session's final root");
   return {
     kind: "skim-clearing/session-package", version: 1, l1ChainId: l1.chainId, vault: cfg.vault, session: channel.address,
-    sessionId: cfg.sessionId.toString(), finalRoot: st[0], users, leaves: `0x${leaves.map((l) => packLeaf(l).slice(2)).join("")}`,
+    sessionId: cfg.sessionId.toString(), finalRoot: st[0], users, leaves: `0x${leaves.map((l) => packLeaf(l, f).slice(2)).join("")}`, leafFormat: f,
   };
 }
 
@@ -77,7 +80,7 @@ export async function verifySessionPackage(l1: Chain, channel: C, p: SessionPack
   if (Number(st[5]) !== PHASE_CLOSED) throw new Error("session is not closed");
   if (st[0] !== p.finalRoot) throw new Error("package root isn't the session's final root");
   const leaves = leavesOf(p);
-  if (rootOfLeaves(leaves) !== p.finalRoot) throw new Error("package leaves don't rebuild its root");
+  if (rootOfLeaves(leaves, p.leafFormat ?? 0) !== p.finalRoot) throw new Error("package leaves don't rebuild its root");
   const n = Number(await l1.read(channel, "userCount"));
   if (n !== p.users.length) throw new Error("user count differs");
   for (let i = 0; i < n; i++) {
@@ -91,7 +94,7 @@ export function claimPackage(p: SessionPackage, idx: number): ClaimPackage {
   const leaves = leavesOf(p);
   return {
     kind: "skim-clearing/claim-package", version: 1, l1ChainId: p.l1ChainId, session: p.session, finalRoot: p.finalRoot,
-    idx, user: p.users[idx], leaf: leaves[idx], siblings: siblings(levels(leaves.map(leafHash)), idx),
+    idx, user: p.users[idx], leaf: leaves[idx], siblings: siblings(levels(leaves.map((l) => leafHash(l, p.leafFormat ?? 0))), idx),
   };
 }
 
@@ -103,11 +106,12 @@ export function claimPackage(p: SessionPackage, idx: number): ClaimPackage {
 export function publicationChunks(p: SessionPackage, size: number): [bigint, Hex, Hex[]][] {
   if (size < 1 || (size & (size - 1)) !== 0) throw new Error("chunk size must be a power of two");
   const leaves = leavesOf(p);
-  const L = levels(leaves.map(leafHash));
+  const f = p.leafFormat ?? 0;
+  const L = levels(leaves.map((l) => leafHash(l, f)));
   const k = Math.log2(size);
   const out: [bigint, Hex, Hex[]][] = [];
   for (let start = 0; start < Math.max(leaves.length, 1); start += size) {
-    const chunk = Array.from({ length: size }, (_, i) => packLeaf(leaves[start + i] ?? EMPTY).slice(2)).join("");
+    const chunk = Array.from({ length: size }, (_, i) => packLeaf(leaves[start + i] ?? EMPTY, f).slice(2)).join("");
     out.push([BigInt(start), `0x${chunk}`, siblings(L, start).slice(k)]);
   }
   return out;

@@ -22,6 +22,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { Chain } from "./runtime/executor.ts";
 import { L1ReadView } from "./runtime/l1view.ts";
 import { EvidenceStore } from "./runtime/evidence.ts";
+import { watchProposal } from "./runtime/watcher.ts";
 import { ClearingOperator, deploySessionCode, eip712Order, openSession, orderHash, type Order } from "./runtime/clearing.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
@@ -260,6 +261,35 @@ async function partB(l1: Chain) {
   await A.seal();
   await A.propose(BigInt(A.current.no), { label: "propose (after an in-batch recovery)" });
   check((await l1.read<any>(ch, "pending")).at > 0n, "and L1 accepts the batch");
+  await l1.rpc("evm_increaseTime", [3601]);
+  await l1.rpc("anvil_mine", [toHex(1)]);
+  await l1.send(ch, "finalize", [], op);
+  await A.finalized();
+
+  // Partial fills: alice's one order (sell 0.3 ETH, limit 2190 per ETH) filled 0.1 then 0.2.
+  await A.open();
+  const a8 = await order(alice, 0, parseEther("0.3"), usd(657), 7n);
+  const k8 = await order(bob, 1, usd(220), parseEther("0.1"), 7n);
+  const k9 = await order(bob, 1, usd(440), parseEther("0.2"), 8n);
+  for (const x of [a8, k8, k9]) await A.apply({ kind: "order", order: x.o, sig: x.sig });
+  check((await A.apply({ kind: "fill", a: a8.h, b: k8.h, eth: parseEther("0.1"), usd: usd(220) })).ok, "a partial fill: 0.1 of alice's 0.3 ETH, at 2200");
+  const mid = await ex.read<any>(book, "account", [0]);
+  check(await ex.read<boolean>(book, "resting", [a8.h]) && BigInt(mid.filled) === parseEther("0.1"),
+    "alice's order rests on, 0.1 ETH filled (her account's `filled`)");
+  check(!(await A.apply({ kind: "fill", a: a8.h, b: k9.h, eth: parseEther("0.25"), usd: usd(550) })).ok, "a fill past what's left (0.25 of the remaining 0.2) is refused");
+  check((await A.apply({ kind: "fill", a: a8.h, b: k9.h, eth: parseEther("0.2"), usd: usd(440) })).ok, "the remaining 0.2 fills with bob's next order");
+  const done = await ex.read<any>(book, "account", [0]);
+  check(!(await ex.read<boolean>(book, "resting", [a8.h])) && BigInt(done.filled) === 0n, "alice's order is complete: out of the book, `filled` back to 0");
+  await A.seal();
+  const before3 = Number((await l1.read<any[]>(ch, "state"))[3]);
+  const p3 = await A.propose(BigInt(A.current.no), { label: "propose (partial fills)" });
+  const w3 = await watchProposal({ l1, channel: ch, view: A.view, feed, from: op.address, fin: A.fin, next: p3.next, fills: p3.fills });
+  check(w3.faults.length === 0, `L1 takes both partial fills: the watcher tried ${w3.checked.accounts} accounts and ${w3.checked.fills} fills, nothing to challenge`);
+  await l1.rpc("evm_increaseTime", [3601]);
+  await l1.rpc("anvil_mine", [toHex(1)]);
+  await l1.send(ch, "finalize", [], op);
+  await A.finalized();
+  check(Number((await l1.read<any[]>(ch, "state"))[3]) === before3 + 1, "and the batch finalized");
 
   out.clearing = {
     segments: segs.map((g) => ({ head: String(g.head), priceBlock: String(g.priceBlock), price: String(g.price), firstFill: Number(g.firstFill) })),

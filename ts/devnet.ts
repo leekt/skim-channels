@@ -30,7 +30,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  concat, createWalletClient, decodeFunctionData, defineChain, http, keccak256, pad, parseEther, parseTransaction, toHex,
+  concat, createWalletClient, decodeFunctionData, defineChain, http, keccak256, pad, parseAbi, parseEther, parseTransaction, toHex,
   type Address, type Hex,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
@@ -39,7 +39,7 @@ import { L1ReadView, type Policy } from "./runtime/l1view.ts";
 import { EvidenceStore } from "./runtime/evidence.ts";
 import { Gateway } from "./runtime/gateway.ts";
 import { levels, rootOf, siblings } from "./runtime/tree.ts";
-import { ClearingOperator, deploySessionCode, openSession, EMPTY, eip712Order, leafHash, mergeAbi, orderHash, type Account, type Feed, type Order } from "./runtime/clearing.ts";
+import { ClearingOperator, deploySessionCode, openSession, EMPTY, eip712Order, leafFormatOf, leafHash, legacyLeaf, mergeAbi, orderHash, type Account, type Feed, type Order } from "./runtime/clearing.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const CLI = `${ROOT}target/debug/skim-channels`;
@@ -103,7 +103,7 @@ async function main() {
   const loadFin = (sid: string): Map<number, Account> => {
     if (NET !== "sepolia" || !existsSync(finFile(sid))) return new Map();
     return new Map(Object.entries(JSON.parse(readFileSync(finFile(sid), "utf8"))).map(([k, v]: [string, any]) => [Number(k), {
-      eth: BigInt(v.eth), usd: BigInt(v.usd), ethIn: BigInt(v.ethIn), usdIn: BigInt(v.usdIn), ethOut: BigInt(v.ethOut), usdOut: BigInt(v.usdOut), nonce: BigInt(v.nonce), requests: Number(v.requests),
+      eth: BigInt(v.eth), usd: BigInt(v.usd), ethIn: BigInt(v.ethIn), usdIn: BigInt(v.usdIn), ethOut: BigInt(v.ethOut), usdOut: BigInt(v.usdOut), nonce: BigInt(v.nonce), requests: Number(v.requests), filled: BigInt(v.filled ?? 0),
     }]));
   };
   // The session code and the adapter, as built now: a change means new sessions need new copies.
@@ -202,6 +202,10 @@ async function main() {
     const word = (i: number) => BigInt(`0x${data!.slice(2 + 64 * i, 2 + 64 * (i + 1))}`);
     return words >= 9 ? word(4) : word(3);
   }
+  /** `redeem` of a session whose leaves predate partial fills (format 0: 8-field leaves). */
+  const LEGACY_REDEEM = parseAbi([
+    "function redeem(uint32 idx, (uint128 eth, uint128 usd, uint128 ethIn, uint128 usdIn, uint128 ethOut, uint128 usdOut, uint64 nonce, uint32 requests) leaf, bytes32[16] sib, bool toVault)",
+  ]);
   /** An earlier session: start closing it, close it when nothing is pending, then take the maker's float back. */
   async function closeOld(s: App["sessions"][number]) {
     const c = sessionC(s.channel);
@@ -226,12 +230,15 @@ async function main() {
         const n = Number(await l1.read(c, "userCount"));
         const root = (await l1.read<any[]>(c, "state"))[0];
         // The leaves kept on disk, if they rebuild the final root; otherwise L1's own history.
+        // In the session's own leaf format (an earlier session's code may predate partial fills).
+        const fmt = await leafFormatOf(l1, s.channel);
+        const dense = (f: Map<number, Account>) => Array.from({ length: n }, (_, i) => leafHash(f.get(i) ?? EMPTY, fmt));
         let fin = loadFin(s.id);
-        if (rootOf(levels(Array.from({ length: n }, (_, i) => leafHash(fin.get(i) ?? EMPTY)))) !== root) {
-          fin = await ClearingOperator.recover(l1, c, BigInt(s.startBlock ?? 0));
-        }
-        const dense = Array.from({ length: n }, (_, i) => leafHash(fin.get(i) ?? EMPTY));
-        await l1.send(c, "redeem", [ip - 1, fin.get(ip - 1) ?? EMPTY, siblings(levels(dense), ip - 1), false], maker);
+        if (rootOf(levels(dense(fin))) !== root) fin = await ClearingOperator.recover(l1, c, BigInt(s.startBlock ?? 0));
+        const leaf = fin.get(ip - 1) ?? EMPTY;
+        const sib = siblings(levels(dense(fin)), ip - 1);
+        if (fmt === 1) await l1.send(c, "redeem", [ip - 1, leaf, sib, false], maker);
+        else await l1.send({ address: s.channel, abi: LEGACY_REDEEM }, "redeem", [ip - 1, legacyLeaf(leaf), sib, false], maker);
         note(`session ${s.id}: the maker redeemed its float`);
       }
       s.makerRedeemed = true;

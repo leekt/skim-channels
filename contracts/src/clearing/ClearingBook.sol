@@ -328,7 +328,20 @@ contract ClearingBook {
         _step(keccak256(abi.encode("cancel", h)));
     }
 
+    /// A full fill: each order's whole `sellAmount` (both must be untouched).
     function fill(bytes32 ha, bytes32 hb) external onlyOperator {
+        (uint128 e, uint128 u) = R.fullAmounts(L.toOrder(book[ha].o, address(0)), L.toOrder(book[hb].o, address(0)));
+        _fill(ha, hb, e, u);
+    }
+
+    /// A fill of `ethAmount` ETH for `usdAmount` USD between two resting orders, possibly part
+    /// of either. An order stays in the book while its trader's account shows it partly
+    /// filled (ClearingLedger: `nonce`, `filled`); once complete, it's consumed.
+    function fill(bytes32 ha, bytes32 hb, uint128 ethAmount, uint128 usdAmount) external onlyOperator {
+        _fill(ha, hb, ethAmount, usdAmount);
+    }
+
+    function _fill(bytes32 ha, bytes32 hb, uint128 ethAmount, uint128 usdAmount) internal {
         uint256 b = current;
         Batch storage bt = batches[b];
         if (b == 0 || bt.sealed_) revert NoBatch();
@@ -336,29 +349,45 @@ contract ClearingBook {
         Resting memory rb = book[hb];
         if (!ra.live || !rb.live) revert UnknownOrder();
         Segment memory seg = _currentSegment(b);
-        R.Reject why =
-            R.check(L.toOrder(ra.o, users[ra.o.idx]), L.toOrder(rb.o, users[rb.o.idx]), seg.price, bandBps, seg.head);
+        R.Reject why = R.check(
+            L.toOrder(ra.o, users[ra.o.idx]),
+            L.toOrder(rb.o, users[rb.o.idx]),
+            ethAmount,
+            usdAmount,
+            seg.price,
+            bandBps,
+            seg.head
+        );
         if (why != R.Reject.None) revert Rejected(why);
-        L.Account memory a = _touch(b, ra.o.idx);
-        if (!L.applySide(a, ra.o.sellToken, ra.o.sellAmount, rb.o.sellAmount, ra.o.nonce)) {
-            revert Insufficient(ra.o.idx);
-        }
-        accounts[ra.o.idx] = a;
-        L.Account memory c = _touch(b, rb.o.idx);
-        if (!L.applySide(c, rb.o.sellToken, rb.o.sellAmount, ra.o.sellAmount, rb.o.nonce)) {
-            revert Insufficient(rb.o.idx);
-        }
-        accounts[rb.o.idx] = c;
+        _side(b, ra.o, ethAmount, usdAmount);
+        _side(b, rb.o, ethAmount, usdAmount);
         uint256 i = bt.fills.length / L.FILL_BYTES;
         if (ra.forcedPlusOne != 0) forcedStatus[b][ra.forcedPlusOne - 1] = uint16(2 * i + 1);
         if (rb.forcedPlusOne != 0) forcedStatus[b][rb.forcedPlusOne - 1] = uint16(2 * i + 2);
-        bt.fills = bytes.concat(bt.fills, _packed(ra.o), ra.sig, _packed(rb.o), rb.sig);
-        consumed[ha] = true;
-        consumed[hb] = true;
-        delete book[ha];
-        delete book[hb];
-        _step(keccak256(abi.encode("fill", b, ha, hb)));
+        bt.fills = bytes.concat(
+            bt.fills, _packed(ra.o), ra.sig, _packed(rb.o), rb.sig, abi.encodePacked(ethAmount, usdAmount)
+        );
+        _settle(ha, ra.o);
+        _settle(hb, rb.o);
+        _step(keccak256(abi.encode("fill", b, ha, hb, ethAmount, usdAmount)));
         emit Filled(b, ha, hb);
+    }
+
+    /// One side through ClearingLedger (the function L1 replays). Reverts `Insufficient` if the
+    /// balance can't cover the sale or the order has less left than this fill sells.
+    function _side(uint256 b, L.PackedOrder memory o, uint128 ethAmount, uint128 usdAmount) internal {
+        L.Account memory a = _touch(b, o.idx);
+        (uint128 give, uint128 got) = L.sideFlows(o, ethAmount, usdAmount);
+        if (!L.applySide(a, o.sellToken, o.sellAmount, o.nonce, give, got)) revert Insufficient(o.idx);
+        accounts[o.idx] = a;
+    }
+
+    /// After a fill: the order rests on while it's its trader's partly filled order.
+    function _settle(bytes32 h, L.PackedOrder memory o) internal {
+        L.Account storage a = accounts[o.idx];
+        if (a.nonce == o.nonce && a.filled != 0) return;
+        consumed[h] = true;
+        delete book[h];
     }
 
     function seal() external onlyOperator returns (uint256 b) {

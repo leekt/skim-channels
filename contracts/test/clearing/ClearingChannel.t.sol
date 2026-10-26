@@ -189,8 +189,16 @@ abstract contract ClearingChannelBase is Test {
         x.sig = abi.encodePacked(r, s, v);
     }
 
+    /// A full fill: each order's whole sellAmount.
     function _fill(O memory a, O memory b) internal pure returns (bytes memory) {
-        return bytes.concat(L.encodeOrder(a.idx, a.o), a.sig, L.encodeOrder(b.idx, b.o), b.sig);
+        (uint128 e, uint128 u) = R.fullAmounts(a.o, b.o);
+        return _fill(a, b, e, u);
+    }
+
+    function _fill(O memory a, O memory b, uint128 ethAmount, uint128 usdAmount) internal pure returns (bytes memory) {
+        return bytes.concat(
+            L.encodeOrder(a.idx, a.o), a.sig, L.encodeOrder(b.idx, b.o), b.sig, abi.encodePacked(ethAmount, usdAmount)
+        );
     }
 
     /// alice (0) sells 1 ETH for ≥ 6990; bob (1) sells 7000 USD for ≥ 1 ETH.
@@ -269,8 +277,8 @@ abstract contract ClearingChannelBase is Test {
     function _batch1() internal view returns (bytes memory fills, L.Account[] memory n) {
         fills = _ab(1, 1);
         n = _copyFin();
-        n[0] = L.Account(2 ether, 7000, 3 ether, 0, 0, 0, 1, 0);
-        n[1] = L.Account(uint128(ETH1), 13_000, 0, 20_000, 0, 0, 1, 0);
+        n[0] = L.Account(2 ether, 7000, 3 ether, 0, 0, 0, 1, 0, 0);
+        n[1] = L.Account(uint128(ETH1), 13_000, 0, 20_000, 0, 0, 1, 0, 0);
     }
 }
 
@@ -315,8 +323,8 @@ contract ClearingChannelTest is ClearingChannelBase {
         assertEq(op.balance - before, 1 ether, "and withdrawn");
         // Batch 2 continues from the committed state.
         L.Account[] memory m = _copyFin();
-        m[0] = L.Account(1 ether, 14_000, 3 ether, 0, 0, 0, 2, 0);
-        m[1] = L.Account(2 ether, 6000, 0, 20_000, 0, 0, 2, 0);
+        m[0] = L.Account(1 ether, 14_000, 3 ether, 0, 0, 0, 2, 0, 0);
+        m[1] = L.Account(2 ether, 6000, 0, 20_000, 0, 0, 2, 0, 0);
         _propose(_ab(2, 2), m, 0, 0, "");
         _finalize(m);
     }
@@ -326,8 +334,8 @@ contract ClearingChannelTest is ClearingChannelBase {
         ch.requestWithdraw(R.ETH, 2 ether); // alice keeps 1 ETH to trade
         (bytes memory fills,) = _batch1();
         L.Account[] memory n = _copyFin();
-        n[0] = L.Account(0, 7000, 3 ether, 0, 2 ether, 0, 1, 1); // 3 − 2 withdrawn − 1 sold
-        n[1] = L.Account(uint128(ETH1), 13_000, 0, 20_000, 0, 0, 1, 0);
+        n[0] = L.Account(0, 7000, 3 ether, 0, 2 ether, 0, 1, 1, 0); // 3 − 2 withdrawn − 1 sold
+        n[1] = L.Account(uint128(ETH1), 13_000, 0, 20_000, 0, 0, 1, 0, 0);
         _propose(fills, n, 1, 0, "");
         vm.expectRevert(ClearingStorage.NotWrong.selector);
         _challengeAccount(0, n, fills);
@@ -357,8 +365,8 @@ contract ClearingChannelTest is ClearingChannelBase {
     function test_outOfBandFill() public {
         bytes memory fills = _fill(_order(0, R.ETH, uint128(ETH1), 6990, 1), _order(1, R.USD, 7200, uint128(ETH1), 1));
         L.Account[] memory n = _copyFin();
-        n[0] = L.Account(2 ether, 7200, 3 ether, 0, 0, 0, 1, 0);
-        n[1] = L.Account(uint128(ETH1), 12_800, 0, 20_000, 0, 0, 1, 0);
+        n[0] = L.Account(2 ether, 7200, 3 ether, 0, 0, 0, 1, 0, 0);
+        n[1] = L.Account(uint128(ETH1), 12_800, 0, 20_000, 0, 0, 1, 0, 0);
         _propose(fills, n, 0, 0, "");
         vm.prank(watcher);
         D.challengeFill(fills, 0, _f0(), _p0(), _b0());
@@ -386,8 +394,8 @@ contract ClearingChannelTest is ClearingChannelBase {
         _finalize(n);
         // The same signed orders again in batch 2.
         L.Account[] memory m = _copyFin();
-        m[0] = L.Account(1 ether, 14_000, 3 ether, 0, 0, 0, 1, 0);
-        m[1] = L.Account(2 ether, 6000, 0, 20_000, 0, 0, 1, 0);
+        m[0] = L.Account(1 ether, 14_000, 3 ether, 0, 0, 0, 1, 0, 0);
+        m[1] = L.Account(2 ether, 6000, 0, 20_000, 0, 0, 1, 0, 0);
         _propose(fills, m, 0, 0, "");
         vm.prank(watcher);
         vm.expectRevert(ClearingStorage.NotWrong.selector);
@@ -402,8 +410,8 @@ contract ClearingChannelTest is ClearingChannelBase {
             _fill(_order(2, R.ETH, uint128(ETH1), 6990, 2), _order(1, R.USD, 7000, uint128(ETH1), 2))
         );
         L.Account[] memory n = _copyFin();
-        n[1] = L.Account(2 ether, 6000, 0, 20_000, 0, 0, 2, 0);
-        n[2] = L.Account(0, 24_000, 1 ether, 10_000, 0, 0, 2, 0); // whatever it claims
+        n[1] = L.Account(2 ether, 6000, 0, 20_000, 0, 0, 2, 0, 0);
+        n[2] = L.Account(0, 24_000, 1 ether, 10_000, 0, 0, 2, 0, 0); // whatever it claims
         _propose(fills, n, 0, 0, "");
         _challengeAccount(2, n, fills);
     }
@@ -416,7 +424,7 @@ contract ClearingChannelTest is ClearingChannelBase {
         _propose(fills, n, 1, 0, "");
         _challengeAccount(0, n, fills);
         // Applying it without the deposits it covers.
-        n[0] = L.Account(0, 7000, 0, 0, 0, 0, 1, 1);
+        n[0] = L.Account(0, 7000, 0, 0, 0, 0, 1, 1, 0);
         _propose(fills, n, 1, 0, "");
         _challengeAccount(0, n, fills);
         // Claiming deposits L1 doesn't have.
@@ -471,7 +479,7 @@ contract ClearingChannelTest is ClearingChannelBase {
         _propose(fills, n, 0, 0, "");
         _finalize(n);
         L.Account[] memory m = _copyFin();
-        m[0] = L.Account(1 ether, 7000, 2 ether, 0, 0, 0, 1, 0); // "un-applies" 1 ETH of deposits
+        m[0] = L.Account(1 ether, 7000, 2 ether, 0, 0, 0, 1, 0, 0); // "un-applies" 1 ETH of deposits
         _propose("", m, 0, 0, "");
         _challengeAccount(0, m, "");
     }
@@ -480,7 +488,7 @@ contract ClearingChannelTest is ClearingChannelBase {
         vm.prank(who[2]);
         ch.requestWithdraw(R.ETH, 5 ether); // carol has 1
         L.Account[] memory n = _copyFin();
-        n[2] = L.Account(0, 10_000, 1 ether, 10_000, 1 ether, 0, 0, 1);
+        n[2] = L.Account(0, 10_000, 1 ether, 10_000, 1 ether, 0, 0, 1, 0);
         _propose("", n, 1, 0, "");
         vm.expectRevert(ClearingStorage.NotWrong.selector);
         _challengeAccount(2, n, "");
@@ -490,7 +498,7 @@ contract ClearingChannelTest is ClearingChannelBase {
         vm.prank(who[2]);
         ch.requestWithdraw(R.ETH, 1 ether);
         L.Account[] memory n = _copyFin();
-        n[2] = L.Account(0, 0, 0, 0, 0, 0, 0, 1); // consumed, nothing paid, deposits left unapplied
+        n[2] = L.Account(0, 0, 0, 0, 0, 0, 0, 1, 0); // consumed, nothing paid, deposits left unapplied
         _propose("", n, 1, 0, "");
         _challengeAccount(2, n, "");
     }
@@ -501,7 +509,7 @@ contract ClearingChannelTest is ClearingChannelBase {
         vm.prank(who[2]);
         ch.requestWithdraw(R.ETH, 0.5 ether);
         L.Account[] memory n = _copyFin();
-        n[2] = L.Account(0, 10_000, 1 ether, 10_000, 1 ether, 0, 0, 2); // applies both
+        n[2] = L.Account(0, 10_000, 1 ether, 10_000, 1 ether, 0, 0, 2, 0); // applies both
         _propose("", n, 1, 0, ""); // but the cursor covers only the first
         _challengeAccount(2, n, "");
     }
@@ -514,8 +522,8 @@ contract ClearingChannelTest is ClearingChannelBase {
             _fill(_order(2, R.ETH, uint128(ETH1), 6990, 2), _order(1, R.USD, 7000, uint128(ETH1), 2))
         );
         L.Account[] memory n = _copyFin();
-        n[1] = L.Account(2 ether, 6000, 0, 20_000, 0, 0, 2, 0);
-        n[2] = L.Account(0, 17_000, 1 ether, 10_000, 0, 0, 2, 0); // the state where replay stops
+        n[1] = L.Account(2 ether, 6000, 0, 20_000, 0, 0, 2, 0, 0);
+        n[2] = L.Account(0, 17_000, 1 ether, 10_000, 0, 0, 2, 0, 0); // the state where replay stops
         _propose(fills, n, 0, 0, "");
         _challengeAccount(2, n, fills);
     }
@@ -523,7 +531,7 @@ contract ClearingChannelTest is ClearingChannelBase {
     function test_falseEvidenceCannotConvictAnHonestBatch() public {
         (bytes memory fills, L.Account[] memory n) = _batch1();
         _propose(fills, n, 0, 0, "");
-        L.Account memory fake = L.Account(9 ether, 0, 9 ether, 0, 0, 0, 0, 0);
+        L.Account memory fake = L.Account(9 ether, 0, 9 ether, 0, 0, 0, 0, 0, 0);
         bytes memory other = _ab(9, 9); // (signs through ch.domain(): before expectRevert)
         vm.startPrank(watcher);
         vm.expectRevert(ClearingStorage.BadProof.selector);
@@ -549,7 +557,7 @@ contract ClearingChannelTest is ClearingChannelBase {
     function test_indexBeyondUsersRejected() public {
         fin.push();
         L.Account[] memory n = _copyFin();
-        n[3] = L.Account(1, 0, 0, 0, 0, 0, 0, 0);
+        n[3] = L.Account(1, 0, 0, 0, 0, 0, 0, 0, 0);
         (bytes memory u, bytes32[] memory proof) = _updates(n);
         fin.pop();
         vm.prank(op);
@@ -561,7 +569,7 @@ contract ClearingChannelTest is ClearingChannelBase {
         vm.prank(who[2]);
         ch.requestWithdraw(R.ETH, 1 ether);
         L.Account[] memory n = _copyFin();
-        n[2] = L.Account(0, 10_000, 1 ether, 10_000, 1 ether, 0, 0, 1);
+        n[2] = L.Account(0, 10_000, 1 ether, 10_000, 1 ether, 0, 0, 1, 0);
         _propose("", n, 1, 0, "");
         _finalize(n);
         vm.warp(block.timestamp + 2 days);
@@ -623,8 +631,8 @@ contract ClearingChannelTest is ClearingChannelBase {
         ch.forceOrder(c.o);
         // The operator keeps proposing without serving it.
         L.Account[] memory m = _copyFin();
-        m[0] = L.Account(1 ether, 14_000, 3 ether, 0, 0, 0, 2, 0);
-        m[1] = L.Account(2 ether, 6000, 0, 20_000, 0, 0, 2, 0);
+        m[0] = L.Account(1 ether, 14_000, 3 ether, 0, 0, 0, 2, 0, 0);
+        m[1] = L.Account(2 ether, 6000, 0, 20_000, 0, 0, 2, 0, 0);
         _propose(_ab(2, 2), m, 0, 0, "");
         vm.expectRevert(ClearingStorage.NotOverdue.selector);
         D.freeze();

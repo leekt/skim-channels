@@ -22,6 +22,12 @@ contract ClearingDisputes is ClearingStorage {
         return _cfg;
     }
 
+    /// The account-leaf format this session's code commits to (ClearingLedger.LEAF_FORMAT; a
+    /// session without this view uses format 0: no partial fills, 108-byte leaves).
+    function leafFormat() external pure returns (uint256) {
+        return L.LEAF_FORMAT;
+    }
+
     function state()
         external
         view
@@ -101,6 +107,7 @@ contract ClearingDisputes is ClearingStorage {
         if (!fault) {
             R.Order memory a = L.toOrder(pa, _users[pa.idx]);
             R.Order memory b = L.toOrder(pb, _users[pb.idx]);
+            (uint128 e, uint128 u) = L.amountsAt(fills, i);
             fault = _cfg.codec
                 .fillFault(
                     a,
@@ -109,6 +116,7 @@ contract ClearingDisputes is ClearingStorage {
                     b,
                     sb,
                     _forcedAuth[R.orderHash(b)],
+                    [e, u],
                     prices[s],
                     _cfg.bandBps,
                     heads[s],

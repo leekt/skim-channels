@@ -5,11 +5,13 @@ pragma solidity ^0.8.28;
 ///         executor) and by L1 (ClearingCodec in disputes; ClearingChecker in the cost
 ///         control). Pure: same inputs, same answer on either chain.
 ///
-/// Two assets: token 0 is ETH (wei), token 1 is USD (6 decimals). An order sells
-/// `sellAmount` of `sellToken` for at least `buyAmount` of the other. A fill matches two
-/// orders on opposite sides; each side gives its full `sellAmount` and must receive at least
-/// its `buyAmount`. The fill's price must be within `bandBps` of an L1 price read at the
-/// batch's anchor, and the anchor block must not be past either order's expiry.
+/// Two assets: token 0 is ETH (wei), token 1 is USD (6 decimals). An order sells up to
+/// `sellAmount` of `sellToken` at no worse a price than `buyAmount` for all of it. A fill
+/// matches two orders on opposite sides and exchanges `ethAmount` ETH for `usdAmount` USD:
+/// possibly part of either order (how much of each is left is account state, see
+/// ClearingLedger). Each order's limit price must be met, the fill's price must be within
+/// `bandBps` of the L1 price at the fill's head, and that head must not be past either
+/// order's expiry. A full fill gives each order's whole `sellAmount`.
 library ClearingRules {
     uint8 internal constant ETH = 0;
     uint8 internal constant USD = 1;
@@ -72,24 +74,47 @@ library ClearingRules {
         return keccak256(abi.encode(o));
     }
 
-    /// USD (6 decimals) per 1 ETH, as the fill executes.
-    function fillPrice(Order memory a, Order memory b) internal pure returns (uint256) {
-        (Order memory eth, Order memory usd) = a.sellToken == ETH ? (a, b) : (b, a);
-        return uint256(usd.sellAmount) * 1e18 / eth.sellAmount;
+    /// The amounts a full fill exchanges: each order's whole `sellAmount`.
+    function fullAmounts(Order memory a, Order memory b) internal pure returns (uint128 ethAmount, uint128 usdAmount) {
+        return a.sellToken == ETH ? (a.sellAmount, b.sellAmount) : (b.sellAmount, a.sellAmount);
     }
 
-    function check(Order memory a, Order memory b, uint256 l1Price, uint256 bandBps, uint256 anchorBlock)
+    /// A full fill (each order's whole `sellAmount`).
+    function check(Order memory a, Order memory b, uint256 l1Price, uint256 bandBps, uint256 head)
         internal
         pure
         returns (Reject)
     {
+        (uint128 e, uint128 u) = fullAmounts(a, b);
+        return check(a, b, e, u, l1Price, bandBps, head);
+    }
+
+    /// A fill of `ethAmount` ETH against `usdAmount` USD between orders `a` and `b`. Limits are
+    /// prices: the ETH seller gets at least its `buyAmount / sellAmount` USD per ETH, the USD
+    /// seller pays at most its `sellAmount / buyAmount`. How much of each order is left is
+    /// checked against account state (ClearingLedger.applySide), not here.
+    function check(
+        Order memory a,
+        Order memory b,
+        uint128 ethAmount,
+        uint128 usdAmount,
+        uint256 l1Price,
+        uint256 bandBps,
+        uint256 head
+    ) internal pure returns (Reject) {
         if (a.sellToken > USD || b.sellToken > USD) return Reject.BadToken;
-        if (a.sellAmount == 0 || b.sellAmount == 0) return Reject.ZeroAmount;
+        if (a.sellAmount == 0 || b.sellAmount == 0 || ethAmount == 0 || usdAmount == 0) return Reject.ZeroAmount;
         if (a.sellToken == b.sellToken) return Reject.SameSide;
         if (a.trader == b.trader) return Reject.SameTrader;
-        if (a.sellAmount < b.buyAmount || b.sellAmount < a.buyAmount) return Reject.NotCrossing;
-        if (anchorBlock > a.expiry || anchorBlock > b.expiry) return Reject.Expired;
-        uint256 p = fillPrice(a, b);
+        (Order memory e, Order memory u) = a.sellToken == ETH ? (a, b) : (b, a);
+        if (ethAmount > e.sellAmount || usdAmount > u.sellAmount) return Reject.NotCrossing;
+        // e: usdAmount / ethAmount ≥ e.buyAmount / e.sellAmount; u: ethAmount / usdAmount ≥ u.buyAmount / u.sellAmount
+        if (
+            uint256(usdAmount) * e.sellAmount < uint256(e.buyAmount) * ethAmount
+                || uint256(ethAmount) * u.sellAmount < uint256(u.buyAmount) * usdAmount
+        ) return Reject.NotCrossing;
+        if (head > a.expiry || head > b.expiry) return Reject.Expired;
+        uint256 p = uint256(usdAmount) * 1e18 / ethAmount;
         uint256 diff = p > l1Price ? p - l1Price : l1Price - p;
         if (diff * 10_000 > bandBps * l1Price) return Reject.OutsideBand;
         return Reject.None;

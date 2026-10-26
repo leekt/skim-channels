@@ -13,13 +13,15 @@ import {ClearingRules as R} from "./ClearingRules.sol";
 library ClearingLedger {
     /// order: trader index (4) ‖ sellToken (1) ‖ sellAmount (16) ‖ buyAmount (16) ‖ nonce (8) ‖ expiry (8)
     uint256 internal constant ORDER_BYTES = 53;
-    /// fill: order a ‖ sig a (65) ‖ order b ‖ sig b (65)
-    uint256 internal constant FILL_BYTES = 236;
-    /// leaf: eth, usd, ethIn, usdIn, ethOut, usdOut (16 each) ‖ nonce (8) ‖ requests (4)
-    uint256 internal constant LEAF_BYTES = 108;
+    /// fill: order a ‖ sig a (65) ‖ order b ‖ sig b (65) ‖ ethAmount (16) ‖ usdAmount (16)
+    uint256 internal constant FILL_BYTES = 268;
+    /// leaf: eth, usd, ethIn, usdIn, ethOut, usdOut (16 each) ‖ nonce (8) ‖ requests (4) ‖ filled (16)
+    uint256 internal constant LEAF_BYTES = 124;
     /// update: index (4) ‖ old leaf ‖ new leaf
-    uint256 internal constant UPDATE_BYTES = 220;
-    bytes32 internal constant LEAF_TAG = keccak256("skim-clearing/account-leaf/v0");
+    uint256 internal constant UPDATE_BYTES = 252;
+    /// The leaf format this code commits to (1: with partial fills). Sessions report it.
+    uint256 internal constant LEAF_FORMAT = 1;
+    bytes32 internal constant LEAF_TAG = keccak256("skim-clearing/account-leaf/v1");
 
     struct Account {
         uint128 eth; // free balance
@@ -28,8 +30,11 @@ library ClearingLedger {
         uint128 usdIn;
         uint128 ethOut; // cumulative withdrawals released (claimable on L1)
         uint128 usdOut;
-        uint64 nonce; // highest order nonce consumed
+        uint64 nonce; // the trader's latest order: the highest nonce that has filled
         uint32 requests; // withdrawal requests applied
+        /// How much of order `nonce`'s sellAmount has been sold, while it's partly filled; 0 once
+        /// it's complete. At most one partly filled order per trader: a newer nonce ends it.
+        uint128 filled;
     }
 
     /// A packed order with its trader as an index (L1 maps it to an address).
@@ -45,7 +50,7 @@ library ClearingLedger {
     function leafHash(Account memory a) internal pure returns (bytes32) {
         if (
             a.eth == 0 && a.usd == 0 && a.ethIn == 0 && a.usdIn == 0 && a.ethOut == 0 && a.usdOut == 0 && a.nonce == 0
-                && a.requests == 0
+                && a.requests == 0 && a.filled == 0
         ) return 0;
         return keccak256(abi.encode(LEAF_TAG, a));
     }
@@ -59,10 +64,11 @@ library ClearingLedger {
         a.usdOut = uint128(bytes16(b[80:96]));
         a.nonce = uint64(bytes8(b[96:104]));
         a.requests = uint32(bytes4(b[104:108]));
+        a.filled = uint128(bytes16(b[108:124]));
     }
 
     function encodeLeaf(Account memory a) internal pure returns (bytes memory) {
-        return abi.encodePacked(a.eth, a.usd, a.ethIn, a.usdIn, a.ethOut, a.usdOut, a.nonce, a.requests);
+        return abi.encodePacked(a.eth, a.usd, a.ethIn, a.usdIn, a.ethOut, a.usdOut, a.nonce, a.requests, a.filled);
     }
 
     function decodeOrder(bytes calldata b) internal pure returns (PackedOrder memory o) {
@@ -89,6 +95,23 @@ library ClearingLedger {
         sigA = f[53:118];
         b = decodeOrder(f[118:171]);
         sigB = f[171:236];
+    }
+
+    /// The amounts fill `i` exchanges: `ethAmount` ETH for `usdAmount` USD.
+    function amountsAt(bytes calldata fills, uint256 i) internal pure returns (uint128 ethAmount, uint128 usdAmount) {
+        bytes calldata f = fills[i * FILL_BYTES:(i + 1) * FILL_BYTES];
+        ethAmount = uint128(bytes16(f[236:252]));
+        usdAmount = uint128(bytes16(f[252:268]));
+    }
+
+    /// One fill side's flows: what the trader of `o` gives and receives in a fill of
+    /// `ethAmount` ETH for `usdAmount` USD.
+    function sideFlows(PackedOrder memory o, uint128 ethAmount, uint128 usdAmount)
+        internal
+        pure
+        returns (uint128 give, uint128 receive_)
+    {
+        return o.sellToken == R.ETH ? (ethAmount, usdAmount) : (usdAmount, ethAmount);
     }
 
     function toOrder(PackedOrder memory p, address trader) internal pure returns (R.Order memory) {
@@ -120,24 +143,34 @@ library ClearingLedger {
         acc.requests += 1;
     }
 
-    /// One side of a fill: the trader gives `sellAmount` of `sellToken` and receives
-    /// `receiveAmount` of the other. False if the nonce isn't fresh or the balance can't
-    /// cover the sale (collateral, checked fill by fill in execution order).
-    function applySide(Account memory acc, uint8 sellToken, uint128 sellAmount, uint128 receiveAmount, uint64 nonce)
-        internal
-        pure
-        returns (bool)
-    {
-        if (nonce <= acc.nonce) return false;
+    /// One side of a fill: the trader of order `nonce` (selling up to `orderSell` of
+    /// `sellToken`) gives `give` of it and receives `receive_` of the other. A newer nonce
+    /// starts a new order (and ends any partly filled one); the same nonce continues the
+    /// trader's partly filled order. False if the order is older or already complete, if the
+    /// fill would sell more than the order's size, or if the balance can't cover the sale
+    /// (collateral, checked fill by fill in execution order).
+    function applySide(
+        Account memory acc,
+        uint8 sellToken,
+        uint128 orderSell,
+        uint64 nonce,
+        uint128 give,
+        uint128 receive_
+    ) internal pure returns (bool) {
+        // (Nonce 0 is never an order: it's not above a fresh account's 0, and filled is 0.)
+        if (nonce < acc.nonce || (nonce == acc.nonce && acc.filled == 0)) return false;
+        uint256 sold = (nonce == acc.nonce ? uint256(acc.filled) : 0) + give;
+        if (sold > orderSell) return false;
         acc.nonce = nonce;
+        acc.filled = sold == orderSell ? 0 : uint128(sold);
         if (sellToken == R.ETH) {
-            if (acc.eth < sellAmount) return false;
-            acc.eth -= sellAmount;
-            acc.usd += receiveAmount;
+            if (acc.eth < give) return false;
+            acc.eth -= give;
+            acc.usd += receive_;
         } else {
-            if (acc.usd < sellAmount) return false;
-            acc.usd -= sellAmount;
-            acc.eth += receiveAmount;
+            if (acc.usd < give) return false;
+            acc.usd -= give;
+            acc.eth += receive_;
         }
         return true;
     }

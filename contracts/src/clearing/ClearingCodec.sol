@@ -37,16 +37,18 @@ contract ClearingCodec {
         for (uint256 i; i < n; ++i) {
             bytes calldata u = updates[i * w:(i + 1) * w];
             idxs[i] = uint32(bytes4(u[0:4]));
-            olds[i] = L.leafHash(L.decodeLeaf(u[4:112]));
-            news[i] = L.leafHash(L.decodeLeaf(u[112:220]));
+            olds[i] = L.leafHash(L.decodeLeaf(u[4:4 + L.LEAF_BYTES]));
+            news[i] = L.leafHash(L.decodeLeaf(u[4 + L.LEAF_BYTES:4 + 2 * L.LEAF_BYTES]));
         }
         lastIdx = n == 0 ? 0 : idxs[n - 1];
         (oldRoot, newRoot) = SparseTree16.transition(idxs, olds, news, proof);
     }
 
-    /// Whether a fill breaks ClearingRules (band against the batch's L1 price, limits,
-    /// expiry, same side, same trader) or carries an order its trader didn't authorize: neither
-    /// a typed signature by the trader nor a forced order the trader posted on L1 (`authA/B`).
+    /// Whether a fill of `amounts` (ETH, USD) breaks ClearingRules (band against its segment's
+    /// L1 price, limit prices, expiry at its head, same side, same trader) or carries an order
+    /// its trader didn't authorize: neither a typed signature by the trader nor a forced order
+    /// the trader posted on L1 (`authA/B`). How much of each order was left is an account
+    /// matter (challengeAccount).
     function fillFault(
         R.Order calldata a,
         bytes calldata sigA,
@@ -54,12 +56,13 @@ contract ClearingCodec {
         R.Order calldata b,
         bytes calldata sigB,
         bool authB,
+        uint128[2] calldata amounts,
         uint256 l1Price,
         uint256 bandBps,
-        uint64 anchorBlock,
+        uint64 head,
         bytes32 domain
     ) external pure returns (bool) {
-        return R.check(a, b, l1Price, bandBps, anchorBlock) != R.Reject.None
+        return R.check(a, b, amounts[0], amounts[1], l1Price, bandBps, head) != R.Reject.None
             || (!authA && ChannelTypes.recoverSigner(R.orderDigest(domain, a), sigA) != a.trader)
             || (!authB && ChannelTypes.recoverSigner(R.orderDigest(domain, b), sigB) != b.trader);
     }
@@ -92,13 +95,15 @@ contract ClearingCodec {
         uint256 n = fills.length / L.FILL_BYTES;
         for (uint256 i; i < n; ++i) {
             (L.PackedOrder memory a,, L.PackedOrder memory b,) = L.fillAt(fills, i);
-            if (a.idx == idx && !L.applySide(acc, a.sellToken, a.sellAmount, b.sellAmount, a.nonce)) {
-                return (acc, false);
-            }
-            if (b.idx == idx && !L.applySide(acc, b.sellToken, b.sellAmount, a.sellAmount, b.nonce)) {
-                return (acc, false);
-            }
+            (uint128 e, uint128 u) = L.amountsAt(fills, i);
+            if (a.idx == idx && !_side(acc, a, e, u)) return (acc, false);
+            if (b.idx == idx && !_side(acc, b, e, u)) return (acc, false);
         }
         return (acc, true);
+    }
+
+    function _side(L.Account memory acc, L.PackedOrder memory o, uint128 e, uint128 u) internal pure returns (bool) {
+        (uint128 give, uint128 got) = L.sideFlows(o, e, u);
+        return L.applySide(acc, o.sellToken, o.sellAmount, o.nonce, give, got);
     }
 }

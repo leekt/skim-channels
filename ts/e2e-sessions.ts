@@ -182,7 +182,7 @@ async function run(l1: Chain) {
     await send(ch, "finalize", [], op, "operator: finalize");
     await A.finalized();
     const anchor = A.batches.find((b) => b.no === String(BigInt(A.current.no)))?.snap.number ?? A.current.snap.number;
-    console.log(`     ${label}: pinned L1 block ${anchor}, ${(p.fills.length - 2) / 2 / 236} fill(s)`);
+    console.log(`     ${label}: pinned L1 block ${anchor}, ${(p.fills.length - 2) / 2 / 268} fill(s)`);
     return anchor;
   }
 
