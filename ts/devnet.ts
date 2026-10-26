@@ -191,6 +191,17 @@ async function main() {
   const ch = sessionC(cur.channel);
   if (resume) note(`resuming session ${id} (${ch.address}) from its journal`);
   if ((await l1.read<bigint>(ch, "bondCredit", [op.address])) > 0n) await l1.send(ch, "withdrawBond", [], op);
+  /**
+   * When an earlier session's pending proposal was made (0: none), whatever its code's layout:
+   * `Pending` gained a field (rounds) after the 4th word, so the time is the 4th word of an
+   * 8-word return and the 5th of a 9-word one.
+   */
+  async function pendingAt(session: Address): Promise<bigint> {
+    const { data } = await l1.pub.call({ to: session, data: "0xe20ccec3" }); // pending()
+    const words = ((data ?? "0x").length - 2) / 64;
+    const word = (i: number) => BigInt(`0x${data!.slice(2 + 64 * i, 2 + 64 * (i + 1))}`);
+    return words >= 9 ? word(4) : word(3);
+  }
   /** An earlier session: start closing it, close it when nothing is pending, then take the maker's float back. */
   async function closeOld(s: App["sessions"][number]) {
     const c = sessionC(s.channel);
@@ -201,10 +212,10 @@ async function main() {
       ph = 1;
     }
     if (ph === 1) {
-      const pend = await l1.read<any>(c, "pending");
+      const at = await pendingAt(s.channel);
       const now = (await l1.pub.getBlock()).timestamp;
-      if (pend.at !== 0n && now >= pend.at + BigInt(WINDOW)) await l1.send(c, "finalize", [], op);
-      if ((await l1.read<any>(c, "pending")).at !== 0n) return;
+      if (at !== 0n && now >= at + BigInt(WINDOW)) await l1.send(c, "finalize", [], op);
+      if ((await pendingAt(s.channel)) !== 0n) return;
       await l1.send(c, "close", [], op);
       note(`session ${s.id}: closed. Its users redeem to their wallet or roll over into the vault`);
       ph = 2;
